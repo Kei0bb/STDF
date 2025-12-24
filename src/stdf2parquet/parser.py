@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Generator
 
 from pystdf.IO import Parser
-from pystdf.Records import V4
+from pystdf import V4
 
 
 # Mapping from pystdf record classes to record type names
@@ -42,7 +42,6 @@ class RecordCollector:
 
     def __init__(self):
         self.records: list[tuple[str, dict]] = []
-        self._current_record_class = None
 
     def __call__(self, record_class, field_values):
         """Callback for pystdf parser."""
@@ -51,9 +50,14 @@ class RecordCollector:
             record_data = {}
 
             # Map field names to values
-            field_names = [f[0] for f in record_class.fieldMap]
-            for name, value in zip(field_names, field_values):
-                record_data[name] = value
+            try:
+                field_names = [f[0] for f in record_class.fieldMap]
+                for name, value in zip(field_names, field_values):
+                    record_data[name] = value
+            except Exception:
+                # Fallback: use indexed field names
+                for i, value in enumerate(field_values):
+                    record_data[f"field_{i}"] = value
 
             self.records.append((record_type, record_data))
 
@@ -70,18 +74,17 @@ def parse_stdf(file_path: Path) -> Generator[tuple[str, dict], None, None]:
     """
     collector = RecordCollector()
 
-    # Create parser and add collector as handler
-    parser = Parser(inp=open(str(file_path), "rb"))
+    # Create parser
+    with open(str(file_path), "rb") as f:
+        parser = Parser(inp=f)
 
-    # Register handler for all known record types
-    for record_class in RECORD_CLASS_MAP.keys():
+        # Add collector as sink
         parser.addSink(collector)
-        break  # Only need to add once
 
-    try:
-        parser.parse()
-    except Exception as e:
-        raise RuntimeError(f"Failed to parse STDF file: {e}")
+        try:
+            parser.parse()
+        except Exception as e:
+            raise RuntimeError(f"Failed to parse STDF file: {e}")
 
     # Yield collected records
     for record in collector.records:
