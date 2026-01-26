@@ -1,6 +1,9 @@
 """CLI interface for STDF Platform."""
 
 import sys
+import gzip
+import tempfile
+import shutil
 from pathlib import Path
 
 import click
@@ -45,7 +48,19 @@ def ingest(ctx, stdf_file: Path, verbose: bool):
     console.print(f"  File: {stdf_file}")
     console.print()
 
+    temp_file = None
     try:
+        # Handle gzip files
+        file_to_parse = stdf_file
+        if stdf_file.suffix.lower() == ".gz":
+            console.print("  [dim]Decompressing .gz file...[/dim]")
+            temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".stdf")
+            with gzip.open(stdf_file, "rb") as f_in:
+                shutil.copyfileobj(f_in, temp_file)
+            temp_file.close()
+            file_to_parse = Path(temp_file.name)
+            console.print("  [green]✓[/green] Decompressed")
+
         # Parse STDF
         with Progress(
             SpinnerColumn(),
@@ -53,7 +68,7 @@ def ingest(ctx, stdf_file: Path, verbose: bool):
             console=console,
         ) as progress:
             task = progress.add_task("Parsing STDF file...", total=None)
-            data = parse_stdf(stdf_file)
+            data = parse_stdf(file_to_parse)
             progress.update(task, description="[green]✓[/green] Parsed STDF file")
 
         console.print(f"  Lot ID: {data.lot_id}")
@@ -92,6 +107,13 @@ def ingest(ctx, stdf_file: Path, verbose: bool):
         if verbose:
             console.print_exception()
         sys.exit(1)
+    finally:
+        # Clean up temp file
+        if temp_file:
+            try:
+                Path(temp_file.name).unlink()
+            except Exception:
+                pass
 
 
 @main.command()

@@ -63,7 +63,7 @@ class Config:
         if not config_path.exists():
             return cls()
 
-        with open(config_path) as f:
+        with open(config_path, encoding="utf-8") as f:
             data = yaml.safe_load(f)
 
         if data is None:
