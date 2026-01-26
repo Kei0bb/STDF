@@ -107,3 +107,45 @@ storage:
 ## ライセンス
 
 MIT License
+
+---
+
+## FTPからの自動取得
+
+### config.yaml設定
+
+```yaml
+ftp:
+  host: "ftp.example.com"
+  username: "${FTP_USER}"
+  password: "${FTP_PASSWORD}"
+
+# 品種フィルタ（空なら全品種）
+products:
+  - SCT101A
+  - ABC200B
+
+# テストタイプ
+test_types:
+  - CP
+  - FT
+```
+
+### fetchコマンド
+
+```bash
+# config.yamlの設定で取得・自動ingest
+stdf-platform fetch
+
+# 品種を指定（CLI優先）
+stdf-platform fetch -p SCT101A -p ABC200B
+
+# テストタイプを指定
+stdf-platform fetch -t CP
+
+# ダウンロードのみ（ingestしない）
+stdf-platform fetch --no-ingest
+
+# 最大10ファイルまで
+stdf-platform fetch -n 10
+```

@@ -15,7 +15,7 @@ class FTPConfig:
     username: str = ""
     password: str = ""
     base_path: str = "/"
-    patterns: list[str] = field(default_factory=lambda: ["*.stdf", "*.stdf.gz"])
+    patterns: list[str] = field(default_factory=lambda: ["*.stdf", "*.stdf.gz", "*.std", "*.std.gz"])
 
     def __post_init__(self):
         # Expand environment variables
@@ -32,12 +32,15 @@ class StorageConfig:
     """Storage configuration."""
     data_dir: Path = field(default_factory=lambda: Path("./data"))
     database: Path = field(default_factory=lambda: Path("./data/stdf.duckdb"))
+    download_dir: Path = field(default_factory=lambda: Path("./downloads"))
 
     def __post_init__(self):
         if isinstance(self.data_dir, str):
             self.data_dir = Path(self.data_dir)
         if isinstance(self.database, str):
             self.database = Path(self.database)
+        if isinstance(self.download_dir, str):
+            self.download_dir = Path(self.download_dir)
 
 
 @dataclass
@@ -53,6 +56,8 @@ class Config:
     ftp: FTPConfig = field(default_factory=FTPConfig)
     storage: StorageConfig = field(default_factory=StorageConfig)
     processing: ProcessingConfig = field(default_factory=ProcessingConfig)
+    products: list[str] = field(default_factory=list)  # Product filter
+    test_types: list[str] = field(default_factory=lambda: ["CP", "FT"])
 
     @classmethod
     def load(cls, config_path: Path | None = None) -> "Config":
@@ -72,14 +77,19 @@ class Config:
         ftp_data = data.get("ftp", {})
         storage_data = data.get("storage", {})
         processing_data = data.get("processing", {})
+        products = data.get("products", []) or []
+        test_types = data.get("test_types", ["CP", "FT"]) or ["CP", "FT"]
 
         return cls(
             ftp=FTPConfig(**ftp_data) if ftp_data else FTPConfig(),
             storage=StorageConfig(**storage_data) if storage_data else StorageConfig(),
             processing=ProcessingConfig(**processing_data) if processing_data else ProcessingConfig(),
+            products=products,
+            test_types=test_types,
         )
 
     def ensure_directories(self):
         """Create necessary directories."""
         self.storage.data_dir.mkdir(parents=True, exist_ok=True)
         self.storage.database.parent.mkdir(parents=True, exist_ok=True)
+        self.storage.download_dir.mkdir(parents=True, exist_ok=True)

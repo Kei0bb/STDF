@@ -3,19 +3,31 @@
 ftp:
   host: "ftp.example.com"
   port: 21
-  username: "${FTP_USER}"       # from environment variable
-  password: "${FTP_PASSWORD}"   # from environment variable
-  base_path: "/stdf_data"       # STDF file path on FTP
+  username: "${FTP_USER}"
+  password: "${FTP_PASSWORD}"
+  base_path: "/"
   patterns:
     - "*.stdf"
     - "*.stdf.gz"
     - "*.std"
     - "*.std.gz"
 
+# Product filtering (optional)
+# If empty, all products are fetched
+products:
+  # - SCT101A
+  # - ABC200B
+
+# Test types to include
+test_types:
+  - CP
+  - FT
+
 storage:
-  data_dir: "./data"            # Parquet output directory
-  database: "./data/stdf.duckdb"  # DuckDB file
+  data_dir: "./data"
+  database: "./data/stdf.duckdb"
+  download_dir: "./downloads"  # Temporary download directory
 
 processing:
-  batch_size: 1000              # Record batch size
-  compression: "snappy"         # Parquet compression
+  batch_size: 1000
+  compression: "snappy"

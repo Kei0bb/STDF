@@ -324,5 +324,82 @@ def shell(ctx):
     subprocess.run(["duckdb", str(config.storage.database)])
 
 
+@main.command()
+@click.option("--product", "-p", multiple=True, help="Product filter (can specify multiple)")
+@click.option("--test-type", "-t", multiple=True, help="Test type filter (CP, FT)")
+@click.option("--limit", "-n", type=int, help="Maximum files to fetch")
+@click.option("--ingest/--no-ingest", default=True, help="Auto-ingest after download")
+@click.option("--verbose", "-v", is_flag=True, help="Verbose output")
+@click.pass_context
+def fetch(ctx, product: tuple, test_type: tuple, limit: int | None, ingest: bool, verbose: bool):
+    """
+    Fetch STDF files from FTP server.
+
+    Downloads files from FTP and optionally ingests them into the database.
+    Uses filters from config.yaml, or override with --product and --test-type.
+    """
+    from .ftp_client import fetch_stdf_files
+
+    config: Config = ctx.obj["config"]
+    config.ensure_directories()
+
+    console.print(f"\n[bold]STDF Platform - Fetch from FTP[/bold]")
+    console.print(f"  Host: {config.ftp.host}")
+
+    # Show filters
+    products = list(product) if product else config.products
+    test_types = list(test_type) if test_type else config.test_types
+
+    if products:
+        console.print(f"  Products: {', '.join(products)}")
+    else:
+        console.print("  Products: [dim]all[/dim]")
+    console.print(f"  Test Types: {', '.join(test_types)}")
+    console.print()
+
+    try:
+        # Fetch files
+        downloaded = fetch_stdf_files(
+            config,
+            products=products if products else None,
+            test_types=test_types,
+            limit=limit,
+        )
+
+        if not downloaded:
+            console.print("[yellow]No files found matching filters[/yellow]")
+            return
+
+        console.print(f"\n[green]✓[/green] Downloaded {len(downloaded)} files")
+
+        # Auto-ingest if enabled
+        if ingest:
+            console.print("\n[bold]Ingesting files...[/bold]")
+            storage = ParquetStorage(config.storage)
+            success = 0
+            failed = 0
+
+            for local_path, prod, ttype in downloaded:
+                try:
+                    data = parse_stdf(local_path)
+                    storage.save_stdf_data(data, config.processing.compression)
+                    console.print(f"  [green]✓[/green] {local_path.name} ({prod}/{ttype})")
+                    success += 1
+                except Exception as e:
+                    console.print(f"  [red]✗[/red] {local_path.name}: {e}")
+                    failed += 1
+
+            console.print(f"\n[green]✓[/green] Ingested {success} files")
+            if failed:
+                console.print(f"[yellow]![/yellow] {failed} files failed")
+
+    except Exception as e:
+        console.print(f"[red]Error:[/red] {e}")
+        if verbose:
+            console.print_exception()
+        sys.exit(1)
+
+
 if __name__ == "__main__":
     main()
+

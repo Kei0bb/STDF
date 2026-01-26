@@ -8,7 +8,7 @@ from typing import Generator
 
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn
 
-from .config import FTPConfig
+from .config import FTPConfig, Config
 
 
 class FTPClient:
@@ -41,39 +41,95 @@ class FTPClient:
         self.disconnect()
         return False
 
-    def list_stdf_files(self, path: str | None = None) -> Generator[str, None, None]:
+    def list_directories(self, path: str = "/") -> list[str]:
+        """List directories in the given path."""
+        if self._ftp is None:
+            raise RuntimeError("Not connected to FTP server")
+
+        dirs = []
+        try:
+            self._ftp.cwd(path)
+            items = []
+            self._ftp.retrlines("LIST", items.append)
+
+            for item in items:
+                # Parse FTP LIST output
+                parts = item.split()
+                if len(parts) >= 9 and item.startswith("d"):
+                    # Directory
+                    name = " ".join(parts[8:])
+                    dirs.append(name)
+        except ftplib.error_perm:
+            pass
+
+        return dirs
+
+    def list_stdf_files(
+        self,
+        path: str | None = None,
+        products: list[str] | None = None,
+        test_types: list[str] | None = None,
+    ) -> Generator[tuple[str, str, str, str], None, None]:
         """
-        List STDF files in the given path.
+        List STDF files matching filters.
 
         Args:
-            path: Directory path to list (defaults to base_path)
+            path: Base path to search
+            products: List of product names to filter (None = all)
+            test_types: List of test types (CP, FT) to filter
 
         Yields:
-            Full paths to STDF files
+            Tuple of (full_path, product, test_type, filename)
         """
         if self._ftp is None:
             raise RuntimeError("Not connected to FTP server")
 
-        search_path = path or self.config.base_path
+        base_path = path or self.config.base_path
 
-        try:
-            files = self._ftp.nlst(search_path)
-        except ftplib.error_perm:
-            return
+        # Get product directories
+        product_dirs = self.list_directories(base_path)
 
-        for file_path in files:
-            filename = Path(file_path).name
-            for pattern in self.config.patterns:
-                if fnmatch.fnmatch(filename.lower(), pattern.lower()):
-                    yield file_path
-                    break
+        for product in product_dirs:
+            # Filter by product if specified
+            if products and product not in products:
+                continue
+
+            product_path = f"{base_path}/{product}".replace("//", "/")
+
+            # Get test type directories (CP, FT, etc.)
+            test_type_dirs = self.list_directories(product_path)
+
+            for test_type in test_type_dirs:
+                # Filter by test type if specified
+                if test_types and test_type not in test_types:
+                    continue
+
+                test_type_path = f"{product_path}/{test_type}"
+
+                # Get lot directories
+                lot_dirs = self.list_directories(test_type_path)
+
+                for lot in lot_dirs:
+                    lot_path = f"{test_type_path}/{lot}"
+
+                    # List files in lot directory
+                    try:
+                        files = self._ftp.nlst(lot_path)
+                    except ftplib.error_perm:
+                        continue
+
+                    for file_path in files:
+                        filename = Path(file_path).name
+                        for pattern in self.config.patterns:
+                            if fnmatch.fnmatch(filename.lower(), pattern.lower()):
+                                yield file_path, product, test_type, filename
+                                break
 
     def download_file(
         self,
         remote_path: str,
         local_dir: Path,
         decompress: bool = True,
-        progress: Progress | None = None,
     ) -> Path:
         """
         Download a file from FTP server.
@@ -82,7 +138,6 @@ class FTPClient:
             remote_path: Path on FTP server
             local_dir: Local directory to save to
             decompress: Whether to decompress .gz files
-            progress: Optional Rich progress bar
 
         Returns:
             Path to downloaded file
@@ -100,11 +155,8 @@ class FTPClient:
             self._ftp.retrbinary(f"RETR {remote_path}", f.write)
 
         # Decompress if needed
-        if decompress and (filename.endswith(".gz")):
-            decompressed_path = local_path.with_suffix("")
-            if local_path.suffix == ".gz":
-                # Remove .gz extension
-                decompressed_path = local_dir / filename[:-3]
+        if decompress and filename.endswith(".gz"):
+            decompressed_path = local_dir / filename[:-3]
 
             with gzip.open(local_path, "rb") as f_in:
                 with open(decompressed_path, "wb") as f_out:
@@ -117,28 +169,35 @@ class FTPClient:
         return local_path
 
 
-def download_stdf_files(
-    config: FTPConfig,
-    local_dir: Path,
-    remote_path: str | None = None,
+def fetch_stdf_files(
+    config: Config,
+    products: list[str] | None = None,
+    test_types: list[str] | None = None,
     limit: int | None = None,
-) -> list[Path]:
+) -> list[tuple[Path, str, str]]:
     """
-    Download STDF files from FTP server.
+    Fetch STDF files from FTP server.
 
     Args:
-        config: FTP configuration
-        local_dir: Local directory to save files
-        remote_path: Remote path to search (optional)
+        config: Full configuration
+        products: Product filter (overrides config if provided)
+        test_types: Test type filter (overrides config if provided)
         limit: Maximum number of files to download
 
     Returns:
-        List of downloaded file paths
+        List of tuples (local_path, product, test_type)
     """
+    # Use CLI args if provided, else config
+    filter_products = products if products else (config.products if config.products else None)
+    filter_test_types = test_types if test_types else config.test_types
+
     downloaded = []
 
-    with FTPClient(config) as client:
-        files = list(client.list_stdf_files(remote_path))
+    with FTPClient(config.ftp) as client:
+        files = list(client.list_stdf_files(
+            products=filter_products,
+            test_types=filter_test_types,
+        ))
 
         if limit:
             files = files[:limit]
@@ -151,11 +210,11 @@ def download_stdf_files(
         ) as progress:
             task = progress.add_task("Downloading...", total=len(files))
 
-            for remote_file in files:
-                local_file = client.download_file(
-                    remote_file, local_dir, decompress=True, progress=progress
-                )
-                downloaded.append(local_file)
-                progress.update(task, advance=1)
+            for remote_path, product, test_type, filename in files:
+                # Create subdirectory structure: downloads/product/test_type/
+                local_dir = config.storage.download_dir / product / test_type
+                local_file = client.download_file(remote_path, local_dir, decompress=True)
+                downloaded.append((local_file, product, test_type))
+                progress.update(task, advance=1, description=f"Downloaded {filename}")
 
     return downloaded
