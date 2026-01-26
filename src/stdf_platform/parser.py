@@ -1,41 +1,9 @@
-"""STDF file parser using pystdf."""
+"""STDF binary parser - no external dependencies."""
 
+import struct
 from pathlib import Path
-from typing import Generator
 from dataclasses import dataclass, field
-
-from pystdf.IO import Parser
-from pystdf import V4
-
-
-# Mapping from pystdf record classes to record type names
-RECORD_CLASS_MAP = {
-    V4.far: "FAR",
-    V4.atr: "ATR",
-    V4.mir: "MIR",
-    V4.mrr: "MRR",
-    V4.pcr: "PCR",
-    V4.hbr: "HBR",
-    V4.sbr: "SBR",
-    V4.pmr: "PMR",
-    V4.pgr: "PGR",
-    V4.plr: "PLR",
-    V4.rdr: "RDR",
-    V4.sdr: "SDR",
-    V4.wir: "WIR",
-    V4.wrr: "WRR",
-    V4.wcr: "WCR",
-    V4.pir: "PIR",
-    V4.prr: "PRR",
-    V4.tsr: "TSR",
-    V4.ptr: "PTR",
-    V4.mpr: "MPR",
-    V4.ftr: "FTR",
-    V4.bps: "BPS",
-    V4.eps: "EPS",
-    V4.gdr: "GDR",
-    V4.dtr: "DTR",
-}
+from typing import BinaryIO
 
 
 @dataclass
@@ -55,7 +23,7 @@ class STDFData:
     # Records by type
     wafers: list[dict] = field(default_factory=list)
     parts: list[dict] = field(default_factory=list)
-    tests: dict[int, dict] = field(default_factory=dict)  # test_num -> test info
+    tests: dict[int, dict] = field(default_factory=dict)
     test_results: list[dict] = field(default_factory=list)
     bins_hard: dict[int, dict] = field(default_factory=dict)
     bins_soft: dict[int, dict] = field(default_factory=dict)
@@ -66,155 +34,265 @@ class STDFData:
     _current_part_index: int = 0
 
 
+# STDF Record types (typ, sub)
+REC_FAR = (0, 10)
+REC_MIR = (1, 10)
+REC_MRR = (1, 20)
+REC_PCR = (1, 30)
+REC_HBR = (1, 40)
+REC_SBR = (1, 50)
+REC_PMR = (1, 60)
+REC_WIR = (2, 10)
+REC_WRR = (2, 20)
+REC_WCR = (2, 30)
+REC_PIR = (5, 10)
+REC_PRR = (5, 20)
+REC_TSR = (10, 30)
+REC_PTR = (15, 10)
+REC_MPR = (15, 15)
+REC_FTR = (15, 20)
+REC_SDR = (1, 80)
+
+
 class STDFParser:
-    """Parser for STDF files."""
+    """Binary STDF V4 parser."""
 
     def __init__(self):
         self.data = STDFData()
         self._part_counter = 0
+        self._endian = "<"  # Little endian by default
 
-    def _handle_record(self, record_class, field_values):
-        """Handle a single record from pystdf."""
-        if record_class not in RECORD_CLASS_MAP:
-            return
+    def _read_u1(self, f: BinaryIO) -> int:
+        """Read unsigned 1-byte integer."""
+        data = f.read(1)
+        if len(data) < 1:
+            raise EOFError()
+        return struct.unpack(self._endian + "B", data)[0]
 
-        record_type = RECORD_CLASS_MAP[record_class]
+    def _read_u2(self, f: BinaryIO) -> int:
+        """Read unsigned 2-byte integer."""
+        data = f.read(2)
+        if len(data) < 2:
+            raise EOFError()
+        return struct.unpack(self._endian + "H", data)[0]
 
+    def _read_u4(self, f: BinaryIO) -> int:
+        """Read unsigned 4-byte integer."""
+        data = f.read(4)
+        if len(data) < 4:
+            raise EOFError()
+        return struct.unpack(self._endian + "I", data)[0]
+
+    def _read_i1(self, f: BinaryIO) -> int:
+        """Read signed 1-byte integer."""
+        data = f.read(1)
+        if len(data) < 1:
+            raise EOFError()
+        return struct.unpack(self._endian + "b", data)[0]
+
+    def _read_i2(self, f: BinaryIO) -> int:
+        """Read signed 2-byte integer."""
+        data = f.read(2)
+        if len(data) < 2:
+            raise EOFError()
+        return struct.unpack(self._endian + "h", data)[0]
+
+    def _read_r4(self, f: BinaryIO) -> float:
+        """Read 4-byte float."""
+        data = f.read(4)
+        if len(data) < 4:
+            raise EOFError()
+        return struct.unpack(self._endian + "f", data)[0]
+
+    def _read_cn(self, f: BinaryIO) -> str:
+        """Read character string (length-prefixed)."""
+        length = self._read_u1(f)
+        if length == 0:
+            return ""
+        data = f.read(length)
         try:
-            field_names = [f[0] for f in record_class.fieldMap]
-            record = dict(zip(field_names, field_values))
+            return data.decode("ascii", errors="replace")
         except Exception:
-            return
+            return ""
 
-        # Process based on record type
-        if record_type == "MIR":
-            self._handle_mir(record)
-        elif record_type == "MRR":
-            self._handle_mrr(record)
-        elif record_type == "WIR":
-            self._handle_wir(record)
-        elif record_type == "WRR":
-            self._handle_wrr(record)
-        elif record_type == "PIR":
-            self._handle_pir(record)
-        elif record_type == "PRR":
-            self._handle_prr(record)
-        elif record_type == "PTR":
-            self._handle_ptr(record)
-        elif record_type == "FTR":
-            self._handle_ftr(record)
-        elif record_type == "MPR":
-            self._handle_mpr(record)
-        elif record_type == "HBR":
-            self._handle_hbr(record)
-        elif record_type == "SBR":
-            self._handle_sbr(record)
-        elif record_type == "SDR":
-            self._handle_sdr(record)
+    def _read_header(self, f: BinaryIO) -> tuple[int, int, int]:
+        """Read record header. Returns (rec_len, rec_typ, rec_sub)."""
+        data = f.read(4)
+        if len(data) < 4:
+            raise EOFError()
+        rec_len = struct.unpack(self._endian + "H", data[0:2])[0]
+        rec_typ = data[2]
+        rec_sub = data[3]
+        return rec_len, rec_typ, rec_sub
 
-    def _handle_mir(self, record: dict):
-        """Handle Master Information Record."""
-        self.data.lot_id = record.get("LOT_ID", "")
-        self.data.part_type = record.get("PART_TYP", "")
-        self.data.job_name = record.get("JOB_NAM", "")
-        self.data.job_rev = record.get("JOB_REV", "")
-        self.data.start_time = record.get("START_T", 0)
-        self.data.tester_type = record.get("TSTR_TYP", "")
-        self.data.operator = record.get("OPER_NAM", "")
+    def _parse_far(self, f: BinaryIO, rec_len: int):
+        """Parse File Attributes Record."""
+        cpu_type = self._read_u1(f)
+        stdf_ver = self._read_u1(f)
+        # Set endianness based on CPU type
+        if cpu_type == 1:
+            self._endian = ">"  # Big endian (Sun)
+        else:
+            self._endian = "<"  # Little endian (x86)
 
-    def _handle_mrr(self, record: dict):
-        """Handle Master Results Record."""
-        self.data.finish_time = record.get("FINISH_T", 0)
+    def _parse_mir(self, f: BinaryIO, rec_len: int):
+        """Parse Master Information Record."""
+        start_pos = f.tell()
+        
+        setup_t = self._read_u4(f)
+        start_t = self._read_u4(f)
+        stat_num = self._read_u1(f)
+        mode_cod = chr(self._read_u1(f)) if f.tell() - start_pos < rec_len else ""
+        rtst_cod = chr(self._read_u1(f)) if f.tell() - start_pos < rec_len else ""
+        prot_cod = chr(self._read_u1(f)) if f.tell() - start_pos < rec_len else ""
+        burn_tim = self._read_u2(f) if f.tell() - start_pos < rec_len else 0
+        cmod_cod = chr(self._read_u1(f)) if f.tell() - start_pos < rec_len else ""
+        lot_id = self._read_cn(f) if f.tell() - start_pos < rec_len else ""
+        part_typ = self._read_cn(f) if f.tell() - start_pos < rec_len else ""
+        node_nam = self._read_cn(f) if f.tell() - start_pos < rec_len else ""
+        tstr_typ = self._read_cn(f) if f.tell() - start_pos < rec_len else ""
+        job_nam = self._read_cn(f) if f.tell() - start_pos < rec_len else ""
+        job_rev = self._read_cn(f) if f.tell() - start_pos < rec_len else ""
 
-    def _handle_wir(self, record: dict):
-        """Handle Wafer Information Record."""
-        self.data._current_wafer = record.get("WAFER_ID", "")
+        self.data.lot_id = lot_id
+        self.data.part_type = part_typ
+        self.data.job_name = job_nam
+        self.data.job_rev = job_rev
+        self.data.start_time = start_t
+        self.data.tester_type = tstr_typ
+
+        # Skip remaining optional fields
+        remaining = rec_len - (f.tell() - start_pos)
+        if remaining > 0:
+            f.read(remaining)
+
+    def _parse_mrr(self, f: BinaryIO, rec_len: int):
+        """Parse Master Results Record."""
+        start_pos = f.tell()
+        finish_t = self._read_u4(f)
+        self.data.finish_time = finish_t
+        remaining = rec_len - (f.tell() - start_pos)
+        if remaining > 0:
+            f.read(remaining)
+
+    def _parse_wir(self, f: BinaryIO, rec_len: int):
+        """Parse Wafer Information Record."""
+        start_pos = f.tell()
+        head_num = self._read_u1(f)
+        site_grp = self._read_u1(f) if f.tell() - start_pos < rec_len else 0
+        start_t = self._read_u4(f) if f.tell() - start_pos < rec_len else 0
+        wafer_id = self._read_cn(f) if f.tell() - start_pos < rec_len else ""
+
+        self.data._current_wafer = wafer_id
         self.data.wafers.append({
-            "wafer_id": self.data._current_wafer,
+            "wafer_id": wafer_id,
             "lot_id": self.data.lot_id,
-            "head_num": record.get("HEAD_NUM", 0),
-            "start_time": record.get("START_T", 0),
+            "head_num": head_num,
+            "start_time": start_t,
         })
 
-    def _handle_wrr(self, record: dict):
-        """Handle Wafer Results Record."""
-        # Update the last wafer with results
+        remaining = rec_len - (f.tell() - start_pos)
+        if remaining > 0:
+            f.read(remaining)
+
+    def _parse_wrr(self, f: BinaryIO, rec_len: int):
+        """Parse Wafer Results Record."""
+        start_pos = f.tell()
+        head_num = self._read_u1(f)
+        site_grp = self._read_u1(f) if f.tell() - start_pos < rec_len else 0
+        finish_t = self._read_u4(f) if f.tell() - start_pos < rec_len else 0
+        part_cnt = self._read_u4(f) if f.tell() - start_pos < rec_len else 0
+        rtst_cnt = self._read_u4(f) if f.tell() - start_pos < rec_len else 0
+        abrt_cnt = self._read_u4(f) if f.tell() - start_pos < rec_len else 0
+        good_cnt = self._read_u4(f) if f.tell() - start_pos < rec_len else 0
+        func_cnt = self._read_u4(f) if f.tell() - start_pos < rec_len else 0
+
         if self.data.wafers:
             self.data.wafers[-1].update({
-                "finish_time": record.get("FINISH_T", 0),
-                "part_count": record.get("PART_CNT", 0),
-                "good_count": record.get("GOOD_CNT", 0),
-                "rtst_count": record.get("RTST_CNT", 0),
-                "abrt_count": record.get("ABRT_CNT", 0),
+                "finish_time": finish_t,
+                "part_count": part_cnt,
+                "good_count": good_cnt,
+                "rtst_count": rtst_cnt,
+                "abrt_count": abrt_cnt,
             })
 
-    def _handle_pir(self, record: dict):
-        """Handle Part Information Record."""
+        remaining = rec_len - (f.tell() - start_pos)
+        if remaining > 0:
+            f.read(remaining)
+
+    def _parse_pir(self, f: BinaryIO, rec_len: int):
+        """Parse Part Information Record."""
+        head_num = self._read_u1(f)
+        site_num = self._read_u1(f)
         self._part_counter += 1
         self.data._current_part_index = self._part_counter
 
-    def _handle_prr(self, record: dict):
-        """Handle Part Results Record."""
-        part_flag = record.get("PART_FLG", 0)
-        passed = (part_flag & 0x08) == 0  # Bit 3 = 0 means pass
+    def _parse_prr(self, f: BinaryIO, rec_len: int):
+        """Parse Part Results Record."""
+        start_pos = f.tell()
+        head_num = self._read_u1(f)
+        site_num = self._read_u1(f)
+        part_flg = self._read_u1(f)
+        num_test = self._read_u2(f)
+        hard_bin = self._read_u2(f)
+        soft_bin = self._read_u2(f) if f.tell() - start_pos < rec_len else 0
+        x_coord = self._read_i2(f) if f.tell() - start_pos < rec_len else -32768
+        y_coord = self._read_i2(f) if f.tell() - start_pos < rec_len else -32768
+        test_t = self._read_u4(f) if f.tell() - start_pos < rec_len else 0
+
+        passed = (part_flg & 0x08) == 0
 
         part = {
             "part_id": f"{self.data.lot_id}_{self.data._current_wafer}_{self._part_counter}",
             "lot_id": self.data.lot_id,
             "wafer_id": self.data._current_wafer,
-            "head_num": record.get("HEAD_NUM", 0),
-            "site_num": record.get("SITE_NUM", 0),
-            "x_coord": record.get("X_COORD", -32768),
-            "y_coord": record.get("Y_COORD", -32768),
-            "hard_bin": record.get("HARD_BIN", 0),
-            "soft_bin": record.get("SOFT_BIN", 0),
+            "head_num": head_num,
+            "site_num": site_num,
+            "x_coord": x_coord,
+            "y_coord": y_coord,
+            "hard_bin": hard_bin,
+            "soft_bin": soft_bin,
             "passed": passed,
-            "test_count": record.get("NUM_TEST", 0),
-            "test_time": record.get("TEST_T", 0),
+            "test_count": num_test,
+            "test_time": test_t,
         }
         self.data.parts.append(part)
 
-    def _handle_ptr(self, record: dict):
-        """Handle Parametric Test Record."""
-        test_num = record.get("TEST_NUM", 0)
-        test_flag = record.get("TEST_FLG", 0)
-        passed = (test_flag & 0x80) == 0  # Bit 7 = 0 means pass
+        remaining = rec_len - (f.tell() - start_pos)
+        if remaining > 0:
+            f.read(remaining)
 
-        # Store test definition if not seen
-        if test_num not in self.data.tests:
-            self.data.tests[test_num] = {
-                "test_num": test_num,
-                "test_name": record.get("TEST_TXT", ""),
-                "lo_limit": record.get("LO_LIMIT"),
-                "hi_limit": record.get("HI_LIMIT"),
-                "units": record.get("UNITS", ""),
-                "test_type": "P",  # Parametric
-            }
+    def _parse_ptr(self, f: BinaryIO, rec_len: int):
+        """Parse Parametric Test Record."""
+        start_pos = f.tell()
+        test_num = self._read_u4(f)
+        head_num = self._read_u1(f)
+        site_num = self._read_u1(f)
+        test_flg = self._read_u1(f)
+        parm_flg = self._read_u1(f)
+        result = self._read_r4(f) if f.tell() - start_pos < rec_len else None
+        test_txt = self._read_cn(f) if f.tell() - start_pos < rec_len else ""
+        alarm_id = self._read_cn(f) if f.tell() - start_pos < rec_len else ""
+        
+        # Read optional fields
+        opt_flag = self._read_u1(f) if f.tell() - start_pos < rec_len else 0xFF
+        res_scal = self._read_i1(f) if f.tell() - start_pos < rec_len else 0
+        llm_scal = self._read_i1(f) if f.tell() - start_pos < rec_len else 0
+        hlm_scal = self._read_i1(f) if f.tell() - start_pos < rec_len else 0
+        lo_limit = self._read_r4(f) if f.tell() - start_pos < rec_len else None
+        hi_limit = self._read_r4(f) if f.tell() - start_pos < rec_len else None
+        units = self._read_cn(f) if f.tell() - start_pos < rec_len else ""
 
-        # Store test result
-        self.data.test_results.append({
-            "lot_id": self.data.lot_id,
-            "wafer_id": self.data._current_wafer,
-            "part_id": f"{self.data.lot_id}_{self.data._current_wafer}_{self._part_counter}",
-            "test_num": test_num,
-            "head_num": record.get("HEAD_NUM", 0),
-            "site_num": record.get("SITE_NUM", 0),
-            "result": record.get("RESULT"),
-            "passed": passed,
-            "alarm_id": record.get("ALARM_ID", ""),
-        })
-
-    def _handle_ftr(self, record: dict):
-        """Handle Functional Test Record."""
-        test_num = record.get("TEST_NUM", 0)
-        test_flag = record.get("TEST_FLG", 0)
-        passed = (test_flag & 0x80) == 0
+        passed = (test_flg & 0x80) == 0
 
         if test_num not in self.data.tests:
             self.data.tests[test_num] = {
                 "test_num": test_num,
-                "test_name": record.get("TEST_TXT", ""),
-                "test_type": "F",  # Functional
+                "test_name": test_txt,
+                "lo_limit": lo_limit,
+                "hi_limit": hi_limit,
+                "units": units,
+                "test_type": "P",
             }
 
         self.data.test_results.append({
@@ -222,109 +300,145 @@ class STDFParser:
             "wafer_id": self.data._current_wafer,
             "part_id": f"{self.data.lot_id}_{self.data._current_wafer}_{self._part_counter}",
             "test_num": test_num,
-            "head_num": record.get("HEAD_NUM", 0),
-            "site_num": record.get("SITE_NUM", 0),
-            "result": None,
-            "passed": passed,
-            "alarm_id": record.get("ALARM_ID", ""),
-        })
-
-    def _handle_mpr(self, record: dict):
-        """Handle Multiple-Result Parametric Record."""
-        test_num = record.get("TEST_NUM", 0)
-        test_flag = record.get("TEST_FLG", 0)
-        passed = (test_flag & 0x80) == 0
-
-        if test_num not in self.data.tests:
-            self.data.tests[test_num] = {
-                "test_num": test_num,
-                "test_name": record.get("TEST_TXT", ""),
-                "lo_limit": record.get("LO_LIMIT"),
-                "hi_limit": record.get("HI_LIMIT"),
-                "units": record.get("UNITS", ""),
-                "test_type": "M",  # Multiple
-            }
-
-        # MPR can have multiple results - store first one for simplicity
-        results = record.get("RTN_RSLT", [])
-        result = results[0] if results else None
-
-        self.data.test_results.append({
-            "lot_id": self.data.lot_id,
-            "wafer_id": self.data._current_wafer,
-            "part_id": f"{self.data.lot_id}_{self.data._current_wafer}_{self._part_counter}",
-            "test_num": test_num,
-            "head_num": record.get("HEAD_NUM", 0),
-            "site_num": record.get("SITE_NUM", 0),
+            "head_num": head_num,
+            "site_num": site_num,
             "result": result,
             "passed": passed,
-            "alarm_id": record.get("ALARM_ID", ""),
+            "alarm_id": alarm_id,
         })
 
-    def _handle_hbr(self, record: dict):
-        """Handle Hardware Bin Record."""
-        bin_num = record.get("HBIN_NUM", 0)
-        self.data.bins_hard[bin_num] = {
-            "bin_num": bin_num,
-            "bin_name": record.get("HBIN_NAM", ""),
-            "bin_pf": record.get("HBIN_PF", ""),
-            "bin_count": record.get("HBIN_CNT", 0),
+        remaining = rec_len - (f.tell() - start_pos)
+        if remaining > 0:
+            f.read(remaining)
+
+    def _parse_ftr(self, f: BinaryIO, rec_len: int):
+        """Parse Functional Test Record."""
+        start_pos = f.tell()
+        test_num = self._read_u4(f)
+        head_num = self._read_u1(f)
+        site_num = self._read_u1(f)
+        test_flg = self._read_u1(f)
+
+        passed = (test_flg & 0x80) == 0
+
+        if test_num not in self.data.tests:
+            self.data.tests[test_num] = {
+                "test_num": test_num,
+                "test_name": "",
+                "test_type": "F",
+            }
+
+        self.data.test_results.append({
+            "lot_id": self.data.lot_id,
+            "wafer_id": self.data._current_wafer,
+            "part_id": f"{self.data.lot_id}_{self.data._current_wafer}_{self._part_counter}",
+            "test_num": test_num,
+            "head_num": head_num,
+            "site_num": site_num,
+            "result": None,
+            "passed": passed,
+            "alarm_id": "",
+        })
+
+        remaining = rec_len - (f.tell() - start_pos)
+        if remaining > 0:
+            f.read(remaining)
+
+    def _parse_hbr(self, f: BinaryIO, rec_len: int):
+        """Parse Hardware Bin Record."""
+        start_pos = f.tell()
+        head_num = self._read_u1(f)
+        site_num = self._read_u1(f)
+        hbin_num = self._read_u2(f)
+        hbin_cnt = self._read_u4(f)
+        hbin_pf = chr(self._read_u1(f)) if f.tell() - start_pos < rec_len else ""
+        hbin_nam = self._read_cn(f) if f.tell() - start_pos < rec_len else ""
+
+        self.data.bins_hard[hbin_num] = {
+            "bin_num": hbin_num,
+            "bin_name": hbin_nam,
+            "bin_pf": hbin_pf,
+            "bin_count": hbin_cnt,
         }
 
-    def _handle_sbr(self, record: dict):
-        """Handle Software Bin Record."""
-        bin_num = record.get("SBIN_NUM", 0)
-        self.data.bins_soft[bin_num] = {
-            "bin_num": bin_num,
-            "bin_name": record.get("SBIN_NAM", ""),
-            "bin_pf": record.get("SBIN_PF", ""),
-            "bin_count": record.get("SBIN_CNT", 0),
+        remaining = rec_len - (f.tell() - start_pos)
+        if remaining > 0:
+            f.read(remaining)
+
+    def _parse_sbr(self, f: BinaryIO, rec_len: int):
+        """Parse Software Bin Record."""
+        start_pos = f.tell()
+        head_num = self._read_u1(f)
+        site_num = self._read_u1(f)
+        sbin_num = self._read_u2(f)
+        sbin_cnt = self._read_u4(f)
+        sbin_pf = chr(self._read_u1(f)) if f.tell() - start_pos < rec_len else ""
+        sbin_nam = self._read_cn(f) if f.tell() - start_pos < rec_len else ""
+
+        self.data.bins_soft[sbin_num] = {
+            "bin_num": sbin_num,
+            "bin_name": sbin_nam,
+            "bin_pf": sbin_pf,
+            "bin_count": sbin_cnt,
         }
 
-    def _handle_sdr(self, record: dict):
-        """Handle Site Description Record."""
-        site_nums = record.get("SITE_NUM", [])
-        if isinstance(site_nums, (list, tuple)):
-            for site_num in site_nums:
-                self.data.sites.append({
-                    "site_num": site_num,
-                    "head_num": record.get("HEAD_NUM", 0),
-                })
+        remaining = rec_len - (f.tell() - start_pos)
+        if remaining > 0:
+            f.read(remaining)
 
     def parse(self, file_path: Path) -> STDFData:
-        """
-        Parse an STDF file.
-
-        Args:
-            file_path: Path to the STDF file
-
-        Returns:
-            Parsed STDF data
-        """
+        """Parse an STDF file."""
         self.data = STDFData()
         self._part_counter = 0
 
         with open(file_path, "rb") as f:
-            parser = Parser(inp=f)
-            parser.addSink(self._handle_record)
+            while True:
+                try:
+                    rec_len, rec_typ, rec_sub = self._read_header(f)
+                    rec_key = (rec_typ, rec_sub)
+                    start_pos = f.tell()
 
-            try:
-                parser.parse()
-            except Exception as e:
-                raise RuntimeError(f"Failed to parse STDF file: {e}")
+                    if rec_key == REC_FAR:
+                        self._parse_far(f, rec_len)
+                    elif rec_key == REC_MIR:
+                        self._parse_mir(f, rec_len)
+                    elif rec_key == REC_MRR:
+                        self._parse_mrr(f, rec_len)
+                    elif rec_key == REC_WIR:
+                        self._parse_wir(f, rec_len)
+                    elif rec_key == REC_WRR:
+                        self._parse_wrr(f, rec_len)
+                    elif rec_key == REC_PIR:
+                        self._parse_pir(f, rec_len)
+                    elif rec_key == REC_PRR:
+                        self._parse_prr(f, rec_len)
+                    elif rec_key == REC_PTR:
+                        self._parse_ptr(f, rec_len)
+                    elif rec_key == REC_FTR:
+                        self._parse_ftr(f, rec_len)
+                    elif rec_key == REC_HBR:
+                        self._parse_hbr(f, rec_len)
+                    elif rec_key == REC_SBR:
+                        self._parse_sbr(f, rec_len)
+                    else:
+                        # Skip unknown record
+                        f.read(rec_len)
+
+                    # Ensure we consumed exactly rec_len bytes
+                    consumed = f.tell() - start_pos
+                    if consumed < rec_len:
+                        f.read(rec_len - consumed)
+
+                except EOFError:
+                    break
+                except Exception as e:
+                    # Skip problematic record and continue
+                    continue
 
         return self.data
 
 
 def parse_stdf(file_path: Path) -> STDFData:
-    """
-    Parse an STDF file.
-
-    Args:
-        file_path: Path to the STDF file
-
-    Returns:
-        Parsed STDF data
-    """
+    """Parse an STDF file."""
     parser = STDFParser()
     return parser.parse(file_path)
