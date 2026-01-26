@@ -400,6 +400,162 @@ def fetch(ctx, product: tuple, test_type: tuple, limit: int | None, ingest: bool
         sys.exit(1)
 
 
+@main.command()
+@click.argument("sql")
+@click.argument("output", type=click.Path(path_type=Path))
+@click.option("--format", "-f", type=click.Choice(["csv", "parquet"]), default="csv", help="Output format")
+@click.pass_context
+def export(ctx, sql: str, output: Path, format: str):
+    """
+    Export query results to CSV or Parquet file.
+
+    SQL: SQL query to execute
+    OUTPUT: Output file path
+
+    Example:
+        stdf-platform export "SELECT * FROM test_results WHERE lot_id='LOT001'" results.csv
+    """
+    config: Config = ctx.obj["config"]
+
+    console.print(f"\n[bold]STDF Platform - Export[/bold]")
+    console.print(f"  Query: {sql[:50]}..." if len(sql) > 50 else f"  Query: {sql}")
+    console.print(f"  Output: {output}")
+    console.print()
+
+    try:
+        with Database(config.storage) as db:
+            # Get DataFrame
+            df = db.query_df(sql)
+
+            if df.empty:
+                console.print("[yellow]No results to export[/yellow]")
+                return
+
+            # Export based on format
+            if format == "csv":
+                df.to_csv(output, index=False)
+            else:
+                df.to_parquet(output, index=False)
+
+            console.print(f"[green]✓[/green] Exported {len(df):,} rows to {output}")
+
+    except Exception as e:
+        console.print(f"[red]Error:[/red] {e}")
+        sys.exit(1)
+
+
+@main.command()
+@click.argument("lot_ids", nargs=-1, required=True)
+@click.argument("output", type=click.Path(path_type=Path))
+@click.option("--pivot/--no-pivot", default=True, help="Pivot test results (one row per part)")
+@click.pass_context
+def export_lot(ctx, lot_ids: tuple, output: Path, pivot: bool):
+    """
+    Export test results for specified lots to CSV (JMP-ready).
+
+    LOT_IDS: One or more lot IDs to export
+    OUTPUT: Output CSV file path
+
+    Example:
+        stdf-platform export-lot E6A773.00 E6A774.00 results.csv
+    """
+    config: Config = ctx.obj["config"]
+
+    console.print(f"\n[bold]STDF Platform - Export Lot[/bold]")
+    console.print(f"  Lots: {', '.join(lot_ids)}")
+    console.print(f"  Output: {output}")
+    console.print(f"  Pivot: {'Yes' if pivot else 'No'}")
+    console.print()
+
+    lot_list = ", ".join(f"'{lot}'" for lot in lot_ids)
+
+    try:
+        with Database(config.storage) as db:
+            if pivot:
+                # Pivot format: one row per part, columns are test parameters
+                sql = f"""
+                PIVOT (
+                    SELECT 
+                        tr.lot_id,
+                        tr.wafer_id,
+                        tr.part_id,
+                        p.x_coord,
+                        p.y_coord,
+                        p.hard_bin,
+                        p.soft_bin,
+                        p.passed as part_passed,
+                        t.test_name,
+                        tr.result
+                    FROM test_results tr
+                    JOIN parts p ON tr.part_id = p.part_id
+                    JOIN tests t ON tr.test_num = t.test_num AND tr.lot_id = t.lot_id
+                    WHERE tr.lot_id IN ({lot_list})
+                )
+                ON test_name
+                USING first(result)
+                GROUP BY lot_id, wafer_id, part_id, x_coord, y_coord, hard_bin, soft_bin, part_passed
+                ORDER BY lot_id, wafer_id, part_id
+                """
+            else:
+                # Long format: one row per test result
+                sql = f"""
+                SELECT 
+                    tr.lot_id,
+                    tr.wafer_id,
+                    tr.part_id,
+                    p.x_coord,
+                    p.y_coord,
+                    p.hard_bin,
+                    p.soft_bin,
+                    t.test_num,
+                    t.test_name,
+                    tr.result,
+                    tr.passed,
+                    t.lo_limit,
+                    t.hi_limit,
+                    t.units
+                FROM test_results tr
+                JOIN parts p ON tr.part_id = p.part_id
+                JOIN tests t ON tr.test_num = t.test_num AND tr.lot_id = t.lot_id
+                WHERE tr.lot_id IN ({lot_list})
+                ORDER BY tr.lot_id, tr.wafer_id, tr.part_id, t.test_num
+                """
+
+            df = db.query_df(sql)
+
+            if df.empty:
+                console.print("[yellow]No results to export[/yellow]")
+                return
+
+            df.to_csv(output, index=False)
+            console.print(f"[green]✓[/green] Exported {len(df):,} rows to {output}")
+
+    except Exception as e:
+        console.print(f"[red]Error:[/red] {e}")
+        sys.exit(1)
+
+
+@main.command()
+@click.option("--port", "-p", default=8501, help="Port to run on")
+@click.pass_context
+def web(ctx, port: int):
+    """Start the Streamlit web UI."""
+    import subprocess
+    
+    app_path = Path(__file__).parent / "app.py"
+    
+    console.print(f"\n[bold]STDF Platform - Web UI[/bold]")
+    console.print(f"  URL: http://localhost:{port}")
+    console.print()
+    console.print("[dim]Press Ctrl+C to stop[/dim]")
+    
+    subprocess.run([
+        sys.executable, "-m", "streamlit", "run",
+        str(app_path),
+        "--server.port", str(port),
+        "--server.headless", "true",
+    ])
+
+
 if __name__ == "__main__":
     main()
-

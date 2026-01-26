@@ -149,3 +149,23 @@ stdf-platform fetch --no-ingest
 # 最大10ファイルまで
 stdf-platform fetch -n 10
 ```
+
+---
+
+## Web UI（ブラウザ）
+
+```bash
+# Web UIを起動
+stdf-platform web
+
+# ポート指定
+stdf-platform web -p 8080
+```
+
+ブラウザで http://localhost:8501 にアクセス。
+
+**機能:**
+- Lot/Wafer/Parameter選択
+- データプレビュー
+- CSVダウンロード（JMP対応Pivot形式）
+
