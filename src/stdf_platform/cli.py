@@ -54,7 +54,7 @@ def ingest(ctx, stdf_file: Path, verbose: bool):
         file_to_parse = stdf_file
         if stdf_file.suffix.lower() == ".gz":
             console.print("  [dim]Decompressing .gz file...[/dim]")
-            temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".stdf")
+            temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".stdf", mode="wb")
             with gzip.open(stdf_file, "rb") as f_in:
                 shutil.copyfileobj(f_in, temp_file)
             temp_file.close()
