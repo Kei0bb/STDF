@@ -1,99 +1,108 @@
-# STDF to Parquet Converter
+# STDF Data Platform
 
-半導体テストデータのSTDF（Standard Test Data Format）ファイルをApache Parquet形式に変換するCLIツール。
+半導体テストデータ（STDF）をETL処理し、DuckDB+Parquetベースで分析できるプラットフォーム。
 
 ## インストール
 
 ```bash
-# uvを使用
+cd /path/to/STDF
 uv sync
-
-# または pip
-pip install .
 ```
 
 ## 使用方法
 
-### 基本的な変換
+### 1. STDFファイルの取り込み
 
 ```bash
-stdf2parquet convert input.stdf ./output/
+stdf-platform ingest sample.stdf
 ```
 
-出力ディレクトリにレコードタイプごとのParquetファイルが生成されます：
+Parquetファイルが `./data/` に、DuckDBファイルが `./data/stdf.duckdb` に保存されます。
 
-```
-output/
-├── FAR.parquet
-├── MIR.parquet
-├── PIR.parquet
-├── PTR.parquet
-├── PRR.parquet
-└── ...
-```
-
-### 特定レコードタイプのみ変換
+### 2. CLI分析コマンド
 
 ```bash
-stdf2parquet convert input.stdf ./output/ --records PTR,PIR,PRR
+# ロット一覧
+stdf-platform lots
+
+# Wafer毎の歩留まり
+stdf-platform analyze yield LOT001
+
+# 上位10フェールテスト
+stdf-platform analyze test-fail LOT001 --top 10
+
+# Bin分布
+stdf-platform analyze bins LOT001
+
+# SQLクエリ実行
+stdf-platform query "SELECT * FROM wafers LIMIT 10"
 ```
 
-### サポートされているレコードタイプの一覧
+---
+
+## クライアントからの接続方法
+
+### DBeaver（推奨）
+
+1. **DBeaver起動** → **データベース** → **新しい接続**
+2. **DuckDB** を選択
+3. **パス設定**（WSL上のファイルにWindowsからアクセス）:
+   ```
+   \\wsl$\Ubuntu\home\<user>\path\to\STDF\data\stdf.duckdb
+   ```
+4. 接続後、テーブル一覧が表示されます
+
+### DuckDB CLI（WSL内）
 
 ```bash
-stdf2parquet list-records
+# DuckDBシェル起動
+duckdb ./data/stdf.duckdb
+
+# テーブル確認
+SHOW TABLES;
+
+# クエリ実行
+SELECT lot_id, COUNT(*) as parts FROM parts GROUP BY lot_id;
 ```
 
-### オプション
-
-| オプション | 説明 |
-|-----------|------|
-| `--records`, `-r` | 変換するレコードタイプ（カンマ区切り） |
-| `--verbose`, `-v` | 詳細なエラー出力 |
-| `--no-progress` | 進捗バーを非表示 |
-
-## Parquetファイルの読み込み
+### Python（クライアント側）
 
 ```python
-import pyarrow.parquet as pq
-import pandas as pd
+import duckdb
 
-# PyArrowで読み込み
-table = pq.read_table("output/PTR.parquet")
-
-# Pandasで読み込み
-df = pd.read_parquet("output/PTR.parquet")
-print(df.head())
+# ネットワークパス経由でParquetを直接クエリ
+conn = duckdb.connect()
+df = conn.execute("""
+    SELECT * FROM read_parquet('//wsl$/Ubuntu/home/<user>/STDF/data/test_results/**/*.parquet', 
+                               hive_partitioning=true)
+    WHERE lot_id = 'LOT001'
+""").fetchdf()
 ```
 
-## 対応レコードタイプ
+---
 
-| タイプ | 説明 |
-|-------|------|
-| FAR | File Attributes Record |
-| MIR | Master Information Record |
-| MRR | Master Results Record |
-| PCR | Part Count Record |
-| HBR | Hardware Bin Record |
-| SBR | Software Bin Record |
-| PMR | Pin Map Record |
-| PGR | Pin Group Record |
-| PLR | Pin List Record |
-| RDR | Retest Data Record |
-| SDR | Site Description Record |
-| WIR | Wafer Information Record |
-| WRR | Wafer Results Record |
-| WCR | Wafer Configuration Record |
-| PIR | Part Information Record |
-| PRR | Part Results Record |
-| TSR | Test Synopsis Record |
-| PTR | Parametric Test Record |
-| MPR | Multiple-Result Parametric Record |
-| FTR | Functional Test Record |
-| BPS | Begin Program Section Record |
-| EPS | End Program Section Record |
-| GDR | Generic Data Record |
-| DTR | Datalog Text Record |
+## データ構造
+
+| テーブル | 説明 |
+|---------|------|
+| lots | ロット情報（job, operator等） |
+| wafers | ウェハー情報と歩留まり |
+| parts | 個片結果（Bin, X/Y座標） |
+| tests | テスト定義（リミット、単位） |
+| test_results | テスト結果（Parametric/Functional） |
+
+## 設定（config.yaml）
+
+```yaml
+ftp:
+  host: "ftp.example.com"
+  username: "${FTP_USER}"
+  password: "${FTP_PASSWORD}"
+
+storage:
+  data_dir: "./data"
+  database: "./data/stdf.duckdb"
+```
 
 ## ライセンス
 

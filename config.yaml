@@ -1,0 +1,21 @@
+# STDF Platform Configuration
+
+ftp:
+  host: "ftp.example.com"
+  port: 21
+  username: "${FTP_USER}"       # 環境変数から取得
+  password: "${FTP_PASSWORD}"   # 環境変数から取得
+  base_path: "/stdf_data"       # STDFファイルの保存パス
+  patterns:
+    - "*.stdf"
+    - "*.stdf.gz"
+    - "*.std"
+    - "*.std.gz"
+
+storage:
+  data_dir: "./data"            # Parquetファイルの保存先
+  database: "./data/stdf.duckdb"  # DuckDBファイル
+
+processing:
+  batch_size: 1000              # レコードバッチサイズ
+  compression: "snappy"         # Parquet圧縮方式
