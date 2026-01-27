@@ -14,15 +14,24 @@ uv sync
 ### 1. STDFファイルの取り込み
 
 ```bash
-stdf-platform ingest sample.stdf
+# 基本（パスからproduct/test_type自動推定）
+stdf-platform ingest ./downloads/SCT101A/CP/lot001.stdf
+
+# 明示的に指定
+stdf-platform ingest sample.stdf --product SCT101A --test-type CP
 ```
 
 Parquetファイルが `./data/` に、DuckDBファイルが `./data/stdf.duckdb` に保存されます。
 
+**ディレクトリ構造:**
+```
+data/test_results/product=SCT101A/test_type=CP/lot_id=XXX/wafer_id=YYY/data.parquet
+```
+
 ### 2. CLI分析コマンド
 
 ```bash
-# ロット一覧
+# ロット一覧（product/test_type含む）
 stdf-platform lots
 
 # Wafer毎の歩留まり
@@ -40,92 +49,22 @@ stdf-platform query "SELECT * FROM wafers LIMIT 10"
 
 ---
 
-## クライアントからの接続方法
-
-### DBeaver（推奨）
-
-1. **DBeaver起動** → **データベース** → **新しい接続**
-2. **DuckDB** を選択
-3. **パス設定**（WSL上のファイルにWindowsからアクセス）:
-   ```
-   \\wsl$\Ubuntu\home\<user>\path\to\STDF\data\stdf.duckdb
-   ```
-4. 接続後、テーブル一覧が表示されます
-
-### DuckDB CLI（WSL内）
-
-```bash
-# DuckDBシェル起動
-duckdb ./data/stdf.duckdb
-
-# テーブル確認
-SHOW TABLES;
-
-# クエリ実行
-SELECT lot_id, COUNT(*) as parts FROM parts GROUP BY lot_id;
-```
-
-### Python（クライアント側）
-
-```python
-import duckdb
-
-# ネットワークパス経由でParquetを直接クエリ
-conn = duckdb.connect()
-df = conn.execute("""
-    SELECT * FROM read_parquet('//wsl$/Ubuntu/home/<user>/STDF/data/test_results/**/*.parquet', 
-                               hive_partitioning=true)
-    WHERE lot_id = 'LOT001'
-""").fetchdf()
-```
-
----
-
-## データ構造
-
-| テーブル | 説明 |
-|---------|------|
-| lots | ロット情報（job, operator等） |
-| wafers | ウェハー情報と歩留まり |
-| parts | 個片結果（Bin, X/Y座標） |
-| tests | テスト定義（リミット、単位） |
-| test_results | テスト結果（Parametric/Functional） |
-
-## 設定（config.yaml）
-
-```yaml
-ftp:
-  host: "ftp.example.com"
-  username: "${FTP_USER}"
-  password: "${FTP_PASSWORD}"
-
-storage:
-  data_dir: "./data"
-  database: "./data/stdf.duckdb"
-```
-
-## ライセンス
-
-MIT License
-
----
-
-## FTPからの自動取得
+## FTPからの自動取得（差分同期）
 
 ### config.yaml設定
 
 ```yaml
-ftp:
-  host: "ftp.example.com"
-  username: "${FTP_USER}"
-  password: "${FTP_PASSWORD}"
+# 方法1: 製品ごとにテストタイプを指定（推奨）
+filters:
+  - product: SCT101A
+    test_types: [CP]      # CPのみ
+  - product: ABC200B
+    test_types: [CP, FT]  # 両方
 
-# 品種フィルタ（空なら全品種）
+# 方法2: グローバル設定（従来互換）
 products:
   - SCT101A
   - ABC200B
-
-# テストタイプ
 test_types:
   - CP
   - FT
@@ -134,14 +73,14 @@ test_types:
 ### fetchコマンド
 
 ```bash
-# config.yamlの設定で取得・自動ingest
+# config.yamlの設定で差分取得（新規ファイルのみ）
 stdf-platform fetch
 
 # 品種を指定（CLI優先）
-stdf-platform fetch -p SCT101A -p ABC200B
+stdf-platform fetch -p SCT101A -t CP
 
-# テストタイプを指定
-stdf-platform fetch -t CP
+# 強制再ダウンロード
+stdf-platform fetch --force
 
 # ダウンロードのみ（ingestしない）
 stdf-platform fetch --no-ingest
@@ -150,22 +89,61 @@ stdf-platform fetch --no-ingest
 stdf-platform fetch -n 10
 ```
 
+> 履歴は `./downloads/.sync_history.json` に保存され、次回実行時に既存ファイルをスキップします。
+
+---
+
+## クライアントからの接続
+
+### DBeaver（推奨）
+
+1. **DBeaver起動** → **データベース** → **新しい接続**
+2. **DuckDB** を選択
+3. **パス設定**:
+   ```
+   \\wsl$\Ubuntu\home\<user>\path\to\STDF\data\stdf.duckdb
+   ```
+
+### DuckDB CLI
+
+```bash
+duckdb ./data/stdf.duckdb
+
+# テーブル確認
+SHOW TABLES;
+
+# クエリ実行
+SELECT lot_id, product, test_type, COUNT(*) as parts FROM parts GROUP BY ALL;
+```
+
 ---
 
 ## Web UI（ブラウザ）
 
 ```bash
-# Web UIを起動
 stdf-platform web
-
-# ポート指定
-stdf-platform web -p 8080
 ```
 
 ブラウザで http://localhost:8501 にアクセス。
 
 **機能:**
+- Product/Test Type フィルタリング
 - Lot/Wafer/Parameter選択
 - データプレビュー
 - CSVダウンロード（JMP対応Pivot形式）
 
+---
+
+## データ構造
+
+| テーブル | 説明 |
+|---------|------|
+| lots | ロット情報（product, test_type, job等） |
+| wafers | ウェハー情報と歩留まり |
+| parts | 個片結果（Bin, X/Y座標） |
+| tests | テスト定義（リミット、単位） |
+| test_results | テスト結果（Parametric/Functional） |
+
+## ライセンス
+
+MIT License
