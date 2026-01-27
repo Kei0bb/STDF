@@ -54,29 +54,22 @@ stdf-platform query "SELECT * FROM wafers LIMIT 10"
 ### config.yaml設定
 
 ```yaml
-# 方法1: 製品ごとにテストタイプを指定（推奨）
 filters:
   - product: SCT101A
-    test_types: [CP]      # CPのみ
+    test_types: [CP]      # SCT101AはCPのみ
   - product: ABC200B
-    test_types: [CP, FT]  # 両方
+    test_types: [CP, FT]  # ABC200Bは両方
 
-# 方法2: グローバル設定（従来互換）
-products:
-  - SCT101A
-  - ABC200B
-test_types:
-  - CP
-  - FT
+# filtersが空または未設定の場合、全製品・全テストタイプをダウンロード
 ```
 
 ### fetchコマンド
 
 ```bash
-# config.yamlの設定で差分取得（新規ファイルのみ）
+# config.yaml の filters に従って差分取得
 stdf-platform fetch
 
-# 品種を指定（CLI優先）
+# CLIで上書き指定
 stdf-platform fetch -p SCT101A -t CP
 
 # 強制再ダウンロード
@@ -89,7 +82,7 @@ stdf-platform fetch --no-ingest
 stdf-platform fetch -n 10
 ```
 
-> 履歴は `./downloads/.sync_history.json` に保存され、次回実行時に既存ファイルをスキップします。
+> 履歴は `./downloads/.sync_history.json` に保存されます。
 
 ---
 

@@ -63,34 +63,21 @@ class Config:
     ftp: FTPConfig = field(default_factory=FTPConfig)
     storage: StorageConfig = field(default_factory=StorageConfig)
     processing: ProcessingConfig = field(default_factory=ProcessingConfig)
-    products: list[str] = field(default_factory=list)  # Legacy: simple product list
-    test_types: list[str] = field(default_factory=lambda: ["CP", "FT"])  # Legacy: global test types
-    filters: list[ProductFilter] = field(default_factory=list)  # New: product-specific filters
-
-    def get_filter_for_product(self, product: str) -> list[str] | None:
-        """
-        Get test types for a specific product.
-        
-        Returns:
-            List of test types, or None if product should be skipped
-        """
-        if self.filters:
-            for f in self.filters:
-                if f.product == product:
-                    return f.test_types
-            return None  # Product not in filters, skip it
-        
-        # Legacy mode: use global products/test_types
-        if self.products and product not in self.products:
-            return None
-        return self.test_types
+    filters: list[ProductFilter] = field(default_factory=list)
 
     def should_fetch(self, product: str, test_type: str) -> bool:
-        """Check if product/test_type combination should be fetched."""
-        allowed_types = self.get_filter_for_product(product)
-        if allowed_types is None:
-            return False
-        return test_type in allowed_types
+        """
+        Check if product/test_type combination should be fetched.
+        
+        If filters is empty, all products/test_types are allowed.
+        """
+        if not self.filters:
+            return True  # No filters = fetch all
+        
+        for f in self.filters:
+            if f.product == product:
+                return test_type in f.test_types
+        return False  # Product not in filters, skip it
 
     @classmethod
     def load(cls, config_path: Path | None = None) -> "Config":
@@ -110,26 +97,25 @@ class Config:
         ftp_data = data.get("ftp", {})
         storage_data = data.get("storage", {})
         processing_data = data.get("processing", {})
-        products = data.get("products", []) or []
-        test_types = data.get("test_types", ["CP", "FT"]) or ["CP", "FT"]
         
-        # Parse new filters format
+        # Parse filters format
         filters_data = data.get("filters", []) or []
-        filters = [
-            ProductFilter(
-                product=f.get("product", ""),
-                test_types=f.get("test_types", ["CP", "FT"])
-            )
-            for f in filters_data
-            if f.get("product")
-        ]
+        filters = []
+        for f in filters_data:
+            # Skip if not a dictionary
+            if not isinstance(f, dict):
+                continue
+            product = f.get("product", "")
+            if product:
+                filters.append(ProductFilter(
+                    product=product,
+                    test_types=f.get("test_types", ["CP", "FT"])
+                ))
 
         return cls(
             ftp=FTPConfig(**ftp_data) if ftp_data else FTPConfig(),
             storage=StorageConfig(**storage_data) if storage_data else StorageConfig(),
             processing=ProcessingConfig(**processing_data) if processing_data else ProcessingConfig(),
-            products=products,
-            test_types=test_types,
             filters=filters,
         )
 

@@ -13,32 +13,13 @@ ftp:
     - "*.std.gz"
 
 # Product and Test Type filtering
-# Format 1 - Simple list (applies global test_types to all):
-#   products:
-#     - SCT101A
-#     - ABC200B
-#   test_types:
-#     - CP
-#     - FT
-#
-# Format 2 - Product-specific test types:
-#   filters:
-#     - product: SCT101A
-#       test_types: [CP]      # Only CP for SCT101A
-#     - product: ABC200B
-#       test_types: [CP, FT]  # Both CP and FT for ABC200B
-#     - product: XYZ300C      # No test_types = all (CP, FT)
-
-# Example: SCT101A CP only
+# - If filters is empty or not specified, all products and test types are fetched
+# - Specify product-specific test types as shown below
 filters:
   # - product: SCT101A
-  #   test_types: [CP]
-
-# Global defaults (used when filters is empty)
-products: []
-test_types:
-  - CP
-  - FT
+  #   test_types: [CP]      # Only CP for SCT101A
+  # - product: ABC200B
+  #   test_types: [CP, FT]  # Both CP and FT for ABC200B
 
 storage:
   data_dir: "./data"

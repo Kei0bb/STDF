@@ -378,23 +378,25 @@ def fetch(ctx, product: tuple, test_type: tuple, limit: int | None, ingest: bool
     console.print(f"  Sync History: {sync_manager.get_downloaded_count()} files tracked")
 
     # Show filters
-    # CLI options override config settings
     cli_products = list(product) if product else None
     cli_test_types = list(test_type) if test_type else None
     
-    # Show which filters are active
-    if config.filters and not cli_products and not cli_test_types:
+    if cli_products or cli_test_types:
+        # CLI override
+        if cli_products:
+            console.print(f"  Products (CLI): {', '.join(cli_products)}")
+        else:
+            console.print("  Products: [dim]all[/dim]")
+        if cli_test_types:
+            console.print(f"  Test Types (CLI): {', '.join(cli_test_types)}")
+        else:
+            console.print("  Test Types: [dim]all[/dim]")
+    elif config.filters:
         console.print("  Filters (from config):")
         for f in config.filters:
             console.print(f"    - {f.product}: {', '.join(f.test_types)}")
     else:
-        products_to_show = cli_products or config.products
-        test_types_to_show = cli_test_types or config.test_types
-        if products_to_show:
-            console.print(f"  Products: {', '.join(products_to_show)}")
-        else:
-            console.print("  Products: [dim]all[/dim]")
-        console.print(f"  Test Types: {', '.join(test_types_to_show)}")
+        console.print("  Filters: [dim]all products/test types[/dim]")
     
     if force:
         console.print("  [yellow]Force mode: re-downloading all files[/yellow]")
@@ -402,14 +404,14 @@ def fetch(ctx, product: tuple, test_type: tuple, limit: int | None, ingest: bool
 
     try:
         with FTPClient(config.ftp) as client:
-            # List all files first (no filter at FTP level to allow config.should_fetch)
+            # List files (CLI options filter at FTP level)
             files = list(client.list_stdf_files(
                 products=cli_products,
-                test_types=cli_test_types or config.test_types,
+                test_types=cli_test_types,
             ))
             
-            # Apply config filters if no CLI override and filters are defined
-            if config.filters and not cli_products and not cli_test_types:
+            # Apply config filters if no CLI override
+            if not cli_products and not cli_test_types:
                 files = [(f, p, t, n) for f, p, t, n in files if config.should_fetch(p, t)]
 
             # Filter out already downloaded (unless force)
