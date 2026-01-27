@@ -12,6 +12,8 @@ from .config import StorageConfig
 # PyArrow schemas for each table
 LOTS_SCHEMA = pa.schema([
     ("lot_id", pa.string()),
+    ("product", pa.string()),
+    ("test_type", pa.string()),
     ("part_type", pa.string()),
     ("job_name", pa.string()),
     ("job_rev", pa.string()),
@@ -79,16 +81,27 @@ class ParquetStorage:
         self.data_dir = config.data_dir
         self.data_dir.mkdir(parents=True, exist_ok=True)
 
-    def _get_table_path(self, table_name: str) -> Path:
-        """Get path for a table."""
-        return self.data_dir / table_name
+    def _get_table_path(self, table_name: str, product: str = "", test_type: str = "") -> Path:
+        """Get path for a table with product/test_type partitioning."""
+        base = self.data_dir / table_name
+        if product and test_type:
+            return base / f"product={product}" / f"test_type={test_type}"
+        return base
 
-    def save_stdf_data(self, data: STDFData, compression: str = "snappy") -> dict[str, int]:
+    def save_stdf_data(
+        self,
+        data: STDFData,
+        product: str = "UNKNOWN",
+        test_type: str = "UNKNOWN",
+        compression: str = "snappy",
+    ) -> dict[str, int]:
         """
         Save STDF data to Parquet files.
 
         Args:
             data: Parsed STDF data
+            product: Product name (extracted from file path)
+            test_type: Test type - CP or FT (extracted from file path)
             compression: Parquet compression method
 
         Returns:
@@ -97,11 +110,13 @@ class ParquetStorage:
         counts = {}
 
         # Save lot info
-        lot_path = self._get_table_path("lots") / f"lot_id={data.lot_id}"
+        lot_path = self._get_table_path("lots", product, test_type) / f"lot_id={data.lot_id}"
         lot_path.mkdir(parents=True, exist_ok=True)
 
         lot_table = pa.table({
             "lot_id": [data.lot_id],
+            "product": [product],
+            "test_type": [test_type],
             "part_type": [data.part_type],
             "job_name": [data.job_name],
             "job_rev": [data.job_rev],
@@ -123,7 +138,7 @@ class ParquetStorage:
                 wafer_groups[wafer_id].append(wafer)
 
             for wafer_id, wafers in wafer_groups.items():
-                wafer_path = self._get_table_path("wafers") / f"lot_id={data.lot_id}" / f"wafer_id={wafer_id}"
+                wafer_path = self._get_table_path("wafers", product, test_type) / f"lot_id={data.lot_id}" / f"wafer_id={wafer_id}"
                 wafer_path.mkdir(parents=True, exist_ok=True)
 
                 wafer_table = pa.table({
@@ -151,7 +166,7 @@ class ParquetStorage:
                 part_groups[key].append(part)
 
             for (lot_id, wafer_id), parts in part_groups.items():
-                part_path = self._get_table_path("parts") / f"lot_id={lot_id}" / f"wafer_id={wafer_id}"
+                part_path = self._get_table_path("parts", product, test_type) / f"lot_id={lot_id}" / f"wafer_id={wafer_id}"
                 part_path.mkdir(parents=True, exist_ok=True)
 
                 part_table = pa.table({
@@ -174,7 +189,7 @@ class ParquetStorage:
 
         # Save tests
         if data.tests:
-            tests_path = self._get_table_path("tests") / f"lot_id={data.lot_id}"
+            tests_path = self._get_table_path("tests", product, test_type) / f"lot_id={data.lot_id}"
             tests_path.mkdir(parents=True, exist_ok=True)
 
             tests_list = list(data.tests.values())
@@ -200,7 +215,7 @@ class ParquetStorage:
                 result_groups[key].append(result)
 
             for (lot_id, wafer_id), results in result_groups.items():
-                result_path = self._get_table_path("test_results") / f"lot_id={lot_id}" / f"wafer_id={wafer_id}"
+                result_path = self._get_table_path("test_results", product, test_type) / f"lot_id={lot_id}" / f"wafer_id={wafer_id}"
                 result_path.mkdir(parents=True, exist_ok=True)
 
                 result_table = pa.table({

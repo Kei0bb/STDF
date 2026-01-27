@@ -34,21 +34,50 @@ def get_database():
 db = get_database()
 
 
-# Get available lots
+# Get available products and test types
 @st.cache_data(ttl=60)
-def get_lots():
+def get_products():
     try:
-        results = db.query("SELECT DISTINCT lot_id FROM lots ORDER BY lot_id")
+        results = db.query("SELECT DISTINCT product FROM lots ORDER BY product")
+        return [r["product"] for r in results if r["product"]]
+    except Exception:
+        return []
+
+
+@st.cache_data(ttl=60)
+def get_test_types():
+    try:
+        results = db.query("SELECT DISTINCT test_type FROM lots ORDER BY test_type")
+        return [r["test_type"] for r in results if r["test_type"]]
+    except Exception:
+        return []
+
+
+# Get available lots (with product/test_type filter)
+@st.cache_data(ttl=60)
+def get_lots(product_filter: tuple = (), test_type_filter: tuple = ()):
+    try:
+        conditions = []
+        if product_filter:
+            prod_list = ", ".join(f"'{p}'" for p in product_filter)
+            conditions.append(f"product IN ({prod_list})")
+        if test_type_filter:
+            tt_list = ", ".join(f"'{t}'" for t in test_type_filter)
+            conditions.append(f"test_type IN ({tt_list})")
+        
+        where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+        results = db.query(f"SELECT DISTINCT lot_id FROM lots {where} ORDER BY lot_id")
         return [r["lot_id"] for r in results]
     except Exception:
         return []
 
 
-lots = get_lots()
+products = get_products()
+test_types = get_test_types()
 
-if not lots:
+if not products and not test_types:
     st.warning("No data found. Please ingest STDF files first.")
-    st.code("stdf-platform ingest <file.stdf>")
+    st.code("stdf-platform ingest <file.stdf> --product ABC --test-type CP")
     st.stop()
 
 
@@ -56,6 +85,32 @@ if not lots:
 # MAIN AREA - Selection
 # ============================================
 st.header("🔍 Data Selection")
+
+# Row 0: Product and Test Type filter
+col1, col2 = st.columns(2)
+
+with col1:
+    selected_products = st.multiselect(
+        "**Product Filter**",
+        options=products,
+        default=[],
+        help="Filter by product (leave empty for all)"
+    )
+
+with col2:
+    selected_test_types = st.multiselect(
+        "**Test Type Filter**",
+        options=test_types,
+        default=[],
+        help="Filter by test type (CP/FT)"
+    )
+
+# Get lots based on filter
+lots = get_lots(tuple(selected_products), tuple(selected_test_types))
+
+if not lots:
+    st.info("No lots found for the selected filters.")
+    st.stop()
 
 # Row 1: Lot selection
 selected_lots = st.multiselect(
@@ -134,6 +189,8 @@ lot_list = ", ".join(f"'{lot}'" for lot in selected_lots)
 summary_df = db.query_df(f"""
     SELECT 
         l.lot_id,
+        l.product,
+        l.test_type,
         l.part_type,
         l.job_name,
         COUNT(DISTINCT w.wafer_id) as wafers,
@@ -143,8 +200,8 @@ summary_df = db.query_df(f"""
     FROM lots l
     LEFT JOIN wafers w ON l.lot_id = w.lot_id
     WHERE l.lot_id IN ({lot_list})
-    GROUP BY l.lot_id, l.part_type, l.job_name
-    ORDER BY l.lot_id
+    GROUP BY l.lot_id, l.product, l.test_type, l.part_type, l.job_name
+    ORDER BY l.product, l.test_type, l.lot_id
 """)
 
 st.dataframe(summary_df, use_container_width=True, hide_index=True)

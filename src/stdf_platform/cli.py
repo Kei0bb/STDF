@@ -16,6 +16,7 @@ from .config import Config
 from .parser import parse_stdf
 from .storage import ParquetStorage
 from .database import Database
+from .sync_manager import SyncManager
 
 
 console = Console()
@@ -33,19 +34,42 @@ def main(ctx, config: Path | None):
 
 @main.command()
 @click.argument("stdf_file", type=click.Path(exists=True, path_type=Path))
+@click.option("--product", "-p", help="Product name (auto-detect from path if not specified)")
+@click.option("--test-type", "-t", type=click.Choice(["CP", "FT"]), help="Test type (auto-detect from path if not specified)")
+@click.option("--from-path", is_flag=True, help="Extract product/test-type from file path")
 @click.option("--verbose", "-v", is_flag=True, help="Verbose output")
 @click.pass_context
-def ingest(ctx, stdf_file: Path, verbose: bool):
+def ingest(ctx, stdf_file: Path, product: str | None, test_type: str | None, from_path: bool, verbose: bool):
     """
     Ingest an STDF file into the data platform.
 
     STDF_FILE: Path to the STDF file to ingest
+
+    Product and test type can be specified via options or auto-detected from file path.
+    Expected path structure: .../product/test_type/file.stdf
     """
     config: Config = ctx.obj["config"]
     config.ensure_directories()
 
+    # Extract product/test_type from path if requested or not specified
+    if from_path or (product is None and test_type is None):
+        parts = stdf_file.resolve().parts
+        # Look for CP or FT in path to identify test_type
+        for i, part in enumerate(parts):
+            if part.upper() in ("CP", "FT"):
+                test_type = part.upper()
+                if i > 0:
+                    product = parts[i - 1]
+                break
+
+    # Default values if still not found
+    product = product or "UNKNOWN"
+    test_type = test_type or "UNKNOWN"
+
     console.print(f"\n[bold]STDF Platform - Ingest[/bold]")
     console.print(f"  File: {stdf_file}")
+    console.print(f"  Product: {product}")
+    console.print(f"  Test Type: {test_type}")
     console.print()
 
     temp_file = None
@@ -87,9 +111,9 @@ def ingest(ctx, stdf_file: Path, verbose: bool):
             TextColumn("[progress.description]{task.description}"),
             console=console,
         ) as progress:
-            task = progress.add_task("Saving to Parquet...", total=None)
-            counts = storage.save_stdf_data(data, config.processing.compression)
-            progress.update(task, description="[green]✓[/green] Saved to Parquet")
+            prog_task = progress.add_task("Saving to Parquet...", total=None)
+            counts = storage.save_stdf_data(data, product, test_type, config.processing.compression)
+            progress.update(prog_task, description="[green]✓[/green] Saved to Parquet")
 
         # Show results
         table = Table(title="Saved Records")
@@ -329,60 +353,124 @@ def shell(ctx):
 @click.option("--test-type", "-t", multiple=True, help="Test type filter (CP, FT)")
 @click.option("--limit", "-n", type=int, help="Maximum files to fetch")
 @click.option("--ingest/--no-ingest", default=True, help="Auto-ingest after download")
+@click.option("--force", "-f", is_flag=True, help="Force re-download even if file exists")
 @click.option("--verbose", "-v", is_flag=True, help="Verbose output")
 @click.pass_context
-def fetch(ctx, product: tuple, test_type: tuple, limit: int | None, ingest: bool, verbose: bool):
+def fetch(ctx, product: tuple, test_type: tuple, limit: int | None, ingest: bool, force: bool, verbose: bool):
     """
-    Fetch STDF files from FTP server.
+    Fetch STDF files from FTP server with incremental sync.
 
-    Downloads files from FTP and optionally ingests them into the database.
+    Downloads only new files from FTP (skips already downloaded).
     Uses filters from config.yaml, or override with --product and --test-type.
+    Use --force to re-download all files.
     """
-    from .ftp_client import fetch_stdf_files
+    from .ftp_client import FTPClient
 
     config: Config = ctx.obj["config"]
     config.ensure_directories()
 
+    # Initialize sync manager
+    sync_history_file = config.storage.download_dir / ".sync_history.json"
+    sync_manager = SyncManager(sync_history_file)
+
     console.print(f"\n[bold]STDF Platform - Fetch from FTP[/bold]")
     console.print(f"  Host: {config.ftp.host}")
+    console.print(f"  Sync History: {sync_manager.get_downloaded_count()} files tracked")
 
     # Show filters
-    products = list(product) if product else config.products
-    test_types = list(test_type) if test_type else config.test_types
-
-    if products:
-        console.print(f"  Products: {', '.join(products)}")
+    # CLI options override config settings
+    cli_products = list(product) if product else None
+    cli_test_types = list(test_type) if test_type else None
+    
+    # Show which filters are active
+    if config.filters and not cli_products and not cli_test_types:
+        console.print("  Filters (from config):")
+        for f in config.filters:
+            console.print(f"    - {f.product}: {', '.join(f.test_types)}")
     else:
-        console.print("  Products: [dim]all[/dim]")
-    console.print(f"  Test Types: {', '.join(test_types)}")
+        products_to_show = cli_products or config.products
+        test_types_to_show = cli_test_types or config.test_types
+        if products_to_show:
+            console.print(f"  Products: {', '.join(products_to_show)}")
+        else:
+            console.print("  Products: [dim]all[/dim]")
+        console.print(f"  Test Types: {', '.join(test_types_to_show)}")
+    
+    if force:
+        console.print("  [yellow]Force mode: re-downloading all files[/yellow]")
     console.print()
 
     try:
-        # Fetch files
-        downloaded = fetch_stdf_files(
-            config,
-            products=products if products else None,
-            test_types=test_types,
-            limit=limit,
-        )
+        with FTPClient(config.ftp) as client:
+            # List all files first (no filter at FTP level to allow config.should_fetch)
+            files = list(client.list_stdf_files(
+                products=cli_products,
+                test_types=cli_test_types or config.test_types,
+            ))
+            
+            # Apply config filters if no CLI override and filters are defined
+            if config.filters and not cli_products and not cli_test_types:
+                files = [(f, p, t, n) for f, p, t, n in files if config.should_fetch(p, t)]
 
-        if not downloaded:
-            console.print("[yellow]No files found matching filters[/yellow]")
-            return
+            # Filter out already downloaded (unless force)
+            if not force:
+                new_files = [(f, p, t, n) for f, p, t, n in files if not sync_manager.is_downloaded(f)]
+                skipped = len(files) - len(new_files)
+                if skipped > 0:
+                    console.print(f"  [dim]Skipping {skipped} already downloaded files[/dim]")
+                files = new_files
+
+            if limit:
+                files = files[:limit]
+
+            if not files:
+                console.print("[yellow]No new files to download[/yellow]")
+                return
+
+            console.print(f"  Files to download: {len(files)}")
+            console.print()
+
+            from rich.progress import BarColumn
+
+            downloaded = []
+            with Progress(
+                SpinnerColumn(),
+                TextColumn("[progress.description]{task.description}"),
+                BarColumn(),
+                TextColumn("{task.completed}/{task.total}"),
+            ) as progress:
+                dl_task = progress.add_task("Downloading...", total=len(files))
+
+                for remote_path, prod, ttype, filename in files:
+                    # Create subdirectory structure: downloads/product/test_type/
+                    local_dir = config.storage.download_dir / prod / ttype
+                    local_file = client.download_file(remote_path, local_dir, decompress=True)
+
+                    # Track in sync history
+                    sync_manager.mark_downloaded(
+                        remote_path=remote_path,
+                        local_path=local_file,
+                        product=prod,
+                        test_type=ttype,
+                    )
+
+                    downloaded.append((remote_path, local_file, prod, ttype))
+                    progress.update(dl_task, advance=1, description=f"Downloaded {filename}")
 
         console.print(f"\n[green]✓[/green] Downloaded {len(downloaded)} files")
 
         # Auto-ingest if enabled
-        if ingest:
+        if ingest and downloaded:
             console.print("\n[bold]Ingesting files...[/bold]")
             storage = ParquetStorage(config.storage)
             success = 0
             failed = 0
 
-            for local_path, prod, ttype in downloaded:
+            for remote_path, local_path, prod, ttype in downloaded:
                 try:
                     data = parse_stdf(local_path)
-                    storage.save_stdf_data(data, config.processing.compression)
+                    storage.save_stdf_data(data, prod, ttype, config.processing.compression)
+                    sync_manager.mark_ingested(remote_path)
                     console.print(f"  [green]✓[/green] {local_path.name} ({prod}/{ttype})")
                     success += 1
                 except Exception as e:

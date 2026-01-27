@@ -12,13 +12,30 @@ ftp:
     - "*.std"
     - "*.std.gz"
 
-# Product filtering (optional)
-# If empty, all products are fetched
-products:
-  # - SCT101A
-  # - ABC200B
+# Product and Test Type filtering
+# Format 1 - Simple list (applies global test_types to all):
+#   products:
+#     - SCT101A
+#     - ABC200B
+#   test_types:
+#     - CP
+#     - FT
+#
+# Format 2 - Product-specific test types:
+#   filters:
+#     - product: SCT101A
+#       test_types: [CP]      # Only CP for SCT101A
+#     - product: ABC200B
+#       test_types: [CP, FT]  # Both CP and FT for ABC200B
+#     - product: XYZ300C      # No test_types = all (CP, FT)
 
-# Test types to include
+# Example: SCT101A CP only
+filters:
+  # - product: SCT101A
+  #   test_types: [CP]
+
+# Global defaults (used when filters is empty)
+products: []
 test_types:
   - CP
   - FT
@@ -26,7 +43,7 @@ test_types:
 storage:
   data_dir: "./data"
   database: "./data/stdf.duckdb"
-  download_dir: "./downloads"  # Temporary download directory
+  download_dir: "./downloads"
 
 processing:
   batch_size: 1000

@@ -89,11 +89,13 @@ class Database:
 
     def get_lot_summary(self, lot_id: str | None = None) -> list[dict]:
         """Get lot summary with yield information."""
-        where_clause = f"WHERE lot_id = '{lot_id}'" if lot_id else ""
+        where_clause = f"WHERE l.lot_id = '{lot_id}'" if lot_id else ""
 
         sql = f"""
         SELECT 
             l.lot_id,
+            l.product,
+            l.test_type,
             l.part_type,
             l.job_name,
             l.job_rev,
@@ -104,8 +106,8 @@ class Database:
         FROM lots l
         LEFT JOIN wafers w ON l.lot_id = w.lot_id
         {where_clause}
-        GROUP BY l.lot_id, l.part_type, l.job_name, l.job_rev
-        ORDER BY l.lot_id
+        GROUP BY l.lot_id, l.product, l.test_type, l.part_type, l.job_name, l.job_rev
+        ORDER BY l.product, l.test_type, l.lot_id
         """
         return self.query(sql)
 
