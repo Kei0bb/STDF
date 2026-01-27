@@ -404,7 +404,14 @@ def fetch(ctx, product: tuple, test_type: tuple, limit: int | None, ingest: bool
 
     try:
         with FTPClient(config.ftp) as client:
-            # Determine test types to fetch
+            # Determine products and test types to fetch
+            if cli_products:
+                ftp_products = cli_products
+            elif config.filters:
+                ftp_products = [f.product for f in config.filters]
+            else:
+                ftp_products = None  # All products
+            
             if cli_test_types:
                 ftp_test_types = cli_test_types
             elif config.filters:
@@ -413,16 +420,16 @@ def fetch(ctx, product: tuple, test_type: tuple, limit: int | None, ingest: bool
                     tt for f in config.filters for tt in f.test_types
                 ))
             else:
-                ftp_test_types = None  # All test types
+                ftp_test_types = ["CP", "FT"]  # Default to both
             
             # List files
             files = list(client.list_stdf_files(
-                products=cli_products,
+                products=ftp_products,
                 test_types=ftp_test_types,
             ))
             
-            # Apply config filters if no CLI override
-            if not cli_products and not cli_test_types and config.filters:
+            # Apply config filters for fine-grained product/test_type matching
+            if config.filters and not cli_products and not cli_test_types:
                 files = [(f, p, t, n) for f, p, t, n in files if config.should_fetch(p, t)]
 
             # Filter out already downloaded (unless force)
