@@ -35,7 +35,7 @@ def main(ctx, config: Path | None):
 @main.command()
 @click.argument("stdf_file", type=click.Path(exists=True, path_type=Path))
 @click.option("--product", "-p", help="Product name (auto-detect from path if not specified)")
-@click.option("--test-type", "-t", type=click.Choice(["CP", "FT"]), help="Test type (auto-detect from path if not specified)")
+@click.option("--test-type", "-t", help="Test type (auto-detect from path if not specified)")
 @click.option("--from-path", is_flag=True, help="Extract product/test-type from file path")
 @click.option("--verbose", "-v", is_flag=True, help="Verbose output")
 @click.pass_context
@@ -46,7 +46,7 @@ def ingest(ctx, stdf_file: Path, product: str | None, test_type: str | None, fro
     STDF_FILE: Path to the STDF file to ingest
 
     Product and test type can be specified via options or auto-detected from file path.
-    Expected path structure: .../product/test_type/file.stdf
+    Expected path structure: .../product/test_type/lot/file.stdf
     """
     config: Config = ctx.obj["config"]
     config.ensure_directories()
@@ -54,10 +54,11 @@ def ingest(ctx, stdf_file: Path, product: str | None, test_type: str | None, fro
     # Extract product/test_type from path if requested or not specified
     if from_path or (product is None and test_type is None):
         parts = stdf_file.resolve().parts
-        # Look for CP or FT in path to identify test_type
+        # Look for CP* or FT* in path to identify test_type
         for i, part in enumerate(parts):
-            if part.upper() in ("CP", "FT"):
-                test_type = part.upper()
+            part_upper = part.upper()
+            if part_upper.startswith("CP") or part_upper.startswith("FT"):
+                test_type = part  # Keep original case (CP1, FT2, etc.)
                 if i > 0:
                     product = parts[i - 1]
                 break

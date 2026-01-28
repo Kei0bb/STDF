@@ -58,6 +58,7 @@ TESTS_SCHEMA = pa.schema([
     ("hi_limit", pa.float64()),
     ("units", pa.string()),
     ("test_type", pa.string()),
+    ("rec_type", pa.string()),  # PTR, MPR, FTR
 ])
 
 TEST_RESULTS_SCHEMA = pa.schema([
@@ -201,6 +202,7 @@ class ParquetStorage:
                 "hi_limit": [t.get("hi_limit") for t in tests_list],
                 "units": [t.get("units", "") for t in tests_list],
                 "test_type": [t.get("test_type", "") for t in tests_list],
+                "rec_type": [t.get("rec_type", "PTR") for t in tests_list],
             }, schema=TESTS_SCHEMA)
             pq.write_table(tests_table, tests_path / "data.parquet", compression=compression)
             counts["tests"] = len(data.tests)

@@ -293,6 +293,7 @@ class STDFParser:
                 "hi_limit": hi_limit,
                 "units": units,
                 "test_type": "P",
+                "rec_type": "PTR",
             }
 
         self.data.test_results.append({
@@ -326,6 +327,7 @@ class STDFParser:
                 "test_num": test_num,
                 "test_name": "",
                 "test_type": "F",
+                "rec_type": "FTR",
             }
 
         self.data.test_results.append({
@@ -338,6 +340,88 @@ class STDFParser:
             "result": None,
             "passed": passed,
             "alarm_id": "",
+        })
+
+        remaining = rec_len - (f.tell() - start_pos)
+        if remaining > 0:
+            f.read(remaining)
+
+    def _parse_mpr(self, f: BinaryIO, rec_len: int):
+        """Parse Multiple-Result Parametric Record."""
+        start_pos = f.tell()
+        test_num = self._read_u4(f)
+        head_num = self._read_u1(f)
+        site_num = self._read_u1(f)
+        test_flg = self._read_u1(f)
+        parm_flg = self._read_u1(f)
+        rtn_icnt = self._read_u2(f) if f.tell() - start_pos < rec_len else 0
+        rslt_cnt = self._read_u2(f) if f.tell() - start_pos < rec_len else 0
+        
+        # Read return states (array of nibbles)
+        rtn_stat = []
+        if rtn_icnt > 0 and f.tell() - start_pos < rec_len:
+            num_bytes = (rtn_icnt + 1) // 2
+            for _ in range(num_bytes):
+                byte = self._read_u1(f)
+                rtn_stat.append(byte & 0x0F)
+                if len(rtn_stat) < rtn_icnt:
+                    rtn_stat.append((byte >> 4) & 0x0F)
+        
+        # Read results (array of R*4)
+        results = []
+        for _ in range(rslt_cnt):
+            if f.tell() - start_pos < rec_len:
+                results.append(self._read_r4(f))
+        
+        # Read optional fields
+        test_txt = self._read_cn(f) if f.tell() - start_pos < rec_len else ""
+        alarm_id = self._read_cn(f) if f.tell() - start_pos < rec_len else ""
+        opt_flag = self._read_u1(f) if f.tell() - start_pos < rec_len else 0xFF
+        res_scal = self._read_i1(f) if f.tell() - start_pos < rec_len else 0
+        llm_scal = self._read_i1(f) if f.tell() - start_pos < rec_len else 0
+        hlm_scal = self._read_i1(f) if f.tell() - start_pos < rec_len else 0
+        lo_limit = self._read_r4(f) if f.tell() - start_pos < rec_len else None
+        hi_limit = self._read_r4(f) if f.tell() - start_pos < rec_len else None
+        
+        # Read start index and increment
+        start_in = self._read_r4(f) if f.tell() - start_pos < rec_len else 0.0
+        incr_in = self._read_r4(f) if f.tell() - start_pos < rec_len else 0.0
+        
+        # Read pin indexes (array of U*2)
+        rtn_indx = []
+        for _ in range(rtn_icnt):
+            if f.tell() - start_pos < rec_len:
+                rtn_indx.append(self._read_u2(f))
+        
+        units = self._read_cn(f) if f.tell() - start_pos < rec_len else ""
+        
+        passed = (test_flg & 0x80) == 0
+
+        # Register test definition
+        if test_num not in self.data.tests:
+            self.data.tests[test_num] = {
+                "test_num": test_num,
+                "test_name": test_txt,
+                "lo_limit": lo_limit,
+                "hi_limit": hi_limit,
+                "units": units,
+                "test_type": "M",
+                "rec_type": "MPR",
+            }
+
+        # Store single result (use first result or average)
+        result_val = results[0] if results else None
+        
+        self.data.test_results.append({
+            "lot_id": self.data.lot_id,
+            "wafer_id": self.data._current_wafer,
+            "part_id": f"{self.data.lot_id}_{self.data._current_wafer}_{self._part_counter}",
+            "test_num": test_num,
+            "head_num": head_num,
+            "site_num": site_num,
+            "result": result_val,
+            "passed": passed,
+            "alarm_id": alarm_id,
         })
 
         remaining = rec_len - (f.tell() - start_pos)
@@ -414,6 +498,8 @@ class STDFParser:
                         self._parse_prr(f, rec_len)
                     elif rec_key == REC_PTR:
                         self._parse_ptr(f, rec_len)
+                    elif rec_key == REC_MPR:
+                        self._parse_mpr(f, rec_len)
                     elif rec_key == REC_FTR:
                         self._parse_ftr(f, rec_len)
                     elif rec_key == REC_HBR:

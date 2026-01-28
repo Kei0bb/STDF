@@ -99,12 +99,18 @@ class FTPClient:
             # Get test type directories (CP, FT, etc.)
             test_type_dirs = self.list_directories(product_path)
 
-            for test_type in test_type_dirs:
-                # Filter by test type if specified
-                if test_types and test_type not in test_types:
-                    continue
+            for test_type_dir in test_type_dirs:
+                # Filter by test type prefix if specified (CP matches CP, CP1, CP2, etc.)
+                if test_types:
+                    matched = False
+                    for tt in test_types:
+                        if test_type_dir.upper().startswith(tt.upper()):
+                            matched = True
+                            break
+                    if not matched:
+                        continue
 
-                test_type_path = f"{product_path}/{test_type}"
+                test_type_path = f"{product_path}/{test_type_dir}"
 
                 # Get lot directories
                 lot_dirs = self.list_directories(test_type_path)
@@ -122,7 +128,8 @@ class FTPClient:
                         filename = Path(file_path).name
                         for pattern in self.config.patterns:
                             if fnmatch.fnmatch(filename.lower(), pattern.lower()):
-                                yield file_path, product, test_type, filename
+                                # Return actual test_type_dir (CP1, CP2) not the filter (CP)
+                                yield file_path, product, test_type_dir, filename
                                 break
 
     def download_file(

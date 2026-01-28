@@ -70,13 +70,18 @@ class Config:
         Check if product/test_type combination should be fetched.
         
         If filters is empty, all products/test_types are allowed.
+        Test type matching uses prefix (CP matches CP, CP1, CP2, etc.)
         """
         if not self.filters:
             return True  # No filters = fetch all
         
         for f in self.filters:
             if f.product == product:
-                return test_type in f.test_types
+                # Prefix match for test_type (CP matches CP1, CP2, etc.)
+                for tt in f.test_types:
+                    if test_type.upper().startswith(tt.upper()):
+                        return True
+                return False
         return False  # Product not in filters, skip it
 
     @classmethod

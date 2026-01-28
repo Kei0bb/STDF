@@ -193,7 +193,7 @@ else:
 
 
 # ============================================
-# Parameter Selection with Table + Search
+# Parameter Selection with AG Grid
 # ============================================
 st.divider()
 st.subheader("🔬 Parameter Selection")
@@ -201,6 +201,9 @@ st.subheader("🔬 Parameter Selection")
 if tests_df.empty:
     st.warning("No test parameters found for selected lots.")
     st.stop()
+
+# Import AG Grid
+from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode, DataReturnMode
 
 # Search filter
 search_term = st.text_input(
@@ -218,49 +221,49 @@ if search_term:
 else:
     filtered_df = tests_df.copy()
 
-# Add selection column
-if "selected" not in filtered_df.columns:
-    filtered_df.insert(0, "selected", False)
-
 # Show statistics
-col1, col2, col3 = st.columns(3)
+col1, col2 = st.columns(2)
 col1.metric("Total Parameters", len(tests_df))
 col2.metric("Filtered", len(filtered_df))
-col3.metric("Selected", st.session_state.get("selected_count", 0))
 
-# Quick select buttons
-btn_col1, btn_col2, btn_col3 = st.columns([1, 1, 4])
-with btn_col1:
-    if st.button("✅ Select All Filtered", use_container_width=True):
-        filtered_df["selected"] = True
-with btn_col2:
-    if st.button("❌ Clear Selection", use_container_width=True):
-        filtered_df["selected"] = False
+st.caption("💡 **Shift+クリック** で範囲選択、**Ctrl+クリック** で個別追加選択")
 
-# Editable data table with checkbox selection
-edited_df = st.data_editor(
+# Configure AG Grid
+gb = GridOptionsBuilder.from_dataframe(filtered_df)
+gb.configure_selection(
+    selection_mode="multiple",
+    use_checkbox=True,
+    header_checkbox=True,  # Header checkbox to select all
+)
+gb.configure_column("test_num", header_name="Test#", width=80)
+gb.configure_column("test_name", header_name="Test Name", flex=2)
+gb.configure_column("rec_type", header_name="Type", width=70)
+gb.configure_column("units", header_name="Units", width=80)
+gb.configure_column("lo_limit", header_name="Lo Limit", width=100, type=["numericColumn"])
+gb.configure_column("hi_limit", header_name="Hi Limit", width=100, type=["numericColumn"])
+gb.configure_grid_options(domLayout='normal')
+grid_options = gb.build()
+
+# Display AG Grid
+grid_response = AgGrid(
     filtered_df,
-    column_config={
-        "selected": st.column_config.CheckboxColumn(
-            "Select",
-            help="Select parameters to include in export",
-            default=False,
-        ),
-        "test_num": st.column_config.NumberColumn("Test#", width="small"),
-        "test_name": st.column_config.TextColumn("Test Name", width="large"),
-        "units": st.column_config.TextColumn("Units", width="small"),
-        "lo_limit": st.column_config.NumberColumn("Lo Limit", format="%.4g"),
-        "hi_limit": st.column_config.NumberColumn("Hi Limit", format="%.4g"),
-    },
-    disabled=["test_num", "test_name", "units", "lo_limit", "hi_limit"],
-    use_container_width=True,
-    hide_index=True,
+    gridOptions=grid_options,
     height=400,
+    update_mode=GridUpdateMode.SELECTION_CHANGED,
+    data_return_mode=DataReturnMode.FILTERED_AND_SORTED,
+    fit_columns_on_grid_load=True,
+    theme="streamlit",
 )
 
-# Get selected test numbers
-selected_test_nums = edited_df[edited_df["selected"] == True]["test_num"].tolist()
-st.session_state["selected_count"] = len(selected_test_nums)
+# Get selected rows
+selected_rows = grid_response["selected_rows"]
+if selected_rows is not None and len(selected_rows) > 0:
+    if isinstance(selected_rows, pd.DataFrame):
+        selected_test_nums = selected_rows["test_num"].tolist()
+    else:
+        selected_test_nums = [row["test_num"] for row in selected_rows]
+else:
+    selected_test_nums = []
 
 if not selected_test_nums:
     st.warning("⚠️ Please select at least one parameter from the table above.")
