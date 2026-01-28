@@ -28,4 +28,4 @@ storage:
 
 processing:
   batch_size: 1000
-  compression: "snappy"
+  compression: "gzip"  # snappy より遅いが互換性が高い

@@ -1,12 +1,23 @@
 """Parquet storage for STDF data."""
 
 from pathlib import Path
+from datetime import datetime, timezone
 
 import pyarrow as pa
 import pyarrow.parquet as pq
 
 from .parser import STDFData
 from .config import StorageConfig
+
+
+def _unix_to_datetime(unix_ts: int) -> datetime | None:
+    """Convert Unix timestamp to datetime. Returns None for invalid values."""
+    if unix_ts is None or unix_ts <= 0:
+        return None
+    try:
+        return datetime.fromtimestamp(unix_ts, tz=timezone.utc)
+    except (OSError, ValueError):
+        return None
 
 
 # PyArrow schemas for each table
@@ -17,8 +28,8 @@ LOTS_SCHEMA = pa.schema([
     ("part_type", pa.string()),
     ("job_name", pa.string()),
     ("job_rev", pa.string()),
-    ("start_time", pa.int64()),
-    ("finish_time", pa.int64()),
+    ("start_time", pa.timestamp("ms", tz="UTC")),
+    ("finish_time", pa.timestamp("ms", tz="UTC")),
     ("tester_type", pa.string()),
     ("operator", pa.string()),
 ])
@@ -27,8 +38,8 @@ WAFERS_SCHEMA = pa.schema([
     ("wafer_id", pa.string()),
     ("lot_id", pa.string()),
     ("head_num", pa.int64()),
-    ("start_time", pa.int64()),
-    ("finish_time", pa.int64()),
+    ("start_time", pa.timestamp("ms", tz="UTC")),
+    ("finish_time", pa.timestamp("ms", tz="UTC")),
     ("part_count", pa.int64()),
     ("good_count", pa.int64()),
     ("rtst_count", pa.int64()),
@@ -89,6 +100,23 @@ class ParquetStorage:
             return base / f"product={product}" / f"test_type={test_type}"
         return base
 
+    def _write_parquet(self, table: pa.Table, path: Path, compression: str = "gzip"):
+        """
+        Write Parquet file with maximum compatibility settings.
+        
+        Uses Parquet 1.0 format and conservative options for JMP/Excel/viewer compatibility.
+        """
+        pq.write_table(
+            table,
+            path,
+            compression=compression,
+            version="1.0",  # Maximum compatibility
+            use_dictionary=True,
+            write_statistics=True,
+            coerce_timestamps="ms",  # Millisecond precision
+            allow_truncated_timestamps=True,
+        )
+
     def save_stdf_data(
         self,
         data: STDFData,
@@ -121,12 +149,12 @@ class ParquetStorage:
             "part_type": [data.part_type],
             "job_name": [data.job_name],
             "job_rev": [data.job_rev],
-            "start_time": [data.start_time],
-            "finish_time": [data.finish_time],
+            "start_time": [_unix_to_datetime(data.start_time)],
+            "finish_time": [_unix_to_datetime(data.finish_time)],
             "tester_type": [data.tester_type],
             "operator": [data.operator],
         }, schema=LOTS_SCHEMA)
-        pq.write_table(lot_table, lot_path / "data.parquet", compression=compression)
+        self._write_parquet(lot_table, lot_path / "data.parquet", compression)
         counts["lots"] = 1
 
         # Save wafers
@@ -146,14 +174,14 @@ class ParquetStorage:
                     "wafer_id": [w.get("wafer_id", "") for w in wafers],
                     "lot_id": [data.lot_id for _ in wafers],
                     "head_num": [w.get("head_num", 0) for w in wafers],
-                    "start_time": [w.get("start_time", 0) for w in wafers],
-                    "finish_time": [w.get("finish_time", 0) for w in wafers],
+                    "start_time": [_unix_to_datetime(w.get("start_time", 0)) for w in wafers],
+                    "finish_time": [_unix_to_datetime(w.get("finish_time", 0)) for w in wafers],
                     "part_count": [w.get("part_count", 0) for w in wafers],
                     "good_count": [w.get("good_count", 0) for w in wafers],
                     "rtst_count": [w.get("rtst_count", 0) for w in wafers],
                     "abrt_count": [w.get("abrt_count", 0) for w in wafers],
                 }, schema=WAFERS_SCHEMA)
-                pq.write_table(wafer_table, wafer_path / "data.parquet", compression=compression)
+                self._write_parquet(wafer_table, wafer_path / "data.parquet", compression)
 
             counts["wafers"] = len(data.wafers)
 
@@ -184,7 +212,7 @@ class ParquetStorage:
                     "test_count": [p.get("test_count", 0) for p in parts],
                     "test_time": [p.get("test_time", 0) for p in parts],
                 }, schema=PARTS_SCHEMA)
-                pq.write_table(part_table, part_path / "data.parquet", compression=compression)
+                self._write_parquet(part_table, part_path / "data.parquet", compression)
 
             counts["parts"] = len(data.parts)
 
@@ -204,7 +232,7 @@ class ParquetStorage:
                 "test_type": [t.get("test_type", "") for t in tests_list],
                 "rec_type": [t.get("rec_type", "PTR") for t in tests_list],
             }, schema=TESTS_SCHEMA)
-            pq.write_table(tests_table, tests_path / "data.parquet", compression=compression)
+            self._write_parquet(tests_table, tests_path / "data.parquet", compression)
             counts["tests"] = len(data.tests)
 
         # Save test results (partitioned by lot_id, wafer_id)
@@ -231,7 +259,7 @@ class ParquetStorage:
                     "passed": [r.get("passed", False) for r in results],
                     "alarm_id": [r.get("alarm_id", "") for r in results],
                 }, schema=TEST_RESULTS_SCHEMA)
-                pq.write_table(result_table, result_path / "data.parquet", compression=compression)
+                self._write_parquet(result_table, result_path / "data.parquet", compression)
 
             counts["test_results"] = len(data.test_results)
 

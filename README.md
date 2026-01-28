@@ -137,6 +137,28 @@ stdf-platform web
 | tests | テスト定義（リミット、単位） |
 | test_results | テスト結果（Parametric/Functional） |
 
+---
+
+## 将来のロードマップ: Rust 移行
+
+大量ファイル処理のパフォーマンス向上のため、STDFパーサーのRust移行を計画中。
+
+### 期待される効果
+- **10-30x の高速化**
+- メモリ効率向上
+- 並列処理対応
+
+### アーキテクチャ
+```
+Python (CLI/Web/API)
+       ↓ PyO3
+Rust (STDF Parser → Parquet)
+```
+
+詳細: [Rust Architecture Design](docs/rust_architecture.md) *(計画中)*
+
+---
+
 ## ライセンス
 
 MIT License
