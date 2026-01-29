@@ -10,20 +10,25 @@ from .parser import STDFData
 from .config import StorageConfig
 
 
-def _unix_to_datetime(unix_ts: int) -> datetime | None:
-    """Convert Unix timestamp to datetime. Returns None for invalid values."""
+# Default timestamp for invalid values (compatible with Parquet viewers)
+_DEFAULT_DATETIME = datetime(1970, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
+
+
+def _unix_to_datetime(unix_ts: int) -> datetime:
+    """Convert Unix timestamp to datetime. Returns default for invalid values."""
     if unix_ts is None or unix_ts <= 0:
-        return None
+        return _DEFAULT_DATETIME
     try:
         return datetime.fromtimestamp(unix_ts, tz=timezone.utc)
     except (OSError, ValueError):
-        return None
+        return _DEFAULT_DATETIME
 
 
 # PyArrow schemas for each table
 LOTS_SCHEMA = pa.schema([
     ("lot_id", pa.string()),
     ("product", pa.string()),
+    ("test_category", pa.string()),  # CP, FT, OTHER
     ("test_type", pa.string()),
     ("part_type", pa.string()),
     ("job_name", pa.string()),
@@ -85,6 +90,16 @@ TEST_RESULTS_SCHEMA = pa.schema([
 ])
 
 
+def _get_test_category(test_type: str) -> str:
+    """Extract test category from test type (CP1 -> CP, FT2 -> FT)."""
+    test_type_upper = test_type.upper()
+    if test_type_upper.startswith("CP"):
+        return "CP"
+    elif test_type_upper.startswith("FT"):
+        return "FT"
+    return "OTHER"
+
+
 class ParquetStorage:
     """Parquet storage for STDF data with Hive-style partitioning."""
 
@@ -94,10 +109,11 @@ class ParquetStorage:
         self.data_dir.mkdir(parents=True, exist_ok=True)
 
     def _get_table_path(self, table_name: str, product: str = "", test_type: str = "") -> Path:
-        """Get path for a table with product/test_type partitioning."""
+        """Get path for a table with product/test_category/test_type partitioning."""
         base = self.data_dir / table_name
         if product and test_type:
-            return base / f"product={product}" / f"test_type={test_type}"
+            test_category = _get_test_category(test_type)
+            return base / f"product={product}" / f"test_category={test_category}" / f"test_type={test_type}"
         return base
 
     def _write_parquet(self, table: pa.Table, path: Path, compression: str = "gzip"):
@@ -145,6 +161,7 @@ class ParquetStorage:
         lot_table = pa.table({
             "lot_id": [data.lot_id],
             "product": [product],
+            "test_category": [_get_test_category(test_type)],
             "test_type": [test_type],
             "part_type": [data.part_type],
             "job_name": [data.job_name],

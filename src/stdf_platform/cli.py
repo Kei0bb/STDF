@@ -354,10 +354,11 @@ def shell(ctx):
 @click.option("--test-type", "-t", multiple=True, help="Test type filter (CP, FT)")
 @click.option("--limit", "-n", type=int, help="Maximum files to fetch")
 @click.option("--ingest/--no-ingest", default=True, help="Auto-ingest after download")
+@click.option("--cleanup/--no-cleanup", default=True, help="Delete source files after successful ingest")
 @click.option("--force", "-f", is_flag=True, help="Force re-download even if file exists")
 @click.option("--verbose", "-v", is_flag=True, help="Verbose output")
 @click.pass_context
-def fetch(ctx, product: tuple, test_type: tuple, limit: int | None, ingest: bool, force: bool, verbose: bool):
+def fetch(ctx, product: tuple, test_type: tuple, limit: int | None, ingest: bool, cleanup: bool, force: bool, verbose: bool):
     """
     Fetch STDF files from FTP server with incremental sync.
 
@@ -486,6 +487,7 @@ def fetch(ctx, product: tuple, test_type: tuple, limit: int | None, ingest: bool
             storage = ParquetStorage(config.storage)
             success = 0
             failed = 0
+            ingested_files = []
 
             for remote_path, local_path, prod, ttype in downloaded:
                 try:
@@ -494,6 +496,7 @@ def fetch(ctx, product: tuple, test_type: tuple, limit: int | None, ingest: bool
                     sync_manager.mark_ingested(remote_path)
                     console.print(f"  [green]✓[/green] {local_path.name} ({prod}/{ttype})")
                     success += 1
+                    ingested_files.append(local_path)
                 except Exception as e:
                     console.print(f"  [red]✗[/red] {local_path.name}: {e}")
                     failed += 1
@@ -501,6 +504,20 @@ def fetch(ctx, product: tuple, test_type: tuple, limit: int | None, ingest: bool
             console.print(f"\n[green]✓[/green] Ingested {success} files")
             if failed:
                 console.print(f"[yellow]![/yellow] {failed} files failed")
+
+            # Cleanup source files after successful ingest
+            if cleanup and ingested_files:
+                console.print("\n[bold]Cleaning up source files...[/bold]")
+                cleaned = 0
+                for local_path in ingested_files:
+                    try:
+                        if local_path.exists():
+                            local_path.unlink()
+                            cleaned += 1
+                    except Exception as e:
+                        if verbose:
+                            console.print(f"  [yellow]![/yellow] Could not delete {local_path.name}: {e}")
+                console.print(f"[green]✓[/green] Deleted {cleaned} source files")
 
     except Exception as e:
         console.print(f"[red]Error:[/red] {e}")
