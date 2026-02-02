@@ -89,10 +89,12 @@ TEST_DATA_SCHEMA = pa.schema([
 
 
 def _get_test_category(test_type: str) -> str:
-    """Extract test category from test type (CP1 -> CP, FT2 -> FT)."""
+    """Extract test category from test type (CP11 -> CP, FT2 -> FT, PT -> CP)."""
     test_type_upper = test_type.upper()
     if test_type_upper.startswith("CP"):
         return "CP"
+    elif test_type_upper.startswith("PT"):
+        return "CP"  # PT = CP (Probing Test)
     elif test_type_upper.startswith("FT"):
         return "FT"
     return "OTHER"
@@ -100,18 +102,19 @@ def _get_test_category(test_type: str) -> str:
 
 def extract_sub_process_from_filename(filename: str) -> str | None:
     """
-    Extract sub-process (CP11, FT2, etc.) from filename.
+    Extract sub-process (CP11, FT2, PT1, etc.) from filename.
     
-    Looks for patterns like _CP11_, _FT2_, _CP1_, etc. in the filename.
+    Looks for patterns like _CP11_, _FT2_, _PT1_, etc. in the filename.
     Returns None if no sub-process is found.
     
     Examples:
         "A_SPT_CP11_F5009AF0002_20250127.stdf.gz" -> "CP11"
         "LOT001_FT2_001.stdf" -> "FT2"
+        "TEST_PT1_DATA.stdf" -> "PT1"
     """
     import re
-    # Match _CP followed by digits or _FT followed by digits
-    pattern = r'[_\-](CP\d+|FT\d+)[_\-\.]'
+    # Match _CP, _FT, or _PT followed by digits
+    pattern = r'[_\-](CP\d+|FT\d+|PT\d+)[_\-\.]'
     match = re.search(pattern, filename, re.IGNORECASE)
     if match:
         return match.group(1).upper()

@@ -60,10 +60,10 @@ def ingest(ctx, stdf_file: Path, product: str | None, sub_process: str | None, f
     # Extract product/sub_process from path if requested or not specified
     if from_path or (product is None and sub_process is None):
         parts = stdf_file.resolve().parts
-        # Look for CP* or FT* in path to identify test_type
+        # Look for CP*, FT*, or PT* in path to identify test_type
         for i, part in enumerate(parts):
             part_upper = part.upper()
-            if part_upper.startswith("CP") or part_upper.startswith("FT"):
+            if part_upper.startswith("CP") or part_upper.startswith("FT") or part_upper.startswith("PT"):
                 if sub_process is None:
                     sub_process = part  # Keep original case (CP1, FT2, etc.)
                 if i > 0 and product is None:
