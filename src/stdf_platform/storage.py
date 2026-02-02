@@ -29,7 +29,7 @@ LOTS_SCHEMA = pa.schema([
     ("lot_id", pa.string()),
     ("product", pa.string()),
     ("test_category", pa.string()),  # CP, FT, OTHER
-    ("test_type", pa.string()),
+    ("sub_process", pa.string()),    # CP11, FT2, etc.
     ("part_type", pa.string()),
     ("job_name", pa.string()),
     ("job_rev", pa.string()),
@@ -66,27 +66,25 @@ PARTS_SCHEMA = pa.schema([
     ("test_time", pa.int64()),
 ])
 
-TESTS_SCHEMA = pa.schema([
-    ("test_num", pa.int64()),
-    ("lot_id", pa.string()),
-    ("test_name", pa.string()),
-    ("lo_limit", pa.float64()),
-    ("hi_limit", pa.float64()),
-    ("units", pa.string()),
-    ("test_type", pa.string()),
-    ("rec_type", pa.string()),  # PTR, MPR, FTR
-])
-
-TEST_RESULTS_SCHEMA = pa.schema([
+# Unified test data schema (merged tests + test_results)
+TEST_DATA_SCHEMA = pa.schema([
+    # Part identification
     ("lot_id", pa.string()),
     ("wafer_id", pa.string()),
     ("part_id", pa.string()),
+    ("x_coord", pa.int64()),
+    ("y_coord", pa.int64()),
+    # Test identification
     ("test_num", pa.int64()),
-    ("head_num", pa.int64()),
-    ("site_num", pa.int64()),
+    ("test_name", pa.string()),
+    ("rec_type", pa.string()),  # PTR, MPR, FTR
+    # Test parameters
+    ("lo_limit", pa.float64()),
+    ("hi_limit", pa.float64()),
+    ("units", pa.string()),
+    # Test result
     ("result", pa.float64()),
     ("passed", pa.bool_()),
-    ("alarm_id", pa.string()),
 ])
 
 
@@ -100,6 +98,26 @@ def _get_test_category(test_type: str) -> str:
     return "OTHER"
 
 
+def extract_sub_process_from_filename(filename: str) -> str | None:
+    """
+    Extract sub-process (CP11, FT2, etc.) from filename.
+    
+    Looks for patterns like _CP11_, _FT2_, _CP1_, etc. in the filename.
+    Returns None if no sub-process is found.
+    
+    Examples:
+        "A_SPT_CP11_F5009AF0002_20250127.stdf.gz" -> "CP11"
+        "LOT001_FT2_001.stdf" -> "FT2"
+    """
+    import re
+    # Match _CP followed by digits or _FT followed by digits
+    pattern = r'[_\-](CP\d+|FT\d+)[_\-\.]'
+    match = re.search(pattern, filename, re.IGNORECASE)
+    if match:
+        return match.group(1).upper()
+    return None
+
+
 class ParquetStorage:
     """Parquet storage for STDF data with Hive-style partitioning."""
 
@@ -108,12 +126,24 @@ class ParquetStorage:
         self.data_dir = config.data_dir
         self.data_dir.mkdir(parents=True, exist_ok=True)
 
-    def _get_table_path(self, table_name: str, product: str = "", test_type: str = "") -> Path:
-        """Get path for a table with product/test_category/test_type partitioning."""
+    def _get_table_path(
+        self, 
+        table_name: str, 
+        product: str = "", 
+        test_category: str = "",
+        sub_process: str = ""
+    ) -> Path:
+        """
+        Get path for a table with product/test_category/sub_process partitioning.
+        
+        Hierarchy: product -> test_category (CP/FT) -> sub_process (CP11/FT2)
+        """
         base = self.data_dir / table_name
-        if product and test_type:
-            test_category = _get_test_category(test_type)
-            return base / f"product={product}" / f"test_category={test_category}" / f"test_type={test_type}"
+        if product and test_category:
+            path = base / f"product={product}" / f"test_category={test_category}"
+            if sub_process:
+                path = path / f"sub_process={sub_process}"
+            return path
         return base
 
     def _write_parquet(self, table: pa.Table, path: Path, compression: str = "gzip"):
@@ -137,7 +167,8 @@ class ParquetStorage:
         self,
         data: STDFData,
         product: str = "UNKNOWN",
-        test_type: str = "UNKNOWN",
+        test_category: str = "UNKNOWN",
+        sub_process: str = "",
         compression: str = "snappy",
     ) -> dict[str, int]:
         """
@@ -146,7 +177,8 @@ class ParquetStorage:
         Args:
             data: Parsed STDF data
             product: Product name (extracted from file path)
-            test_type: Test type - CP or FT (extracted from file path)
+            test_category: Test category - CP or FT
+            sub_process: Sub-process - CP11, FT2, etc. (extracted from filename)
             compression: Parquet compression method
 
         Returns:
@@ -155,14 +187,14 @@ class ParquetStorage:
         counts = {}
 
         # Save lot info
-        lot_path = self._get_table_path("lots", product, test_type) / f"lot_id={data.lot_id}"
+        lot_path = self._get_table_path("lots", product, test_category, sub_process) / f"lot_id={data.lot_id}"
         lot_path.mkdir(parents=True, exist_ok=True)
 
         lot_table = pa.table({
             "lot_id": [data.lot_id],
             "product": [product],
-            "test_category": [_get_test_category(test_type)],
-            "test_type": [test_type],
+            "test_category": [test_category],
+            "sub_process": [sub_process or ""],
             "part_type": [data.part_type],
             "job_name": [data.job_name],
             "job_rev": [data.job_rev],
@@ -184,7 +216,7 @@ class ParquetStorage:
                 wafer_groups[wafer_id].append(wafer)
 
             for wafer_id, wafers in wafer_groups.items():
-                wafer_path = self._get_table_path("wafers", product, test_type) / f"lot_id={data.lot_id}" / f"wafer_id={wafer_id}"
+                wafer_path = self._get_table_path("wafers", product, test_category, sub_process) / f"lot_id={data.lot_id}" / f"wafer_id={wafer_id}"
                 wafer_path.mkdir(parents=True, exist_ok=True)
 
                 wafer_table = pa.table({
@@ -212,7 +244,7 @@ class ParquetStorage:
                 part_groups[key].append(part)
 
             for (lot_id, wafer_id), parts in part_groups.items():
-                part_path = self._get_table_path("parts", product, test_type) / f"lot_id={lot_id}" / f"wafer_id={wafer_id}"
+                part_path = self._get_table_path("parts", product, test_category, sub_process) / f"lot_id={lot_id}" / f"wafer_id={wafer_id}"
                 part_path.mkdir(parents=True, exist_ok=True)
 
                 part_table = pa.table({
@@ -233,27 +265,18 @@ class ParquetStorage:
 
             counts["parts"] = len(data.parts)
 
-        # Save tests
-        if data.tests:
-            tests_path = self._get_table_path("tests", product, test_type) / f"lot_id={data.lot_id}"
-            tests_path.mkdir(parents=True, exist_ok=True)
-
-            tests_list = list(data.tests.values())
-            tests_table = pa.table({
-                "test_num": [t.get("test_num", 0) for t in tests_list],
-                "lot_id": [data.lot_id for _ in tests_list],
-                "test_name": [t.get("test_name", "") for t in tests_list],
-                "lo_limit": [t.get("lo_limit") for t in tests_list],
-                "hi_limit": [t.get("hi_limit") for t in tests_list],
-                "units": [t.get("units", "") for t in tests_list],
-                "test_type": [t.get("test_type", "") for t in tests_list],
-                "rec_type": [t.get("rec_type", "PTR") for t in tests_list],
-            }, schema=TESTS_SCHEMA)
-            self._write_parquet(tests_table, tests_path / "data.parquet", compression)
-            counts["tests"] = len(data.tests)
-
-        # Save test results (partitioned by lot_id, wafer_id)
+        # Save unified test data (merged tests + test_results)
         if data.test_results:
+            # Build part_id -> (x_coord, y_coord) mapping from parts
+            part_coords = {}
+            for part in data.parts:
+                part_id = part.get("part_id", "")
+                part_coords[part_id] = (
+                    part.get("x_coord", -32768),
+                    part.get("y_coord", -32768),
+                )
+
+            # Group by lot_id, wafer_id
             result_groups: dict[tuple, list] = {}
             for result in data.test_results:
                 key = (result.get("lot_id", ""), result.get("wafer_id", ""))
@@ -262,23 +285,51 @@ class ParquetStorage:
                 result_groups[key].append(result)
 
             for (lot_id, wafer_id), results in result_groups.items():
-                result_path = self._get_table_path("test_results", product, test_type) / f"lot_id={lot_id}" / f"wafer_id={wafer_id}"
+                result_path = self._get_table_path("test_data", product, test_category, sub_process) / f"lot_id={lot_id}" / f"wafer_id={wafer_id}"
                 result_path.mkdir(parents=True, exist_ok=True)
 
+                # Enrich results with test info and coordinates
+                enriched = []
+                for r in results:
+                    test_num = r.get("test_num", 0)
+                    test_info = data.tests.get(test_num, {})
+                    part_id = r.get("part_id", "")
+                    x_coord, y_coord = part_coords.get(part_id, (-32768, -32768))
+                    
+                    enriched.append({
+                        "lot_id": r.get("lot_id", ""),
+                        "wafer_id": r.get("wafer_id", ""),
+                        "part_id": part_id,
+                        "x_coord": x_coord,
+                        "y_coord": y_coord,
+                        "test_num": test_num,
+                        "test_name": test_info.get("test_name", ""),
+                        "rec_type": test_info.get("rec_type", "PTR"),
+                        "lo_limit": test_info.get("lo_limit"),
+                        "hi_limit": test_info.get("hi_limit"),
+                        "units": test_info.get("units", ""),
+                        "result": r.get("result"),
+                        "passed": r.get("passed", False),
+                    })
+
                 result_table = pa.table({
-                    "lot_id": [r.get("lot_id", "") for r in results],
-                    "wafer_id": [r.get("wafer_id", "") for r in results],
-                    "part_id": [r.get("part_id", "") for r in results],
-                    "test_num": [r.get("test_num", 0) for r in results],
-                    "head_num": [r.get("head_num", 0) for r in results],
-                    "site_num": [r.get("site_num", 0) for r in results],
-                    "result": [r.get("result") for r in results],
-                    "passed": [r.get("passed", False) for r in results],
-                    "alarm_id": [r.get("alarm_id", "") for r in results],
-                }, schema=TEST_RESULTS_SCHEMA)
+                    "lot_id": [r["lot_id"] for r in enriched],
+                    "wafer_id": [r["wafer_id"] for r in enriched],
+                    "part_id": [r["part_id"] for r in enriched],
+                    "x_coord": [r["x_coord"] for r in enriched],
+                    "y_coord": [r["y_coord"] for r in enriched],
+                    "test_num": [r["test_num"] for r in enriched],
+                    "test_name": [r["test_name"] for r in enriched],
+                    "rec_type": [r["rec_type"] for r in enriched],
+                    "lo_limit": [r["lo_limit"] for r in enriched],
+                    "hi_limit": [r["hi_limit"] for r in enriched],
+                    "units": [r["units"] for r in enriched],
+                    "result": [r["result"] for r in enriched],
+                    "passed": [r["passed"] for r in enriched],
+                }, schema=TEST_DATA_SCHEMA)
                 self._write_parquet(result_table, result_path / "data.parquet", compression)
 
-            counts["test_results"] = len(data.test_results)
+            counts["test_data"] = len(data.test_results)
 
         return counts
 

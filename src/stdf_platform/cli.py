@@ -35,42 +35,51 @@ def main(ctx, config: Path | None):
 @main.command()
 @click.argument("stdf_file", type=click.Path(exists=True, path_type=Path))
 @click.option("--product", "-p", help="Product name (auto-detect from path if not specified)")
-@click.option("--test-type", "-t", help="Test type (auto-detect from path if not specified)")
-@click.option("--from-path", is_flag=True, help="Extract product/test-type from file path")
+@click.option("--sub-process", "-s", help="Sub-process (CP11, FT2, etc. - auto-detect from filename if not specified)")
+@click.option("--from-path", is_flag=True, help="Extract product/sub-process from file path")
 @click.option("--verbose", "-v", is_flag=True, help="Verbose output")
 @click.pass_context
-def ingest(ctx, stdf_file: Path, product: str | None, test_type: str | None, from_path: bool, verbose: bool):
+def ingest(ctx, stdf_file: Path, product: str | None, sub_process: str | None, from_path: bool, verbose: bool):
     """
     Ingest an STDF file into the data platform.
 
     STDF_FILE: Path to the STDF file to ingest
 
-    Product and test type can be specified via options or auto-detected from file path.
+    Product and sub-process can be specified via options or auto-detected from file path/filename.
     Expected path structure: .../product/test_type/lot/file.stdf
     """
+    from .storage import extract_sub_process_from_filename, _get_test_category
+    
     config: Config = ctx.obj["config"]
     config.ensure_directories()
 
-    # Extract product/test_type from path if requested or not specified
-    if from_path or (product is None and test_type is None):
+    # Try to extract sub_process from filename first
+    if sub_process is None:
+        sub_process = extract_sub_process_from_filename(stdf_file.name)
+    
+    # Extract product/sub_process from path if requested or not specified
+    if from_path or (product is None and sub_process is None):
         parts = stdf_file.resolve().parts
         # Look for CP* or FT* in path to identify test_type
         for i, part in enumerate(parts):
             part_upper = part.upper()
             if part_upper.startswith("CP") or part_upper.startswith("FT"):
-                test_type = part  # Keep original case (CP1, FT2, etc.)
-                if i > 0:
+                if sub_process is None:
+                    sub_process = part  # Keep original case (CP1, FT2, etc.)
+                if i > 0 and product is None:
                     product = parts[i - 1]
                 break
 
     # Default values if still not found
     product = product or "UNKNOWN"
-    test_type = test_type or "UNKNOWN"
+    sub_process = sub_process or "UNKNOWN"
+    test_category = _get_test_category(sub_process)
 
     console.print(f"\n[bold]STDF Platform - Ingest[/bold]")
     console.print(f"  File: {stdf_file}")
     console.print(f"  Product: {product}")
-    console.print(f"  Test Type: {test_type}")
+    console.print(f"  Test Category: {test_category}")
+    console.print(f"  Sub-Process: {sub_process}")
     console.print()
 
     temp_file = None
@@ -113,7 +122,13 @@ def ingest(ctx, stdf_file: Path, product: str | None, test_type: str | None, fro
             console=console,
         ) as progress:
             prog_task = progress.add_task("Saving to Parquet...", total=None)
-            counts = storage.save_stdf_data(data, product, test_type, config.processing.compression)
+            counts = storage.save_stdf_data(
+                data, 
+                product=product, 
+                test_category=test_category,
+                sub_process=sub_process,
+                compression=config.processing.compression
+            )
             progress.update(prog_task, description="[green]✓[/green] Saved to Parquet")
 
         # Show results
@@ -489,12 +504,25 @@ def fetch(ctx, product: tuple, test_type: tuple, limit: int | None, ingest: bool
             failed = 0
             ingested_files = []
 
+            from .storage import extract_sub_process_from_filename, _get_test_category
+
             for remote_path, local_path, prod, ttype in downloaded:
                 try:
                     data = parse_stdf(local_path)
-                    storage.save_stdf_data(data, prod, ttype, config.processing.compression)
+                    
+                    # Extract sub_process from filename, fallback to directory test_type
+                    sub_process = extract_sub_process_from_filename(local_path.name) or ttype
+                    test_category = _get_test_category(sub_process)
+                    
+                    storage.save_stdf_data(
+                        data, 
+                        product=prod, 
+                        test_category=test_category,
+                        sub_process=sub_process,
+                        compression=config.processing.compression
+                    )
                     sync_manager.mark_ingested(remote_path)
-                    console.print(f"  [green]✓[/green] {local_path.name} ({prod}/{ttype})")
+                    console.print(f"  [green]✓[/green] {local_path.name} ({prod}/{test_category}/{sub_process})")
                     success += 1
                     ingested_files.append(local_path)
                 except Exception as e:
