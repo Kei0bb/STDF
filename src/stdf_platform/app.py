@@ -45,25 +45,34 @@ def get_products():
 
 
 @st.cache_data(ttl=60)
-def get_test_types():
+def get_test_categories():
     try:
-        results = db.query("SELECT DISTINCT test_type FROM lots ORDER BY test_type")
-        return [r["test_type"] for r in results if r["test_type"]]
+        results = db.query("SELECT DISTINCT test_category FROM lots ORDER BY test_category")
+        return [r["test_category"] for r in results if r["test_category"]]
     except Exception:
         return []
 
 
-# Get available lots (with product/test_type filter)
 @st.cache_data(ttl=60)
-def get_lots(product_filter: tuple = (), test_type_filter: tuple = ()):
+def get_sub_processes():
+    try:
+        results = db.query("SELECT DISTINCT sub_process FROM lots ORDER BY sub_process")
+        return [r["sub_process"] for r in results if r["sub_process"]]
+    except Exception:
+        return []
+
+
+# Get available lots (with product/test_category filter)
+@st.cache_data(ttl=60)
+def get_lots(product_filter: tuple = (), test_category_filter: tuple = ()):
     try:
         conditions = []
         if product_filter:
             prod_list = ", ".join(f"'{p}'" for p in product_filter)
             conditions.append(f"product IN ({prod_list})")
-        if test_type_filter:
-            tt_list = ", ".join(f"'{t}'" for t in test_type_filter)
-            conditions.append(f"test_type IN ({tt_list})")
+        if test_category_filter:
+            tc_list = ", ".join(f"'{t}'" for t in test_category_filter)
+            conditions.append(f"test_category IN ({tc_list})")
         
         where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
         results = db.query(f"SELECT DISTINCT lot_id FROM lots {where} ORDER BY lot_id")
@@ -71,13 +80,12 @@ def get_lots(product_filter: tuple = (), test_type_filter: tuple = ()):
     except Exception:
         return []
 
-
 products = get_products()
-test_types = get_test_types()
+test_categories = get_test_categories()
 
-if not products and not test_types:
+if not products and not test_categories:
     st.warning("No data found. Please ingest STDF files first.")
-    st.code("stdf-platform ingest <file.stdf> --product ABC --test-type CP")
+    st.code("stdf-platform ingest <file.stdf> --product ABC -s CP11")
     st.stop()
 
 
@@ -86,7 +94,7 @@ if not products and not test_types:
 # ============================================
 st.header("🔍 Data Selection")
 
-# Row 0: Product and Test Type filter
+# Row 0: Product and Test Category filter
 col1, col2 = st.columns(2)
 
 with col1:
@@ -98,15 +106,15 @@ with col1:
     )
 
 with col2:
-    selected_test_types = st.multiselect(
-        "**Test Type Filter**",
-        options=test_types,
+    selected_test_categories = st.multiselect(
+        "**Test Category Filter**",
+        options=test_categories,
         default=[],
-        help="Filter by test type (CP/FT)"
+        help="Filter by test category (CP/FT)"
     )
 
 # Get lots based on filter
-lots = get_lots(tuple(selected_products), tuple(selected_test_types))
+lots = get_lots(tuple(selected_products), tuple(selected_test_categories))
 
 if not lots:
     st.info("No lots found for the selected filters.")
@@ -283,7 +291,8 @@ summary_df = db.query_df(f"""
     SELECT 
         l.lot_id,
         l.product,
-        l.test_type,
+        l.test_category,
+        l.sub_process,
         l.part_type,
         l.job_name,
         COUNT(DISTINCT CASE WHEN w.wafer_id != '' THEN w.wafer_id END) as wafers,
@@ -293,8 +302,8 @@ summary_df = db.query_df(f"""
     FROM lots l
     LEFT JOIN wafers w ON l.lot_id = w.lot_id
     WHERE l.lot_id IN ({lot_list})
-    GROUP BY l.lot_id, l.product, l.test_type, l.part_type, l.job_name
-    ORDER BY l.product, l.test_type, l.lot_id
+    GROUP BY l.lot_id, l.product, l.test_category, l.sub_process, l.part_type, l.job_name
+    ORDER BY l.product, l.test_category, l.sub_process, l.lot_id
 """)
 
 st.dataframe(summary_df, width="stretch", hide_index=True)
