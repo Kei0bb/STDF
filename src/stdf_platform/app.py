@@ -203,7 +203,7 @@ if tests_df.empty:
     st.stop()
 
 # Import AG Grid
-from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode, DataReturnMode
+from st_aggrid import AgGrid, GridOptionsBuilder, DataReturnMode
 
 # Search filter
 search_term = st.text_input(
@@ -249,10 +249,10 @@ grid_response = AgGrid(
     filtered_df,
     gridOptions=grid_options,
     height=400,
-    update_mode=GridUpdateMode.SELECTION_CHANGED,
     data_return_mode=DataReturnMode.FILTERED_AND_SORTED,
     fit_columns_on_grid_load=True,
     theme="streamlit",
+    update_on=["selectionChanged"],  # Replaces deprecated GridUpdateMode
 )
 
 # Get selected rows
@@ -297,7 +297,7 @@ summary_df = db.query_df(f"""
     ORDER BY l.product, l.test_type, l.lot_id
 """)
 
-st.dataframe(summary_df, use_container_width=True, hide_index=True)
+st.dataframe(summary_df, width="stretch", hide_index=True)
 
 
 # ============================================
@@ -341,7 +341,7 @@ with st.expander("👁️ Data Preview (Optional)", expanded=False):
         """)
         
         st.write(f"Showing {len(preview_df):,} rows (max 500, first 10 params)")
-        st.dataframe(preview_df, use_container_width=True, hide_index=True)
+        st.dataframe(preview_df, width="stretch", hide_index=True)
     else:
         st.info("Select parameters to preview data.")
 
@@ -442,7 +442,7 @@ if generate_btn:
                 
                 # Show first few rows
                 with st.expander("Preview exported data", expanded=True):
-                    st.dataframe(export_df.head(100), use_container_width=True, hide_index=True)
+                    st.dataframe(export_df.head(100), width="stretch", hide_index=True)
             else:
                 st.warning("No data found for the selected filters.")
     else:
