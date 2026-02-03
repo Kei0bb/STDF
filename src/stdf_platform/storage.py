@@ -49,6 +49,11 @@ WAFERS_SCHEMA = pa.schema([
     ("good_count", pa.int64()),
     ("rtst_count", pa.int64()),
     ("abrt_count", pa.int64()),
+    # Retest tracking
+    ("test_code", pa.string()),     # CP1, FT2 等（STDFから）
+    ("test_rev", pa.string()),      # Rev04 等（ファイル名から）
+    ("retest_num", pa.int64()),     # リテスト番号（0=初回, 1,2...=リテスト）
+    ("source_file", pa.string()),   # 元ファイル名
 ])
 
 PARTS_SCHEMA = pa.schema([
@@ -121,6 +126,22 @@ def extract_sub_process_from_filename(filename: str) -> str | None:
     return None
 
 
+def extract_test_rev_from_filename(filename: str) -> str:
+    """
+    Extract test revision (Rev04, Rev01, etc.) from filename.
+    
+    Examples:
+        "E6A773.00-01_01_SCT101A_L000_CP11_5_Rev04_00...stdf.gz" -> "Rev04"
+        "LOT001_Rev01_001.stdf" -> "Rev01"
+    """
+    import re
+    pattern = r'[_\-](Rev\d+)[_\-\.]'
+    match = re.search(pattern, filename, re.IGNORECASE)
+    if match:
+        return match.group(1)
+    return ""
+
+
 class ParquetStorage:
     """Parquet storage for STDF data with Hive-style partitioning."""
 
@@ -166,12 +187,43 @@ class ParquetStorage:
             allow_truncated_timestamps=True,
         )
 
+    def _get_next_retest_num(
+        self, product: str, test_category: str, sub_process: str, lot_id: str, wafer_id: str
+    ) -> int:
+        """
+        Get the next retest number for a wafer.
+        
+        Scans existing retest directories and returns max + 1.
+        Returns 0 if no existing data.
+        """
+        import re
+        wafer_base = (
+            self._get_table_path("wafers", product, test_category, sub_process)
+            / f"lot_id={lot_id}"
+            / f"wafer_id={wafer_id}"
+        )
+        
+        if not wafer_base.exists():
+            return 0
+        
+        max_retest = -1
+        for child in wafer_base.iterdir():
+            if child.is_dir() and child.name.startswith("retest="):
+                try:
+                    retest_num = int(child.name.split("=")[1])
+                    max_retest = max(max_retest, retest_num)
+                except (ValueError, IndexError):
+                    pass
+        
+        return max_retest + 1
+
     def save_stdf_data(
         self,
         data: STDFData,
         product: str = "UNKNOWN",
         test_category: str = "UNKNOWN",
         sub_process: str = "",
+        source_file: str = "",
         compression: str = "snappy",
     ) -> dict[str, int]:
         """
@@ -181,13 +233,20 @@ class ParquetStorage:
             data: Parsed STDF data
             product: Product name (extracted from file path)
             test_category: Test category - CP or FT
-            sub_process: Sub-process - CP11, FT2, etc. (extracted from filename)
+            sub_process: Sub-process - CP11, FT2, etc. (extracted from filename or STDF)
+            source_file: Original source filename
             compression: Parquet compression method
 
         Returns:
             Dictionary with counts of records saved per table
         """
         counts = {}
+
+        # Extract test_rev from filename
+        test_rev = extract_test_rev_from_filename(source_file)
+        
+        # Use STDF test_code if available, otherwise fall back to sub_process from filename
+        test_code = data.test_code or sub_process or ""
 
         # Save lot info
         lot_path = self._get_table_path("lots", product, test_category, sub_process) / f"lot_id={data.lot_id}"
@@ -209,7 +268,7 @@ class ParquetStorage:
         self._write_parquet(lot_table, lot_path / "data.parquet", compression)
         counts["lots"] = 1
 
-        # Save wafers
+        # Save wafers with retest tracking
         if data.wafers:
             wafer_groups: dict[str, list] = {}
             for wafer in data.wafers:
@@ -219,7 +278,12 @@ class ParquetStorage:
                 wafer_groups[wafer_id].append(wafer)
 
             for wafer_id, wafers in wafer_groups.items():
-                wafer_path = self._get_table_path("wafers", product, test_category, sub_process) / f"lot_id={data.lot_id}" / f"wafer_id={wafer_id}"
+                # Calculate retest_num based on existing files
+                retest_num = self._get_next_retest_num(
+                    product, test_category, sub_process, data.lot_id, wafer_id
+                )
+                
+                wafer_path = self._get_table_path("wafers", product, test_category, sub_process) / f"lot_id={data.lot_id}" / f"wafer_id={wafer_id}" / f"retest={retest_num}"
                 wafer_path.mkdir(parents=True, exist_ok=True)
 
                 wafer_table = pa.table({
@@ -232,6 +296,11 @@ class ParquetStorage:
                     "good_count": [w.get("good_count", 0) for w in wafers],
                     "rtst_count": [w.get("rtst_count", 0) for w in wafers],
                     "abrt_count": [w.get("abrt_count", 0) for w in wafers],
+                    # Retest tracking fields
+                    "test_code": [test_code for _ in wafers],
+                    "test_rev": [test_rev for _ in wafers],
+                    "retest_num": [retest_num for _ in wafers],
+                    "source_file": [source_file for _ in wafers],
                 }, schema=WAFERS_SCHEMA)
                 self._write_parquet(wafer_table, wafer_path / "data.parquet", compression)
 

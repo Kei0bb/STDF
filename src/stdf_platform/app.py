@@ -172,10 +172,11 @@ def get_tests_df(lot_ids: tuple):
             SELECT DISTINCT 
                 test_num,
                 test_name,
+                rec_type,
                 units,
                 lo_limit,
                 hi_limit
-            FROM tests 
+            FROM test_data 
             WHERE lot_id IN ({lot_list}) 
             ORDER BY test_num
         """)
@@ -331,21 +332,20 @@ with st.expander("👁️ Data Preview (Optional)", expanded=False):
         
         preview_df = db.query_df(f"""
             SELECT 
-                tr.lot_id,
-                tr.wafer_id,
-                tr.part_id,
-                p.x_coord,
-                p.y_coord,
+                td.lot_id,
+                td.wafer_id,
+                td.part_id,
+                td.x_coord,
+                td.y_coord,
                 p.hard_bin,
                 p.soft_bin,
-                t.test_name,
-                tr.result,
-                tr.passed
-            FROM test_results tr
-            JOIN parts p ON tr.part_id = p.part_id AND tr.lot_id = p.lot_id
-            JOIN tests t ON tr.test_num = t.test_num AND tr.lot_id = t.lot_id
+                td.test_name,
+                td.result,
+                td.passed
+            FROM test_data td
+            JOIN parts p ON td.part_id = p.part_id AND td.lot_id = p.lot_id
             WHERE {where_clause}
-            ORDER BY tr.lot_id, tr.wafer_id, tr.part_id, t.test_num
+            ORDER BY td.lot_id, td.wafer_id, td.part_id, td.test_num
             LIMIT 500
         """)
         
@@ -391,19 +391,18 @@ if generate_btn:
                 export_df = db.query_df(f"""
                     PIVOT (
                         SELECT 
-                            tr.lot_id,
-                            tr.wafer_id,
-                            tr.part_id,
-                            p.x_coord,
-                            p.y_coord,
+                            td.lot_id,
+                            td.wafer_id,
+                            td.part_id,
+                            td.x_coord,
+                            td.y_coord,
                             p.hard_bin,
                             p.soft_bin,
                             p.passed as part_passed,
-                            t.test_name,
-                            tr.result
-                        FROM test_results tr
-                        JOIN parts p ON tr.part_id = p.part_id AND tr.lot_id = p.lot_id
-                        JOIN tests t ON tr.test_num = t.test_num AND tr.lot_id = t.lot_id
+                            td.test_name,
+                            td.result
+                        FROM test_data td
+                        JOIN parts p ON td.part_id = p.part_id AND td.lot_id = p.lot_id
                         WHERE {where_clause}
                     )
                     ON test_name
@@ -415,25 +414,24 @@ if generate_btn:
                 # Long format
                 export_df = db.query_df(f"""
                     SELECT 
-                        tr.lot_id,
-                        tr.wafer_id,
-                        tr.part_id,
-                        p.x_coord,
-                        p.y_coord,
+                        td.lot_id,
+                        td.wafer_id,
+                        td.part_id,
+                        td.x_coord,
+                        td.y_coord,
                         p.hard_bin,
                         p.soft_bin,
-                        t.test_num,
-                        t.test_name,
-                        tr.result,
-                        tr.passed,
-                        t.lo_limit,
-                        t.hi_limit,
-                        t.units
-                    FROM test_results tr
-                    JOIN parts p ON tr.part_id = p.part_id AND tr.lot_id = p.lot_id
-                    JOIN tests t ON tr.test_num = t.test_num AND tr.lot_id = t.lot_id
+                        td.test_num,
+                        td.test_name,
+                        td.result,
+                        td.passed,
+                        td.lo_limit,
+                        td.hi_limit,
+                        td.units
+                    FROM test_data td
+                    JOIN parts p ON td.part_id = p.part_id AND td.lot_id = p.lot_id
                     WHERE {where_clause}
-                    ORDER BY tr.lot_id, tr.wafer_id, tr.part_id, t.test_num
+                    ORDER BY td.lot_id, td.wafer_id, td.part_id, td.test_num
                 """)
             
             if not export_df.empty:

@@ -19,6 +19,7 @@ class STDFData:
     finish_time: int = 0
     tester_type: str = ""
     operator: str = ""
+    test_code: str = ""  # CP1, FT2 等（MIR.TEST_CODから取得）
 
     # Records by type
     wafers: list[dict] = field(default_factory=list)
@@ -153,6 +154,13 @@ class STDFParser:
         tstr_typ = self._read_cn(f) if f.tell() - start_pos < rec_len else ""
         job_nam = self._read_cn(f) if f.tell() - start_pos < rec_len else ""
         job_rev = self._read_cn(f) if f.tell() - start_pos < rec_len else ""
+        
+        # Additional optional fields
+        sblot_id = self._read_cn(f) if f.tell() - start_pos < rec_len else ""
+        oper_nam = self._read_cn(f) if f.tell() - start_pos < rec_len else ""
+        exec_typ = self._read_cn(f) if f.tell() - start_pos < rec_len else ""
+        exec_ver = self._read_cn(f) if f.tell() - start_pos < rec_len else ""
+        test_cod = self._read_cn(f) if f.tell() - start_pos < rec_len else ""  # CP1, FT2等
 
         self.data.lot_id = lot_id
         self.data.part_type = part_typ
@@ -160,6 +168,8 @@ class STDFParser:
         self.data.job_rev = job_rev
         self.data.start_time = start_t
         self.data.tester_type = tstr_typ
+        self.data.operator = oper_nam
+        self.data.test_code = test_cod
 
         # Skip remaining optional fields
         remaining = rec_len - (f.tell() - start_pos)

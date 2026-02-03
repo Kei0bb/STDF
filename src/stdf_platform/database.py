@@ -46,7 +46,7 @@ class Database:
 
     def _create_views(self) -> None:
         """Create views for Parquet datasets."""
-        tables = ["lots", "wafers", "parts", "tests", "test_results"]
+        tables = ["lots", "wafers", "parts", "test_data"]
 
         for table in tables:
             table_path = self.data_dir / table
@@ -95,7 +95,8 @@ class Database:
         SELECT 
             l.lot_id,
             l.product,
-            l.test_type,
+            l.test_category,
+            l.sub_process,
             l.part_type,
             l.job_name,
             l.job_rev,
@@ -106,8 +107,8 @@ class Database:
         FROM lots l
         LEFT JOIN wafers w ON l.lot_id = w.lot_id
         {where_clause}
-        GROUP BY l.lot_id, l.product, l.test_type, l.part_type, l.job_name, l.job_rev
-        ORDER BY l.product, l.test_type, l.lot_id
+        GROUP BY l.lot_id, l.product, l.test_category, l.sub_process, l.part_type, l.job_name, l.job_rev
+        ORDER BY l.product, l.test_category, l.sub_process, l.lot_id
         """
         return self.query(sql)
 
@@ -129,16 +130,15 @@ class Database:
         """Get top failing tests for a lot."""
         sql = f"""
         SELECT 
-            t.test_num,
-            t.test_name,
+            test_num,
+            test_name,
             COUNT(*) as total,
-            SUM(CASE WHEN NOT tr.passed THEN 1 ELSE 0 END) as fails,
-            ROUND(100.0 * SUM(CASE WHEN NOT tr.passed THEN 1 ELSE 0 END) / COUNT(*), 2) as fail_rate
-        FROM test_results tr
-        JOIN tests t ON tr.test_num = t.test_num AND tr.lot_id = t.lot_id
-        WHERE tr.lot_id = '{lot_id}'
-        GROUP BY t.test_num, t.test_name
-        HAVING SUM(CASE WHEN NOT tr.passed THEN 1 ELSE 0 END) > 0
+            SUM(CASE WHEN NOT passed THEN 1 ELSE 0 END) as fails,
+            ROUND(100.0 * SUM(CASE WHEN NOT passed THEN 1 ELSE 0 END) / COUNT(*), 2) as fail_rate
+        FROM test_data
+        WHERE lot_id = '{lot_id}'
+        GROUP BY test_num, test_name
+        HAVING SUM(CASE WHEN NOT passed THEN 1 ELSE 0 END) > 0
         ORDER BY fail_rate DESC
         LIMIT {top_n}
         """

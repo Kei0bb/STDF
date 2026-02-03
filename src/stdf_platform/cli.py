@@ -127,6 +127,7 @@ def ingest(ctx, stdf_file: Path, product: str | None, sub_process: str | None, f
                 product=product, 
                 test_category=test_category,
                 sub_process=sub_process,
+                source_file=stdf_file.name,
                 compression=config.processing.compression
             )
             progress.update(prog_task, description="[green]✓[/green] Saved to Parquet")
@@ -519,6 +520,7 @@ def fetch(ctx, product: tuple, test_type: tuple, limit: int | None, ingest: bool
                         product=prod, 
                         test_category=test_category,
                         sub_process=sub_process,
+                        source_file=local_path.name,
                         compression=config.processing.compression
                     )
                     sync_manager.mark_ingested(remote_path)
