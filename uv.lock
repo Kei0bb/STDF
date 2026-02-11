@@ -1101,7 +1101,7 @@ wheels = [
 ]
 
 [[package]]
-name = "stdf-platform"
+name = "stdf2pq"
 version = "0.2.0"
 source = { editable = "." }
 dependencies = [

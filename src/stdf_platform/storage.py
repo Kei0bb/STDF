@@ -1,5 +1,6 @@
 """Parquet storage for STDF data."""
 
+import re
 from pathlib import Path
 from datetime import datetime, timezone
 
@@ -29,7 +30,7 @@ LOTS_SCHEMA = pa.schema([
     ("lot_id", pa.string()),
     ("product", pa.string()),
     ("test_category", pa.string()),  # CP, FT, OTHER
-    ("sub_process", pa.string()),    # CP11, FT2, etc.
+    ("sub_process", pa.string()),    # CP1, FT2, etc. (from STDF MIR.TEST_COD)
     ("part_type", pa.string()),
     ("job_name", pa.string()),
     ("job_rev", pa.string()),
@@ -50,7 +51,6 @@ WAFERS_SCHEMA = pa.schema([
     ("rtst_count", pa.int64()),
     ("abrt_count", pa.int64()),
     # Retest tracking
-    ("test_code", pa.string()),     # CP1, FT2 等（STDFから）
     ("test_rev", pa.string()),      # Rev04 等（ファイル名から）
     ("retest_num", pa.int64()),     # リテスト番号（0=初回, 1,2...=リテスト）
     ("source_file", pa.string()),   # 元ファイル名
@@ -117,7 +117,7 @@ def extract_sub_process_from_filename(filename: str) -> str | None:
         "LOT001_FT2_001.stdf" -> "FT2"
         "TEST_PT1_DATA.stdf" -> "PT1"
     """
-    import re
+    # re is imported at module level
     # Match _CP, _FT, or _PT followed by digits
     pattern = r'[_\-](CP\d+|FT\d+|PT\d+)[_\-\.]'
     match = re.search(pattern, filename, re.IGNORECASE)
@@ -134,7 +134,7 @@ def extract_test_rev_from_filename(filename: str) -> str:
         "E6A773.00-01_01_SCT101A_L000_CP11_5_Rev04_00...stdf.gz" -> "Rev04"
         "LOT001_Rev01_001.stdf" -> "Rev01"
     """
-    import re
+    # re is imported at module level
     pattern = r'[_\-](Rev\d+)[_\-\.]'
     match = re.search(pattern, filename, re.IGNORECASE)
     if match:
@@ -196,7 +196,7 @@ class ParquetStorage:
         Scans existing retest directories and returns max + 1.
         Returns 0 if no existing data.
         """
-        import re
+        # re is imported at module level
         wafer_base = (
             self._get_table_path("wafers", product, test_category, sub_process)
             / f"lot_id={lot_id}"
@@ -244,9 +244,7 @@ class ParquetStorage:
 
         # Extract test_rev from filename
         test_rev = extract_test_rev_from_filename(source_file)
-        
-        # Use STDF test_code if available, otherwise fall back to sub_process from filename
-        test_code = data.test_code or sub_process or ""
+
 
         # Save lot info
         lot_path = self._get_table_path("lots", product, test_category, sub_process) / f"lot_id={data.lot_id}"
@@ -297,7 +295,6 @@ class ParquetStorage:
                     "rtst_count": [w.get("rtst_count", 0) for w in wafers],
                     "abrt_count": [w.get("abrt_count", 0) for w in wafers],
                     # Retest tracking fields
-                    "test_code": [test_code for _ in wafers],
                     "test_rev": [test_rev for _ in wafers],
                     "retest_num": [retest_num for _ in wafers],
                     "source_file": [source_file for _ in wafers],

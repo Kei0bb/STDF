@@ -23,11 +23,11 @@ console = Console()
 
 
 @click.group()
-@click.version_option(version=__version__, prog_name="stdf-platform")
+@click.version_option(version=__version__, prog_name="stdf2pq")
 @click.option("--config", "-c", type=click.Path(path_type=Path), help="Config file path")
 @click.pass_context
 def main(ctx, config: Path | None):
-    """STDF Data Platform - Semiconductor test data analysis."""
+    """stdf2pq - STDF to Parquet converter and analysis DB."""
     ctx.ensure_object(dict)
     ctx.obj["config"] = Config.load(config)
 
@@ -45,41 +45,29 @@ def ingest(ctx, stdf_file: Path, product: str | None, sub_process: str | None, f
 
     STDF_FILE: Path to the STDF file to ingest
 
-    Product and sub-process can be specified via options or auto-detected from file path/filename.
-    Expected path structure: .../product/test_type/lot/file.stdf
+    Product can be specified via options or auto-detected from file path.
+    Sub-process is determined from STDF MIR.TEST_COD (e.g. CP1, FT2).
     """
-    from .storage import extract_sub_process_from_filename, _get_test_category
+    from .storage import _get_test_category
     
     config: Config = ctx.obj["config"]
     config.ensure_directories()
 
-    # Try to extract sub_process from filename first
-    if sub_process is None:
-        sub_process = extract_sub_process_from_filename(stdf_file.name)
-    
-    # Extract product/sub_process from path if requested or not specified
-    if from_path or (product is None and sub_process is None):
+    # Extract product from path if not specified
+    if product is None:
         parts = stdf_file.resolve().parts
-        # Look for CP*, FT*, or PT* in path to identify test_type
         for i, part in enumerate(parts):
             part_upper = part.upper()
             if part_upper.startswith("CP") or part_upper.startswith("FT") or part_upper.startswith("PT"):
-                if sub_process is None:
-                    sub_process = part  # Keep original case (CP1, FT2, etc.)
-                if i > 0 and product is None:
+                if i > 0:
                     product = parts[i - 1]
                 break
 
-    # Default values if still not found
     product = product or "UNKNOWN"
-    sub_process = sub_process or "UNKNOWN"
-    test_category = _get_test_category(sub_process)
 
-    console.print(f"\n[bold]STDF Platform - Ingest[/bold]")
+    console.print(f"\n[bold]stdf2pq - Ingest[/bold]")
     console.print(f"  File: {stdf_file}")
     console.print(f"  Product: {product}")
-    console.print(f"  Test Category: {test_category}")
-    console.print(f"  Sub-Process: {sub_process}")
     console.print()
 
     temp_file = None
@@ -105,9 +93,17 @@ def ingest(ctx, stdf_file: Path, product: str | None, sub_process: str | None, f
             data = parse_stdf(file_to_parse)
             progress.update(task, description="[green]✓[/green] Parsed STDF file")
 
+        # Determine sub_process: CLI option > STDF MIR.TEST_COD > UNKNOWN
+        if sub_process is None:
+            sub_process = data.test_code or "UNKNOWN"
+        test_category = _get_test_category(sub_process)
+
         console.print(f"  Lot ID: {data.lot_id}")
         console.print(f"  Part Type: {data.part_type}")
         console.print(f"  Job: {data.job_name} ({data.job_rev})")
+        console.print(f"  Test Code (STDF): {data.test_code or '(empty)'}")
+        console.print(f"  Sub-Process: {sub_process}")
+        console.print(f"  Test Category: {test_category}")
         console.print(f"  Wafers: {len(data.wafers)}")
         console.print(f"  Parts: {len(data.parts)}")
         console.print(f"  Tests: {len(data.tests)}")
@@ -505,14 +501,14 @@ def fetch(ctx, product: tuple, test_type: tuple, limit: int | None, ingest: bool
             failed = 0
             ingested_files = []
 
-            from .storage import extract_sub_process_from_filename, _get_test_category
+            from .storage import _get_test_category
 
             for remote_path, local_path, prod, ttype in downloaded:
                 try:
                     data = parse_stdf(local_path)
                     
-                    # Extract sub_process from filename, fallback to directory test_type
-                    sub_process = extract_sub_process_from_filename(local_path.name) or ttype
+                    # Use STDF MIR.TEST_COD as sub_process
+                    sub_process = data.test_code or "UNKNOWN"
                     test_category = _get_test_category(sub_process)
                     
                     storage.save_stdf_data(
@@ -569,7 +565,7 @@ def export(ctx, sql: str, output: Path, format: str):
     OUTPUT: Output file path
 
     Example:
-        stdf-platform export "SELECT * FROM test_results WHERE lot_id='LOT001'" results.csv
+        stdf2pq export "SELECT * FROM test_results WHERE lot_id='LOT001'" results.csv
     """
     config: Config = ctx.obj["config"]
 
@@ -613,7 +609,7 @@ def export_lot(ctx, lot_ids: tuple, output: Path, pivot: bool):
     OUTPUT: Output CSV file path
 
     Example:
-        stdf-platform export-lot E6A773.00 E6A774.00 results.csv
+        stdf2pq export-lot E6A773.00 E6A774.00 results.csv
     """
     config: Config = ctx.obj["config"]
 

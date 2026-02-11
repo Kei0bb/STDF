@@ -357,8 +357,10 @@ class STDFParser:
             f.read(remaining)
 
     def _parse_mpr(self, f: BinaryIO, rec_len: int):
-        """Parse Multiple-Result Parametric Record."""
+        """Parse Multiple-Result Parametric Record (STDF V4)."""
         start_pos = f.tell()
+        
+        # Required fields
         test_num = self._read_u4(f)
         head_num = self._read_u1(f)
         site_num = self._read_u1(f)
@@ -367,23 +369,26 @@ class STDFParser:
         rtn_icnt = self._read_u2(f) if f.tell() - start_pos < rec_len else 0
         rslt_cnt = self._read_u2(f) if f.tell() - start_pos < rec_len else 0
         
-        # Read return states (array of nibbles)
+        # RTN_STAT: Array of return states (nibbles)
         rtn_stat = []
         if rtn_icnt > 0 and f.tell() - start_pos < rec_len:
             num_bytes = (rtn_icnt + 1) // 2
             for _ in range(num_bytes):
+                if f.tell() - start_pos >= rec_len:
+                    break
                 byte = self._read_u1(f)
                 rtn_stat.append(byte & 0x0F)
                 if len(rtn_stat) < rtn_icnt:
                     rtn_stat.append((byte >> 4) & 0x0F)
         
-        # Read results (array of R*4)
+        # RTN_RSLT: Array of results (R*4)
         results = []
         for _ in range(rslt_cnt):
-            if f.tell() - start_pos < rec_len:
-                results.append(self._read_r4(f))
+            if f.tell() - start_pos >= rec_len:
+                break
+            results.append(self._read_r4(f))
         
-        # Read optional fields
+        # Optional fields (order per STDF V4 spec)
         test_txt = self._read_cn(f) if f.tell() - start_pos < rec_len else ""
         alarm_id = self._read_cn(f) if f.tell() - start_pos < rec_len else ""
         opt_flag = self._read_u1(f) if f.tell() - start_pos < rec_len else 0xFF
@@ -392,17 +397,17 @@ class STDFParser:
         hlm_scal = self._read_i1(f) if f.tell() - start_pos < rec_len else 0
         lo_limit = self._read_r4(f) if f.tell() - start_pos < rec_len else None
         hi_limit = self._read_r4(f) if f.tell() - start_pos < rec_len else None
-        
-        # Read start index and increment
         start_in = self._read_r4(f) if f.tell() - start_pos < rec_len else 0.0
         incr_in = self._read_r4(f) if f.tell() - start_pos < rec_len else 0.0
         
-        # Read pin indexes (array of U*2)
+        # RTN_INDX: Array of pin indexes (U*2) - comes after incr_in per spec
         rtn_indx = []
         for _ in range(rtn_icnt):
-            if f.tell() - start_pos < rec_len:
-                rtn_indx.append(self._read_u2(f))
+            if f.tell() - start_pos >= rec_len:
+                break
+            rtn_indx.append(self._read_u2(f))
         
+        # UNITS, C_RESFMT, C_LLMFMT, C_HLMFMT, LO_SPEC, HI_SPEC are last
         units = self._read_cn(f) if f.tell() - start_pos < rec_len else ""
         
         passed = (test_flg & 0x80) == 0
@@ -419,7 +424,7 @@ class STDFParser:
                 "rec_type": "MPR",
             }
 
-        # Store single result (use first result or average)
+        # Store single result (use first result)
         result_val = results[0] if results else None
         
         self.data.test_results.append({

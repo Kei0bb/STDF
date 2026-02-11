@@ -1,4 +1,4 @@
-# STDF Data Platform
+# stdf2pq DB
 
 半導体テストデータ（STDF）をETL処理し、DuckDB+Parquetベースで分析できるプラットフォーム。
 
@@ -15,36 +15,36 @@ uv sync
 
 ```bash
 # 基本（パスからproduct/test_type自動推定）
-stdf-platform ingest ./downloads/SCT101A/CP/lot001.stdf
+stdf2pq ingest ./downloads/SCT101A/CP/lot001.stdf
 
 # 明示的に指定
-stdf-platform ingest sample.stdf --product SCT101A --test-type CP
+stdf2pq ingest sample.stdf --product SCT101A --test-type CP
 ```
 
 Parquetファイルが `./data/` に、DuckDBファイルが `./data/stdf.duckdb` に保存されます。
 
 **ディレクトリ構造:**
 ```
-data/test_results/product=SCT101A/test_type=CP/lot_id=XXX/wafer_id=YYY/data.parquet
+data/test_data/product=SCT101A/test_category=CP/sub_process=CP11/lot_id=XXX/wafer_id=YYY/data.parquet
 ```
 
 ### 2. CLI分析コマンド
 
 ```bash
 # ロット一覧（product/test_type含む）
-stdf-platform lots
+stdf2pq lots
 
 # Wafer毎の歩留まり
-stdf-platform analyze yield LOT001
+stdf2pq analyze yield LOT001
 
 # 上位10フェールテスト
-stdf-platform analyze test-fail LOT001 --top 10
+stdf2pq analyze test-fail LOT001 --top 10
 
 # Bin分布
-stdf-platform analyze bins LOT001
+stdf2pq analyze bins LOT001
 
 # SQLクエリ実行
-stdf-platform query "SELECT * FROM wafers LIMIT 10"
+stdf2pq query "SELECT * FROM wafers LIMIT 10"
 ```
 
 ---
@@ -67,19 +67,19 @@ filters:
 
 ```bash
 # config.yaml の filters に従って差分取得
-stdf-platform fetch
+stdf2pq fetch
 
 # CLIで上書き指定
-stdf-platform fetch -p SCT101A -t CP
+stdf2pq fetch -p SCT101A -t CP
 
 # 強制再ダウンロード
-stdf-platform fetch --force
+stdf2pq fetch --force
 
 # ダウンロードのみ（ingestしない）
-stdf-platform fetch --no-ingest
+stdf2pq fetch --no-ingest
 
 # 最大10ファイルまで
-stdf-platform fetch -n 10
+stdf2pq fetch -n 10
 ```
 
 > 履歴は `./downloads/.sync_history.json` に保存されます。
@@ -114,7 +114,7 @@ SELECT lot_id, product, test_type, COUNT(*) as parts FROM parts GROUP BY ALL;
 ## Web UI（ブラウザ）
 
 ```bash
-stdf-platform web
+stdf2pq web
 ```
 
 ブラウザで http://localhost:8501 にアクセス。
@@ -129,13 +129,54 @@ stdf-platform web
 
 ## データ構造
 
+### テーブル
+
 | テーブル | 説明 |
 |---------|------|
-| lots | ロット情報（product, test_type, job等） |
-| wafers | ウェハー情報と歩留まり |
+| lots | ロット情報（product, test_category, sub_process等） |
+| wafers | ウェハー情報と歩留まり（リテスト追跡含む） |
 | parts | 個片結果（Bin, X/Y座標） |
-| tests | テスト定義（リミット、単位） |
-| test_results | テスト結果（Parametric/Functional） |
+| test_data | テスト結果と定義（統合テーブル） |
+
+### パーティション階層
+
+```
+data/wafers/product=SCT101A/test_category=CP/sub_process=CP11/
+            lot_id=E6A773.00/wafer_id=WS100/retest=0/data.parquet
+                                           /retest=1/data.parquet  ← リテスト
+```
+
+---
+
+## リテスト対応
+
+### ファイル名パターン
+
+```
+E6A773.00-01_01_SCT101A_L000_CP11_5_Rev04_00_008@WS100#202601150243.stdf.gz
+                             │     │  │
+                             │     │  └─ Rev04 = test_rev
+                             │     └─ CP11 = sub_process
+                             └─ SCT101A = product
+```
+
+### 判定ルール
+
+| フィールド | 取得元 | 優先順位 |
+|-----------|--------|----------|
+| sub_process (CP11等) | ファイル名 or ディレクトリ | ファイル名優先 |
+| test_code (CP1等) | STDF MIR.TEST_COD | STDF優先 |
+| test_rev (Rev04等) | ファイル名 | - |
+| retest_num | 既存データから自動計算 | 0=初回, 1,2...=リテスト |
+
+### wafersテーブル拡張フィールド
+
+| 列名 | 説明 |
+|------|------|
+| test_code | 小工程（CP1等）- STDFから取得 |
+| test_rev | テストバージョン（Rev04等）- ファイル名から |
+| retest_num | リテスト番号（0=初回） |
+| source_file | 元ファイル名 |
 
 ---
 

@@ -88,7 +88,7 @@ class Database:
         return self.conn.execute(sql).fetchdf()
 
     def get_lot_summary(self, lot_id: str | None = None) -> list[dict]:
-        """Get lot summary with yield information."""
+        """Get lot summary with yield information (latest retest only)."""
         where_clause = f"WHERE l.lot_id = '{lot_id}'" if lot_id else ""
 
         sql = f"""
@@ -105,7 +105,12 @@ class Database:
             SUM(w.good_count) as good_parts,
             ROUND(100.0 * SUM(w.good_count) / NULLIF(SUM(w.part_count), 0), 2) as yield_pct
         FROM lots l
-        LEFT JOIN wafers w ON l.lot_id = w.lot_id
+        LEFT JOIN (
+            SELECT *, ROW_NUMBER() OVER(
+                PARTITION BY lot_id, wafer_id ORDER BY retest_num DESC
+            ) as rn
+            FROM wafers
+        ) w ON l.lot_id = w.lot_id AND w.rn = 1
         {where_clause}
         GROUP BY l.lot_id, l.product, l.test_category, l.sub_process, l.part_type, l.job_name, l.job_rev
         ORDER BY l.product, l.test_category, l.sub_process, l.lot_id
@@ -113,15 +118,23 @@ class Database:
         return self.query(sql)
 
     def get_wafer_yield(self, lot_id: str) -> list[dict]:
-        """Get yield by wafer for a lot."""
+        """Get yield by wafer for a lot (latest retest only)."""
         sql = f"""
         SELECT 
             wafer_id,
             part_count as total,
             good_count as good,
-            ROUND(100.0 * good_count / NULLIF(part_count, 0), 2) as yield_pct
-        FROM wafers
-        WHERE lot_id = '{lot_id}'
+            ROUND(100.0 * good_count / NULLIF(part_count, 0), 2) as yield_pct,
+            test_rev,
+            retest_num
+        FROM (
+            SELECT *, ROW_NUMBER() OVER(
+                PARTITION BY lot_id, wafer_id ORDER BY retest_num DESC
+            ) as rn
+            FROM wafers
+            WHERE lot_id = '{lot_id}'
+        )
+        WHERE rn = 1
         ORDER BY yield_pct DESC
         """
         return self.query(sql)
@@ -159,7 +172,7 @@ class Database:
         return self.query(sql)
 
     def compare_lots(self, lot_ids: list[str]) -> list[dict]:
-        """Compare yield across multiple lots."""
+        """Compare yield across multiple lots (latest retest only)."""
         lot_list = ", ".join(f"'{lot}'" for lot in lot_ids)
         sql = f"""
         SELECT 
@@ -171,7 +184,12 @@ class Database:
             SUM(w.good_count) as good,
             ROUND(100.0 * SUM(w.good_count) / NULLIF(SUM(w.part_count), 0), 2) as yield_pct
         FROM lots l
-        LEFT JOIN wafers w ON l.lot_id = w.lot_id
+        LEFT JOIN (
+            SELECT *, ROW_NUMBER() OVER(
+                PARTITION BY lot_id, wafer_id ORDER BY retest_num DESC
+            ) as rn
+            FROM wafers
+        ) w ON l.lot_id = w.lot_id AND w.rn = 1
         WHERE l.lot_id IN ({lot_list})
         GROUP BY l.lot_id, l.job_name, l.job_rev
         ORDER BY yield_pct DESC

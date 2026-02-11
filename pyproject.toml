@@ -1,7 +1,7 @@
 [project]
-name = "stdf-platform"
+name = "stdf2pq"
 version = "0.2.0"
-description = "STDF Data Platform for semiconductor test data analysis"
+description = "stdf2pq - STDF to Parquet converter and analysis DB"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
@@ -16,7 +16,7 @@ dependencies = [
 ]
 
 [project.scripts]
-stdf-platform = "stdf_platform.cli:main"
+stdf2pq = "stdf_platform.cli:main"
 
 [build-system]
 requires = ["hatchling"]
