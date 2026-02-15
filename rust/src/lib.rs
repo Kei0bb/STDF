@@ -5,4 +5,4 @@ pub mod parser;
 pub mod types;
 
 #[cfg(feature = "python")]
-pub mod python;
+mod python;

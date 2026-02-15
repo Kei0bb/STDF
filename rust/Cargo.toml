@@ -6,6 +6,7 @@ description = "High-performance STDF binary parser"
 
 [lib]
 name = "stdf2pq_rs"
+crate-type = ["cdylib", "rlib"]
 
 [features]
 default = []

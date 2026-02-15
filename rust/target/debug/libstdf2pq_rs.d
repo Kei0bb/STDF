@@ -1,0 +1,1 @@
+/Users/keisuke/Projects/STDF/rust/target/debug/libstdf2pq_rs.dylib: /Users/keisuke/Projects/STDF/rust/src/lib.rs /Users/keisuke/Projects/STDF/rust/src/parser.rs /Users/keisuke/Projects/STDF/rust/src/python.rs /Users/keisuke/Projects/STDF/rust/src/reader.rs /Users/keisuke/Projects/STDF/rust/src/types.rs
