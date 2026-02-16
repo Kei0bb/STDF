@@ -103,7 +103,7 @@ data/
 | hi_limit | FLOAT64 | PTR/MPR.HI_LIMIT | 上限規格値 |
 | units | STRING | PTR/MPR.UNITS | 単位 |
 | result | FLOAT64 | PTR/MPR.RESULT | 測定値 |
-| passed | BOOL | PTR/MPR/FTR.TEST_FLG | 合否 |
+| passed | STRING | PTR/MPR/FTR.TEST_FLG | 合否（`P` / `F`） |
 
 ---
 

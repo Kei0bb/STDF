@@ -89,7 +89,7 @@ TEST_DATA_SCHEMA = pa.schema([
     ("units", pa.string()),
     # Test result
     ("result", pa.float64()),
-    ("passed", pa.bool_()),
+    ("passed", pa.string()),      # "P" or "F"
 ])
 
 
@@ -378,7 +378,7 @@ class ParquetStorage:
                         "hi_limit": test_info.get("hi_limit"),
                         "units": test_info.get("units", ""),
                         "result": r.get("result"),
-                        "passed": r.get("passed", False),
+                        "passed": "P" if r.get("passed", False) else "F",
                     })
 
                 result_table = pa.table({

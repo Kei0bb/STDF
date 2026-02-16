@@ -150,6 +150,32 @@ data/<table>/product=…/test_category=…/sub_process=…/lot_id=…/wafer_id=�
 | test_rev | ファイル名 (Rev04等) | |
 | retest_num | 既存データから自動計算 | 0=初回, 1,2…=リテスト |
 
+## 開発・テスト環境 (`--env`)
+
+本番データと分離してテスト用STDFを管理できます。
+
+```bash
+# テスト用ファイルを手動配置（フォルダ構成は自由）
+cp test.stdf downloads-dev/
+
+# dev環境にingest（data-dev/ に保存、sync_historyに記録しない）
+stdf2pq --env dev ingest downloads-dev/test.stdf --product SCT101A --test-type CP
+
+# dev環境のデータを確認
+stdf2pq --env dev db lots
+stdf2pq --env dev db query "SELECT * FROM test_data LIMIT 10"
+
+# dev環境をリセット
+rm -rf data-dev/
+```
+
+| | デフォルト | `--env dev` |
+|---|-----------|-------------|
+| DB保存先 | `data/` | `data-dev/` |
+| DuckDB | `data/stdf.duckdb` | `data-dev/stdf.duckdb` |
+| sync_history | 記録する | 記録しない |
+| fetch連携 | あり | なし（手動配置のみ） |
+
 ---
 
 ## アーキテクチャ

@@ -146,12 +146,12 @@ class Database:
             test_num,
             test_name,
             COUNT(*) as total,
-            SUM(CASE WHEN NOT passed THEN 1 ELSE 0 END) as fails,
-            ROUND(100.0 * SUM(CASE WHEN NOT passed THEN 1 ELSE 0 END) / COUNT(*), 2) as fail_rate
+            SUM(CASE WHEN passed = 'F' THEN 1 ELSE 0 END) as fails,
+            ROUND(100.0 * SUM(CASE WHEN passed = 'F' THEN 1 ELSE 0 END) / COUNT(*), 2) as fail_rate
         FROM test_data
         WHERE lot_id = '{lot_id}'
         GROUP BY test_num, test_name
-        HAVING SUM(CASE WHEN NOT passed THEN 1 ELSE 0 END) > 0
+        HAVING SUM(CASE WHEN passed = 'F' THEN 1 ELSE 0 END) > 0
         ORDER BY fail_rate DESC
         LIMIT {top_n}
         """
