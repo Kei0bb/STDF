@@ -10,6 +10,7 @@ use crate::parser;
 fn wafer_to_dict(py: Python<'_>, w: &crate::types::WaferData) -> PyResult<Py<PyDict>> {
     let d = PyDict::new(py);
     d.set_item("wafer_id", &w.wafer_id)?;
+    d.set_item("lot_id", &w.lot_id)?;
     d.set_item("head_num", w.head_num)?;
     d.set_item("start_time", w.start_time)?;
     d.set_item("finish_time", w.finish_time)?;
@@ -24,6 +25,7 @@ fn wafer_to_dict(py: Python<'_>, w: &crate::types::WaferData) -> PyResult<Py<PyD
 fn part_to_dict(py: Python<'_>, p: &crate::types::PartData) -> PyResult<Py<PyDict>> {
     let d = PyDict::new(py);
     d.set_item("part_id", &p.part_id)?;
+    d.set_item("lot_id", &p.lot_id)?;
     d.set_item("wafer_id", &p.wafer_id)?;
     d.set_item("head_num", p.head_num)?;
     d.set_item("site_num", p.site_num)?;
@@ -40,6 +42,7 @@ fn part_to_dict(py: Python<'_>, p: &crate::types::PartData) -> PyResult<Py<PyDic
 /// Convert a TestResult to a Python dict.
 fn test_result_to_dict(py: Python<'_>, t: &crate::types::TestResult) -> PyResult<Py<PyDict>> {
     let d = PyDict::new(py);
+    d.set_item("lot_id", &t.lot_id)?;
     d.set_item("part_id", &t.part_id)?;
     d.set_item("wafer_id", &t.wafer_id)?;
     d.set_item("x_coord", t.x_coord)?;

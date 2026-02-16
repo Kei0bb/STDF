@@ -1,9 +1,12 @@
 """STDF binary parser - no external dependencies."""
 
 import struct
+import logging
 from pathlib import Path
 from dataclasses import dataclass, field
 from typing import BinaryIO
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -570,13 +573,18 @@ def _convert_rust_result(d: dict) -> STDFData:
 try:
     from stdf2pq_rs import parse_stdf as _parse_stdf_rs
     _USE_RUST = True
+    logger.info("Rust STDF parser loaded (stdf2pq_rs)")
 except ImportError:
     _USE_RUST = False
+    logger.info("Rust parser not available, using Python fallback")
 
 
 def parse_stdf(file_path: Path) -> STDFData:
     """Parse an STDF file. Uses Rust parser if available, Python fallback otherwise."""
     if _USE_RUST:
-        result = _parse_stdf_rs(str(file_path))
-        return _convert_rust_result(result)
+        try:
+            result = _parse_stdf_rs(str(file_path))
+            return _convert_rust_result(result)
+        except Exception as e:
+            logger.warning("Rust parser failed: %s, falling back to Python", e)
     return _parse_stdf_python(file_path)

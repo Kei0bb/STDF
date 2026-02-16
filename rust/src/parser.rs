@@ -108,6 +108,7 @@ fn parse_wir(state: &mut ParserState, data: &[u8]) -> io::Result<()> {
     state.current_wafer = wafer_id.clone();
     state.data.wafers.push(WaferData {
         wafer_id,
+        lot_id: state.data.lot_id.clone(),
         head_num: head_num as i64,
         start_time: start_t as i64,
         finish_time: 0,
@@ -171,6 +172,7 @@ fn parse_prr(state: &mut ParserState, data: &[u8]) -> io::Result<()> {
 
     state.data.parts.push(PartData {
         part_id: state.current_part_id(),
+        lot_id: state.data.lot_id.clone(),
         wafer_id: state.current_wafer.clone(),
         head_num: head_num as i64,
         site_num: site_num as i64,
@@ -221,6 +223,7 @@ fn parse_ptr(state: &mut ParserState, data: &[u8]) -> io::Result<()> {
     });
 
     state.data.test_results.push(TestResult {
+        lot_id: state.data.lot_id.clone(),
         part_id: state.current_part_id(),
         wafer_id: state.current_wafer.clone(),
         x_coord: state.data.parts.last().map_or(0, |p| p.x_coord),
@@ -303,6 +306,7 @@ fn parse_mpr(state: &mut ParserState, data: &[u8]) -> io::Result<()> {
     let result_val = results.first().copied().unwrap_or(f64::NAN);
 
     state.data.test_results.push(TestResult {
+        lot_id: state.data.lot_id.clone(),
         part_id: state.current_part_id(),
         wafer_id: state.current_wafer.clone(),
         x_coord: state.data.parts.last().map_or(0, |p| p.x_coord),
@@ -341,6 +345,7 @@ fn parse_ftr(state: &mut ParserState, data: &[u8]) -> io::Result<()> {
     });
 
     state.data.test_results.push(TestResult {
+        lot_id: state.data.lot_id.clone(),
         part_id: state.current_part_id(),
         wafer_id: state.current_wafer.clone(),
         x_coord: state.data.parts.last().map_or(0, |p| p.x_coord),

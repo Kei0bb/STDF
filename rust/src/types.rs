@@ -20,6 +20,7 @@ pub const REC_FTR: (u8, u8) = (15, 20);
 #[derive(Clone, Debug)]
 pub struct WaferData {
     pub wafer_id: String,
+    pub lot_id: String,
     pub head_num: i64,
     pub start_time: i64,
     pub finish_time: i64,
@@ -33,6 +34,7 @@ pub struct WaferData {
 #[derive(Clone, Debug)]
 pub struct PartData {
     pub part_id: String,
+    pub lot_id: String,
     pub wafer_id: String,
     pub head_num: i64,
     pub site_num: i64,
@@ -59,6 +61,7 @@ pub struct TestDef {
 /// Single test result row.
 #[derive(Clone, Debug)]
 pub struct TestResult {
+    pub lot_id: String,
     pub part_id: String,
     pub wafer_id: String,
     pub x_coord: i64,
