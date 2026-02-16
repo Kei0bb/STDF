@@ -1,0 +1,17 @@
+[package]
+name = "stdf2pq-rs"
+version = "0.1.0"
+edition = "2021"
+description = "High-performance STDF binary parser"
+
+[lib]
+name = "stdf2pq_rs"
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = []
+python = ["pyo3"]
+
+[dependencies]
+pyo3 = { version = "0.23", features = ["extension-module"], optional = true }
+flate2 = "1"

@@ -27,3 +27,8 @@ packages = ["src/stdf_platform"]
 
 [tool.hatch.build.targets.sdist]
 include = ["src/stdf_platform"]
+
+[dependency-groups]
+dev = [
+    "maturin>=1.12.0",
+]

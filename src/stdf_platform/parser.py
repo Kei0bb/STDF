@@ -1,9 +1,12 @@
 """STDF binary parser - no external dependencies."""
 
 import struct
+import logging
 from pathlib import Path
 from dataclasses import dataclass, field
 from typing import BinaryIO
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -539,7 +542,49 @@ class STDFParser:
         return self.data
 
 
-def parse_stdf(file_path: Path) -> STDFData:
-    """Parse an STDF file."""
+def _parse_stdf_python(file_path: Path) -> STDFData:
+    """Parse an STDF file using the Python parser."""
     parser = STDFParser()
     return parser.parse(file_path)
+
+
+def _convert_rust_result(d: dict) -> STDFData:
+    """Convert Rust parser dict result to STDFData."""
+    data = STDFData()
+    data.lot_id = d.get("lot_id", "")
+    data.part_type = d.get("part_type", "")
+    data.job_name = d.get("job_name", "")
+    data.job_rev = d.get("job_rev", "")
+    data.start_time = d.get("start_time", 0)
+    data.finish_time = d.get("finish_time", 0)
+    data.tester_type = d.get("tester_type", "")
+    data.operator = d.get("operator", "")
+    data.test_code = d.get("test_code", "")
+    data.wafers = d.get("wafers", [])
+    data.parts = d.get("parts", [])
+    data.test_results = d.get("test_results", [])
+    data.tests = {int(k): v for k, v in d.get("tests", {}).items()}
+    data.bins_hard = {int(k): v for k, v in d.get("bins_hard", {}).items()}
+    data.bins_soft = {int(k): v for k, v in d.get("bins_soft", {}).items()}
+    return data
+
+
+# Try Rust parser, fallback to Python
+try:
+    from stdf2pq_rs import parse_stdf as _parse_stdf_rs
+    _USE_RUST = True
+    logger.info("Rust STDF parser loaded (stdf2pq_rs)")
+except ImportError:
+    _USE_RUST = False
+    logger.info("Rust parser not available, using Python fallback")
+
+
+def parse_stdf(file_path: Path) -> STDFData:
+    """Parse an STDF file. Uses Rust parser if available, Python fallback otherwise."""
+    if _USE_RUST:
+        try:
+            result = _parse_stdf_rs(str(file_path))
+            return _convert_rust_result(result)
+        except Exception as e:
+            logger.warning("Rust parser failed: %s, falling back to Python", e)
+    return _parse_stdf_python(file_path)
