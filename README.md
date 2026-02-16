@@ -10,15 +10,56 @@ cd /path/to/STDF
 uv sync
 ```
 
-### Rust パーサー（推奨）
+### Rust パーサーのセットアップ（推奨）
+
+Rust パーサーを使うと **10〜30倍高速** にSTDFファイルを処理できます。
+未インストールでも Python パーサーで動作するので、必須ではありません。
+
+#### Step 1: Rust のインストール
+
+まだ Rust が入っていない場合:
 
 ```bash
-# Rust ツールチェーンが必要
-uv add --dev maturin
-cd rust && uv run maturin develop --features python --release
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 ```
 
-Rust パーサーがインストールされていない場合、Python パーサーに自動フォールバックします。
+ターミナルを再起動するか、以下を実行して Rust コマンドを有効化:
+
+```bash
+source "$HOME/.cargo/env"
+```
+
+確認:
+
+```bash
+rustc --version   # rustc 1.x.x と表示されれば OK
+cargo --version   # cargo 1.x.x と表示されれば OK
+```
+
+#### Step 2: ビルドツール (maturin) の追加
+
+```bash
+cd /path/to/STDF
+uv add --dev maturin
+```
+
+#### Step 3: Rust パーサーのビルド
+
+```bash
+cd rust
+uv run maturin develop --features python --release
+```
+
+> `--release` を付けると最適化ビルドになり大幅に速くなります。
+> 開発中は省略しても OK です。
+
+#### 確認
+
+```bash
+cd /path/to/STDF
+uv run python -c "from stdf_platform.parser import _USE_RUST; print(f'Rust parser: {_USE_RUST}')"
+# → "Rust parser: True" と表示されれば成功
+```
 
 ---
 
