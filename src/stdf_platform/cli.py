@@ -160,7 +160,15 @@ def ingest(ctx, stdf_file: Path, product: str | None, sub_process: str | None, f
                 pass
 
 
-@main.command()
+# ── db group ──────────────────────────────────────────────────────
+
+@main.group()
+def db():
+    """Database operations (lots, query, shell)."""
+    pass
+
+
+@db.command()
 @click.option("--lot", "-l", help="Filter by lot ID")
 @click.pass_context
 def lots(ctx, lot: str | None):
@@ -168,8 +176,8 @@ def lots(ctx, lot: str | None):
     config: Config = ctx.obj["config"]
 
     try:
-        with Database(config.storage) as db:
-            results = db.get_lot_summary(lot)
+        with Database(config.storage) as db_conn:
+            results = db_conn.get_lot_summary(lot)
 
             if not results:
                 console.print("[yellow]No lots found[/yellow]")
@@ -319,7 +327,7 @@ def bins(ctx, lot_id: str):
         sys.exit(1)
 
 
-@main.command()
+@db.command()
 @click.argument("sql")
 @click.pass_context
 def query(ctx, sql: str):
@@ -327,8 +335,8 @@ def query(ctx, sql: str):
     config: Config = ctx.obj["config"]
 
     try:
-        with Database(config.storage) as db:
-            results = db.query(sql)
+        with Database(config.storage) as db_conn:
+            results = db_conn.query(sql)
 
             if not results:
                 console.print("[yellow]No results[/yellow]")
@@ -354,7 +362,7 @@ def query(ctx, sql: str):
         sys.exit(1)
 
 
-@main.command()
+@db.command()
 @click.pass_context
 def shell(ctx):
     """Open DuckDB interactive shell."""
@@ -559,12 +567,20 @@ def fetch(ctx, product: tuple, test_type: tuple, limit: int | None, ingest: bool
         sys.exit(1)
 
 
-@main.command()
+# ── export group ──────────────────────────────────────────────────
+
+@main.group(name="export")
+def export_grp():
+    """Export data to CSV or Parquet."""
+    pass
+
+
+@export_grp.command(name="csv")
 @click.argument("sql")
 @click.argument("output", type=click.Path(path_type=Path))
 @click.option("--format", "-f", type=click.Choice(["csv", "parquet"]), default="csv", help="Output format")
 @click.pass_context
-def export(ctx, sql: str, output: Path, format: str):
+def export_csv(ctx, sql: str, output: Path, format: str):
     """
     Export query results to CSV or Parquet file.
 
@@ -572,25 +588,23 @@ def export(ctx, sql: str, output: Path, format: str):
     OUTPUT: Output file path
 
     Example:
-        stdf2pq export "SELECT * FROM test_results WHERE lot_id='LOT001'" results.csv
+        stdf2pq export csv "SELECT * FROM test_data" results.csv
     """
     config: Config = ctx.obj["config"]
 
-    console.print(f"\n[bold]STDF Platform - Export[/bold]")
+    console.print(f"\n[bold]stdf2pq - Export[/bold]")
     console.print(f"  Query: {sql[:50]}..." if len(sql) > 50 else f"  Query: {sql}")
     console.print(f"  Output: {output}")
     console.print()
 
     try:
-        with Database(config.storage) as db:
-            # Get DataFrame
-            df = db.query_df(sql)
+        with Database(config.storage) as db_conn:
+            df = db_conn.query_df(sql)
 
             if df.empty:
                 console.print("[yellow]No results to export[/yellow]")
                 return
 
-            # Export based on format
             if format == "csv":
                 df.to_csv(output, index=False)
             else:
@@ -603,7 +617,7 @@ def export(ctx, sql: str, output: Path, format: str):
         sys.exit(1)
 
 
-@main.command()
+@export_grp.command(name="lot")
 @click.argument("lot_ids", nargs=-1, required=True)
 @click.argument("output", type=click.Path(path_type=Path))
 @click.option("--pivot/--no-pivot", default=True, help="Pivot test results (one row per part)")
@@ -616,11 +630,11 @@ def export_lot(ctx, lot_ids: tuple, output: Path, pivot: bool):
     OUTPUT: Output CSV file path
 
     Example:
-        stdf2pq export-lot E6A773.00 E6A774.00 results.csv
+        stdf2pq export lot E6A773.00 E6A774.00 results.csv
     """
     config: Config = ctx.obj["config"]
 
-    console.print(f"\n[bold]STDF Platform - Export Lot[/bold]")
+    console.print(f"\n[bold]stdf2pq - Export Lot[/bold]")
     console.print(f"  Lots: {', '.join(lot_ids)}")
     console.print(f"  Output: {output}")
     console.print(f"  Pivot: {'Yes' if pivot else 'No'}")
@@ -629,9 +643,8 @@ def export_lot(ctx, lot_ids: tuple, output: Path, pivot: bool):
     lot_list = ", ".join(f"'{lot}'" for lot in lot_ids)
 
     try:
-        with Database(config.storage) as db:
+        with Database(config.storage) as db_conn:
             if pivot:
-                # Pivot format: one row per part, columns are test parameters
                 sql = f"""
                 PIVOT (
                     SELECT 
@@ -656,7 +669,6 @@ def export_lot(ctx, lot_ids: tuple, output: Path, pivot: bool):
                 ORDER BY lot_id, wafer_id, part_id
                 """
             else:
-                # Long format: one row per test result
                 sql = f"""
                 SELECT 
                     tr.lot_id,
@@ -680,7 +692,7 @@ def export_lot(ctx, lot_ids: tuple, output: Path, pivot: bool):
                 ORDER BY tr.lot_id, tr.wafer_id, tr.part_id, t.test_num
                 """
 
-            df = db.query_df(sql)
+            df = db_conn.query_df(sql)
 
             if df.empty:
                 console.print("[yellow]No results to export[/yellow]")

@@ -73,16 +73,35 @@ stdf2pq ingest ./downloads/SCT101A/CP/lot001.stdf
 
 # 明示的に指定
 stdf2pq ingest sample.stdf --product SCT101A --test-type CP
+
+# dev環境に取り込み（本番DBと分離）
+stdf2pq --env dev ingest test.stdf --product SCT101A --test-type CP
 ```
 
-### CLI 分析コマンド
+### DB 操作
 
 ```bash
-stdf2pq lots                          # ロット一覧
+stdf2pq db lots                          # ロット一覧
+stdf2pq db query "SELECT * FROM wafers"  # SQL 直接実行
+stdf2pq db shell                         # DuckDB シェル
+
+# dev環境のDBを参照
+stdf2pq --env dev db lots
+```
+
+### 分析
+
+```bash
 stdf2pq analyze yield LOT001          # Wafer 歩留まり
 stdf2pq analyze test-fail LOT001      # フェールテスト上位
 stdf2pq analyze bins LOT001           # Bin 分布
-stdf2pq query "SELECT * FROM wafers"  # SQL 直接実行
+```
+
+### エクスポート
+
+```bash
+stdf2pq export csv "SELECT * FROM test_data" out.csv   # SQL → CSV
+stdf2pq export lot E6A773.00 E6A774.00 results.csv     # Lot → CSV (JMP対応)
 ```
 
 ### FTP 差分同期
