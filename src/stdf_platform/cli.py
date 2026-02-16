@@ -25,11 +25,16 @@ console = Console()
 @click.group()
 @click.version_option(version=__version__, prog_name="stdf2pq")
 @click.option("--config", "-c", type=click.Path(path_type=Path), help="Config file path")
+@click.option("--env", "-e", default=None, help="Environment name (e.g. dev). Isolates data to data-{env}/")
 @click.pass_context
-def main(ctx, config: Path | None):
+def main(ctx, config: Path | None, env: str | None):
     """stdf2pq - STDF to Parquet converter and analysis DB."""
     ctx.ensure_object(dict)
-    ctx.obj["config"] = Config.load(config)
+    cfg = Config.load(config)
+    if env:
+        cfg.storage = cfg.storage.with_env(env)
+    ctx.obj["config"] = cfg
+    ctx.obj["env"] = env
 
 
 @main.command()
@@ -66,6 +71,8 @@ def ingest(ctx, stdf_file: Path, product: str | None, sub_process: str | None, f
     product = product or "UNKNOWN"
 
     console.print(f"\n[bold]stdf2pq - Ingest[/bold]")
+    if ctx.obj.get("env"):
+        console.print(f"  [yellow]Environment: {ctx.obj['env']}[/yellow]  (data → data-{ctx.obj['env']}/)")
     console.print(f"  File: {stdf_file}")
     console.print(f"  Product: {product}")
     console.print()

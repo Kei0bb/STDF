@@ -42,6 +42,20 @@ class StorageConfig:
         if isinstance(self.download_dir, str):
             self.download_dir = Path(self.download_dir)
 
+    def with_env(self, env: str | None) -> "StorageConfig":
+        """Return a new config with paths adjusted for the given environment.
+
+        e.g. env="dev" → data-dev/, data-dev/stdf.duckdb
+        Default (env=None) returns self unchanged.
+        """
+        if not env:
+            return self
+        return StorageConfig(
+            data_dir=Path(f"./data-{env}"),
+            database=Path(f"./data-{env}/stdf.duckdb"),
+            download_dir=self.download_dir,
+        )
+
 
 @dataclass
 class ProcessingConfig:
