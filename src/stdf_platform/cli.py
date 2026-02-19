@@ -509,56 +509,72 @@ def fetch(ctx, product: tuple, test_type: tuple, limit: int | None, ingest: bool
         console.print(f"\n[green]✓[/green] Downloaded {len(downloaded)} files")
 
         # Auto-ingest if enabled
-        if ingest and downloaded:
-            console.print("\n[bold]Ingesting files...[/bold]")
-            storage = ParquetStorage(config.storage)
-            success = 0
-            failed = 0
-            ingested_files = []
+        if ingest:
+            # Combine newly downloaded + previously failed (pending) files
+            to_ingest = list(downloaded)
+            pending = sync_manager.get_pending_ingest()
+            # Add pending files that aren't already in the download list
+            downloaded_remotes = {r for r, _, _, _ in downloaded}
+            for remote_path, local_path, prod, ttype in pending:
+                if remote_path not in downloaded_remotes and local_path.exists():
+                    to_ingest.append((remote_path, local_path, prod, ttype))
 
-            from .storage import _get_test_category
+            if not to_ingest:
+                console.print("\n[dim]No files to ingest[/dim]")
+            else:
+                if len(to_ingest) > len(downloaded):
+                    retry_count = len(to_ingest) - len(downloaded)
+                    console.print(f"\n[bold]Ingesting files...[/bold] ({retry_count} pending retry)")
+                else:
+                    console.print("\n[bold]Ingesting files...[/bold]")
+                storage = ParquetStorage(config.storage)
+                success = 0
+                failed = 0
+                ingested_files = []
 
-            for remote_path, local_path, prod, ttype in downloaded:
-                try:
-                    data = parse_stdf(local_path)
-                    
-                    # Use STDF MIR.TEST_COD as sub_process
-                    sub_process = data.test_code or "UNKNOWN"
-                    test_category = _get_test_category(sub_process)
-                    
-                    storage.save_stdf_data(
-                        data, 
-                        product=prod, 
-                        test_category=test_category,
-                        sub_process=sub_process,
-                        source_file=local_path.name,
-                        compression=config.processing.compression
-                    )
-                    sync_manager.mark_ingested(remote_path)
-                    console.print(f"  [green]✓[/green] {local_path.name} ({prod}/{test_category}/{sub_process})")
-                    success += 1
-                    ingested_files.append(local_path)
-                except Exception as e:
-                    console.print(f"  [red]✗[/red] {local_path.name}: {e}")
-                    failed += 1
+                from .storage import _get_test_category
 
-            console.print(f"\n[green]✓[/green] Ingested {success} files")
-            if failed:
-                console.print(f"[yellow]![/yellow] {failed} files failed")
-
-            # Cleanup source files after successful ingest
-            if cleanup and ingested_files:
-                console.print("\n[bold]Cleaning up source files...[/bold]")
-                cleaned = 0
-                for local_path in ingested_files:
+                for remote_path, local_path, prod, ttype in to_ingest:
                     try:
-                        if local_path.exists():
-                            local_path.unlink()
-                            cleaned += 1
+                        data = parse_stdf(local_path)
+                        
+                        # Use STDF MIR.TEST_COD as sub_process
+                        sub_process = data.test_code or "UNKNOWN"
+                        test_category = _get_test_category(sub_process)
+                        
+                        storage.save_stdf_data(
+                            data, 
+                            product=prod, 
+                            test_category=test_category,
+                            sub_process=sub_process,
+                            source_file=local_path.name,
+                            compression=config.processing.compression
+                        )
+                        sync_manager.mark_ingested(remote_path)
+                        console.print(f"  [green]✓[/green] {local_path.name} ({prod}/{test_category}/{sub_process})")
+                        success += 1
+                        ingested_files.append(local_path)
                     except Exception as e:
-                        if verbose:
-                            console.print(f"  [yellow]![/yellow] Could not delete {local_path.name}: {e}")
-                console.print(f"[green]✓[/green] Deleted {cleaned} source files")
+                        console.print(f"  [red]✗[/red] {local_path.name}: {e}")
+                        failed += 1
+
+                console.print(f"\n[green]✓[/green] Ingested {success} files")
+                if failed:
+                    console.print(f"[yellow]![/yellow] {failed} files failed (will retry on next fetch)")
+
+                # Cleanup source files after successful ingest
+                if cleanup and ingested_files:
+                    console.print("\n[bold]Cleaning up source files...[/bold]")
+                    cleaned = 0
+                    for local_path in ingested_files:
+                        try:
+                            if local_path.exists():
+                                local_path.unlink()
+                                cleaned += 1
+                        except Exception as e:
+                            if verbose:
+                                console.print(f"  [yellow]![/yellow] Could not delete {local_path.name}: {e}")
+                    console.print(f"[green]✓[/green] Deleted {cleaned} source files")
 
     except Exception as e:
         console.print(f"[red]Error:[/red] {e}")
