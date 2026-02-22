@@ -115,7 +115,7 @@ class STDFParser:
             return ""
         data = f.read(length)
         try:
-            return data.decode("ascii", errors="replace")
+            return data.decode("ascii", errors="replace").replace("\x00", "").strip()
         except Exception:
             return ""
 

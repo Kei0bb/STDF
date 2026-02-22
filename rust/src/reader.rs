@@ -80,6 +80,7 @@ impl StdfReader {
     }
 
     /// Read character string (length-prefixed, 1-byte length).
+    /// Strips null characters and whitespace.
     pub fn read_cn<R: Read>(&self, r: &mut R) -> io::Result<String> {
         let len = self.read_u1(r)? as usize;
         if len == 0 {
@@ -87,7 +88,9 @@ impl StdfReader {
         }
         let mut buf = vec![0u8; len];
         r.read_exact(&mut buf)?;
-        Ok(String::from_utf8_lossy(&buf).to_string())
+        // Remove null bytes before decoding
+        buf.retain(|&b| b != 0);
+        Ok(String::from_utf8_lossy(&buf).trim().to_string())
     }
 
     /// Read record header: (rec_len, rec_typ, rec_sub).
