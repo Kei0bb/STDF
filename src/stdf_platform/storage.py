@@ -150,6 +150,19 @@ class ParquetStorage:
         self.data_dir = config.data_dir
         self.data_dir.mkdir(parents=True, exist_ok=True)
 
+    @staticmethod
+    def _sanitize(value: str) -> str:
+        """Sanitize a string for use in file/directory names.
+        
+        Removes or replaces characters that are invalid on Windows:
+        \\ / : * ? " < > | and control characters (including NULL).
+        """
+        # Remove control characters (0x00-0x1F)
+        sanitized = re.sub(r'[\x00-\x1f]', '', value)
+        # Replace Windows-invalid characters with underscore
+        sanitized = re.sub(r'[\\/:*?"<>|]', '_', sanitized)
+        return sanitized.strip()
+
     def _get_table_path(
         self, 
         table_name: str, 
@@ -164,9 +177,9 @@ class ParquetStorage:
         """
         base = self.data_dir / table_name
         if product and test_category:
-            path = base / f"product={product}" / f"test_category={test_category}"
+            path = base / f"product={self._sanitize(product)}" / f"test_category={self._sanitize(test_category)}"
             if sub_process:
-                path = path / f"sub_process={sub_process}"
+                path = path / f"sub_process={self._sanitize(sub_process)}"
             return path
         return base
 
@@ -199,8 +212,8 @@ class ParquetStorage:
         # re is imported at module level
         wafer_base = (
             self._get_table_path("wafers", product, test_category, sub_process)
-            / f"lot_id={lot_id}"
-            / f"wafer_id={wafer_id}"
+            / f"lot_id={self._sanitize(lot_id)}"
+            / f"wafer_id={self._sanitize(wafer_id)}"
         )
         
         if not wafer_base.exists():
@@ -247,7 +260,7 @@ class ParquetStorage:
 
 
         # Save lot info
-        lot_path = self._get_table_path("lots", product, test_category, sub_process) / f"lot_id={data.lot_id}"
+        lot_path = self._get_table_path("lots", product, test_category, sub_process) / f"lot_id={self._sanitize(data.lot_id)}"
         lot_path.mkdir(parents=True, exist_ok=True)
 
         lot_table = pa.table({
@@ -281,7 +294,7 @@ class ParquetStorage:
                     product, test_category, sub_process, data.lot_id, wafer_id
                 )
                 
-                wafer_path = self._get_table_path("wafers", product, test_category, sub_process) / f"lot_id={data.lot_id}" / f"wafer_id={wafer_id}" / f"retest={retest_num}"
+                wafer_path = self._get_table_path("wafers", product, test_category, sub_process) / f"lot_id={self._sanitize(data.lot_id)}" / f"wafer_id={self._sanitize(wafer_id)}" / f"retest={retest_num}"
                 wafer_path.mkdir(parents=True, exist_ok=True)
 
                 wafer_table = pa.table({
@@ -313,7 +326,7 @@ class ParquetStorage:
                 part_groups[key].append(part)
 
             for (lot_id, wafer_id), parts in part_groups.items():
-                part_path = self._get_table_path("parts", product, test_category, sub_process) / f"lot_id={lot_id}" / f"wafer_id={wafer_id}"
+                part_path = self._get_table_path("parts", product, test_category, sub_process) / f"lot_id={self._sanitize(lot_id)}" / f"wafer_id={self._sanitize(wafer_id)}"
                 part_path.mkdir(parents=True, exist_ok=True)
 
                 part_table = pa.table({
@@ -354,7 +367,7 @@ class ParquetStorage:
                 result_groups[key].append(result)
 
             for (lot_id, wafer_id), results in result_groups.items():
-                result_path = self._get_table_path("test_data", product, test_category, sub_process) / f"lot_id={lot_id}" / f"wafer_id={wafer_id}"
+                result_path = self._get_table_path("test_data", product, test_category, sub_process) / f"lot_id={self._sanitize(lot_id)}" / f"wafer_id={self._sanitize(wafer_id)}"
                 result_path.mkdir(parents=True, exist_ok=True)
 
                 # Enrich results with test info and coordinates
