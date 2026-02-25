@@ -105,27 +105,6 @@ def _get_test_category(test_type: str) -> str:
     return "OTHER"
 
 
-def extract_sub_process_from_filename(filename: str) -> str | None:
-    """
-    Extract sub-process (CP11, FT2, PT1, etc.) from filename.
-    
-    Looks for patterns like _CP11_, _FT2_, _PT1_, etc. in the filename.
-    Returns None if no sub-process is found.
-    
-    Examples:
-        "A_SPT_CP11_F5009AF0002_20250127.stdf.gz" -> "CP11"
-        "LOT001_FT2_001.stdf" -> "FT2"
-        "TEST_PT1_DATA.stdf" -> "PT1"
-    """
-    # re is imported at module level
-    # Match _CP, _FT, or _PT followed by digits
-    pattern = r'[_\-](CP\d+|FT\d+|PT\d+)[_\-\.]'
-    match = re.search(pattern, filename, re.IGNORECASE)
-    if match:
-        return match.group(1).upper()
-    return None
-
-
 def extract_test_rev_from_filename(filename: str) -> str:
     """
     Extract test revision (Rev04, Rev01, etc.) from filename.

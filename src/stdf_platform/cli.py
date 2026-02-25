@@ -39,9 +39,9 @@ def main(ctx, config: Path | None, env: str | None):
 
 @main.command()
 @click.argument("stdf_file", type=click.Path(exists=True, path_type=Path))
-@click.option("--product", "-p", help="Product name (auto-detect from path if not specified)")
-@click.option("--sub-process", "-s", help="Sub-process (CP11, FT2, etc. - auto-detect from filename if not specified)")
-@click.option("--from-path", is_flag=True, help="Extract product/sub-process from file path")
+@click.option("--product", "-p", help="Product name (required unless --from-path)")
+@click.option("--sub-process", "-s", help="Sub-process (CP11, FT2, etc. - default: from STDF MIR.TEST_COD)")
+@click.option("--from-path", is_flag=True, help="Auto-detect product from file path (e.g. .../SCT101A/CP/...)")
 @click.option("--verbose", "-v", is_flag=True, help="Verbose output")
 @click.pass_context
 def ingest(ctx, stdf_file: Path, product: str | None, sub_process: str | None, from_path: bool, verbose: bool):
@@ -50,7 +50,7 @@ def ingest(ctx, stdf_file: Path, product: str | None, sub_process: str | None, f
 
     STDF_FILE: Path to the STDF file to ingest
 
-    Product can be specified via options or auto-detected from file path.
+    Product is specified via -p or auto-detected with --from-path.
     Sub-process is determined from STDF MIR.TEST_COD (e.g. CP1, FT2).
     """
     from .storage import _get_test_category
@@ -58,8 +58,8 @@ def ingest(ctx, stdf_file: Path, product: str | None, sub_process: str | None, f
     config: Config = ctx.obj["config"]
     config.ensure_directories()
 
-    # Extract product from path if not specified
-    if product is None:
+    # Extract product from path (only when --from-path is specified)
+    if product is None and from_path:
         parts = stdf_file.resolve().parts
         for i, part in enumerate(parts):
             part_upper = part.upper()
