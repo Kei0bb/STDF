@@ -569,22 +569,18 @@ def _convert_rust_result(d: dict) -> STDFData:
     return data
 
 
-# Try Rust parser, fallback to Python
+# Rust parser availability
 try:
     from stdf2pq_rs import parse_stdf as _parse_stdf_rs
     _USE_RUST = True
-    logger.info("Rust STDF parser loaded (stdf2pq_rs)")
 except ImportError:
     _USE_RUST = False
-    logger.info("Rust parser not available, using Python fallback")
+    logger.warning("Rust parser not available — using Python parser (slower)")
 
 
 def parse_stdf(file_path: Path) -> STDFData:
     """Parse an STDF file. Uses Rust parser if available, Python fallback otherwise."""
     if _USE_RUST:
-        try:
-            result = _parse_stdf_rs(str(file_path))
-            return _convert_rust_result(result)
-        except Exception as e:
-            logger.warning("Rust parser failed: %s, falling back to Python", e)
+        result = _parse_stdf_rs(str(file_path))
+        return _convert_rust_result(result)
     return _parse_stdf_python(file_path)
