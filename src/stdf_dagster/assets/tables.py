@@ -5,6 +5,7 @@ from dagster import (
     AssetExecutionContext,
     MaterializeResult,
     MetadataValue,
+    RetryPolicy,
 )
 
 from stdf_dagster.resources.parquet import ParquetStorageResource
@@ -18,6 +19,7 @@ from stdf_platform.sync_manager import SyncManager
     description="パース済みSTDFデータをHive-partitioned Parquetテーブル (lots, wafers, parts, test_data) に書き出す",
     group_name="tables",
     kinds={"parquet"},
+    retry_policy=RetryPolicy(max_retries=2, delay=5),
 )
 def stdf_parquet_tables(
     context: AssetExecutionContext,
