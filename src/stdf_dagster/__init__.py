@@ -4,6 +4,7 @@ from dagster import Definitions
 
 from .assets.ingestion import raw_stdf_files, parsed_stdf_data
 from .assets.tables import stdf_parquet_tables, duckdb_views
+from .assets.analytics import yield_summary, bin_distribution, test_fail_ranking
 from .assets.local_ingest import local_ingest
 from .jobs import full_pipeline_job, ingestion_job, refresh_views_job
 from .sensors.ftp_sensor import ftp_new_file_sensor
@@ -12,10 +13,16 @@ from .resources import get_resources
 
 defs = Definitions(
     assets=[
+        # Ingestion pipeline
         raw_stdf_files,
         parsed_stdf_data,
         stdf_parquet_tables,
         duckdb_views,
+        # Analytics
+        yield_summary,
+        bin_distribution,
+        test_fail_ranking,
+        # Standalone
         local_ingest,
     ],
     jobs=[

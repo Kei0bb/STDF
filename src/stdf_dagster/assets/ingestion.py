@@ -10,6 +10,8 @@ from dagster import (
     MaterializeResult,
     MetadataValue,
     Output,
+    RetryPolicy,
+    Backoff,
 )
 
 from stdf_dagster.resources.ftp import FTPResource
@@ -22,6 +24,11 @@ from stdf_platform.sync_manager import SyncManager
     description="FTPサーバーから新規STDFファイルをダウンロードし、ローカルパスのリストを返す",
     group_name="ingestion",
     kinds={"ftp"},
+    retry_policy=RetryPolicy(
+        max_retries=3,
+        delay=10,
+        backoff=Backoff.EXPONENTIAL,
+    ),
 )
 def raw_stdf_files(
     context: AssetExecutionContext,
@@ -92,6 +99,10 @@ def raw_stdf_files(
     description="STDFバイナリファイルを解析し、メタデータ付きの結果リストを返す",
     group_name="ingestion",
     kinds={"python", "rust"},
+    retry_policy=RetryPolicy(
+        max_retries=2,
+        delay=5,
+    ),
 )
 def parsed_stdf_data(
     context: AssetExecutionContext,
