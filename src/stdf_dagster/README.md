@@ -7,7 +7,10 @@
 
 ```bash
 # 依存関係インストール
-uv pip install "dagster>=1.9.0" "dagster-webserver>=1.9.0"
+uv pip install "dagster>=1.9.0" "dagster-webserver>=1.9.0" "psycopg2-binary>=2.9.0"
+
+# PostgreSQL 起動
+docker compose up -d
 
 # Dagster UI 起動
 uv run dagster dev -m stdf_dagster
@@ -26,10 +29,10 @@ parsed_stdf_data        ← Rust/Python パーサー
 stdf_parquet_tables     ← Hive-partitioned Parquet 書き出し
     ↓
 duckdb_views            ← DuckDB ビュー更新
-    ↓
-yield_summary           ┐
-bin_distribution        ├ 分析 (CSV 出力)
-test_fail_ranking       ┘
+    ├→ yield_summary     ┐
+    ├→ bin_distribution  ├ 分析 (CSV 出力)
+    ├→ test_fail_ranking ┘
+    └→ postgres_sync     ← PostgreSQL 全テーブル同期 (JMP/BI用)
 ```
 
 ## Assets
@@ -43,6 +46,7 @@ test_fail_ranking       ┘
 | **analytics** | `yield_summary` | 歩留まりサマリ → `data/analytics/yield_summary.csv` |
 | **analytics** | `bin_distribution` | Bin 分布 → `data/analytics/bin_distribution.csv` |
 | **analytics** | `test_fail_ranking` | フェールテスト上位 → `data/analytics/test_fail_ranking.csv` |
+| **postgres** | `postgres_sync` | DuckDB → PostgreSQL 全テーブル同期 (retry: 2回) |
 | **local** | `local_ingest` | ローカルファイル直接 ingest (FTPバイパス) |
 
 ## Jobs
@@ -73,6 +77,7 @@ test_fail_ranking       ┘
 | `STDFParserResource` | `stdf_platform.parser.parse_stdf` |
 | `ParquetStorageResource` | `stdf_platform.storage.ParquetStorage` |
 | `DuckDBResource` | `stdf_platform.database.Database` |
+| `PostgresResource` | psycopg2 (PostgreSQL 接続 + bulk upsert) |
 
 ## ローカルファイル ingest
 
@@ -84,6 +89,25 @@ product: "SCT101A"
 test_type: "CP1"  # 空欄の場合はSTDFから自動検出
 ```
 
+## PostgreSQL 連携
+
+### 起動
+
+```bash
+docker compose up -d   # PostgreSQL 起動（初回は自動でテーブル作成）
+```
+
+### JMP / BI ツール接続
+
+| 項目 | 値 |
+|------|-----|
+| Host | サーバーIP |
+| Port | `5432` |
+| Database | `stdf` |
+| User (読取専用) | `stdf_reader` / `stdf_read_only` |
+
+全4テーブルの生データを SQL でクエリ可能。
+
 ## ディレクトリ構成
 
 ```
@@ -94,13 +118,15 @@ src/stdf_dagster/
 │   ├── ingestion.py         # raw_stdf_files, parsed_stdf_data
 │   ├── tables.py            # stdf_parquet_tables, duckdb_views
 │   ├── analytics.py         # yield_summary, bin_distribution, test_fail_ranking
+│   ├── postgres_sync.py     # postgres_sync (DuckDB → PostgreSQL)
 │   └── local_ingest.py      # local_ingest
 ├── resources/
 │   ├── stdf_config.py       # STDFConfigResource
 │   ├── ftp.py               # FTPResource
 │   ├── stdf_parser.py       # STDFParserResource
 │   ├── parquet.py            # ParquetStorageResource
-│   └── duckdb_resource.py   # DuckDBResource
+│   ├── duckdb_resource.py   # DuckDBResource
+│   └── postgres.py          # PostgresResource
 ├── sensors/
 │   └── ftp_sensor.py        # ftp_new_file_sensor
 ├── schedules/
