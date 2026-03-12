@@ -5,6 +5,7 @@ from .stdf_parser import STDFParserResource
 from .parquet import ParquetStorageResource
 from .duckdb_resource import DuckDBResource
 from .stdf_config import STDFConfigResource
+from .postgres import PostgresResource
 
 
 def get_resources() -> dict:
@@ -15,6 +16,7 @@ def get_resources() -> dict:
         "stdf_parser": STDFParserResource(),
         "parquet_storage": ParquetStorageResource(),
         "duckdb": DuckDBResource(),
+        "postgres": PostgresResource(),
     }
 
 
@@ -24,5 +26,6 @@ __all__ = [
     "ParquetStorageResource",
     "DuckDBResource",
     "STDFConfigResource",
+    "PostgresResource",
     "get_resources",
 ]
