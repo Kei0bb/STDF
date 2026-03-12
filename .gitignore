@@ -4,3 +4,7 @@ __pycache__/
 *.egg-info/
 .venv/
 config.yaml
+.env
+data/
+data-*/
+downloads/

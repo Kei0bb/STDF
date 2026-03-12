@@ -5,6 +5,7 @@ from dagster import Definitions
 from .assets.ingestion import raw_stdf_files, parsed_stdf_data
 from .assets.tables import stdf_parquet_tables, duckdb_views
 from .assets.analytics import yield_summary, bin_distribution, test_fail_ranking
+from .assets.postgres_sync import postgres_sync
 from .assets.local_ingest import local_ingest
 from .jobs import full_pipeline_job, ingestion_job, refresh_views_job
 from .sensors.ftp_sensor import ftp_new_file_sensor
@@ -22,6 +23,8 @@ defs = Definitions(
         yield_summary,
         bin_distribution,
         test_fail_ranking,
+        # PostgreSQL sync
+        postgres_sync,
         # Standalone
         local_ingest,
     ],
