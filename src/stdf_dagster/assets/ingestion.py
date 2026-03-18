@@ -54,8 +54,14 @@ def raw_stdf_files(
 
     context.log.info(f"Already downloaded: {len(downloaded)} files")
 
-    # List new files on FTP
-    new_files = ftp.list_new_files(downloaded)
+    # Apply product/test_type filters from config.yaml
+    if config.filters:
+        context.log.info(
+            f"Product filters: {[f.product for f in config.filters]}"
+        )
+
+    # List new files on FTP (applies config.yaml filters)
+    new_files = ftp.list_new_files(downloaded, config=config)
     context.log.info(f"New files found on FTP: {len(new_files)}")
 
     if not new_files:

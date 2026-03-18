@@ -1,12 +1,10 @@
 """FTP sensor: detects new STDF files on the FTP server."""
 
 import json
-from pathlib import Path
 
 from dagster import (
     sensor,
     RunRequest,
-    RunConfig,
     SkipReason,
     SensorEvaluationContext,
     DefaultSensorStatus,
@@ -17,8 +15,8 @@ from stdf_dagster.resources.stdf_config import STDFConfigResource
 
 
 @sensor(
-    description="FTPサーバーを定期的にポーリングし、新規STDFファイルを検知したらパイプラインを起動",
-    minimum_interval_seconds=300,  # 5分間隔
+    description="FTPサーバーを3時間間隔でポーリングし、新規STDFファイルを検知したらパイプラインを起動",
+    minimum_interval_seconds=10800,  # 3時間間隔
     default_status=DefaultSensorStatus.STOPPED,  # 手動で有効化
 )
 def ftp_new_file_sensor(
@@ -28,8 +26,9 @@ def ftp_new_file_sensor(
 ):
     """Poll FTP server for new STDF files and trigger pipeline runs.
 
-    Compares FTP file listing against sync_history.json to find
-    files that haven't been downloaded yet.
+    - FTP接続情報: config.yaml の ftp セクション
+    - 取得製品フィルタ: config.yaml の filters セクション
+    - 差分検知: sync_history.json と比較
     """
     config = stdf_config.load_config()
 
@@ -44,9 +43,9 @@ def ftp_new_file_sensor(
         except (json.JSONDecodeError, IOError):
             pass
 
-    # Check for new files
+    # Check for new files (applies config.yaml filters)
     try:
-        new_files = ftp.list_new_files(downloaded)
+        new_files = ftp.list_new_files(downloaded, config=config)
     except Exception as e:
         context.log.error(f"FTP connection error: {e}")
         yield SkipReason(f"FTP connection error: {e}")
@@ -58,7 +57,7 @@ def ftp_new_file_sensor(
 
     context.log.info(f"Found {len(new_files)} new STDF files on FTP")
 
-    # Use cursor to avoid duplicate runs (store last check timestamp)
+    # Use cursor to avoid duplicate runs
     yield RunRequest(
         run_key=f"ftp-{len(new_files)}-{context.cursor or '0'}",
     )

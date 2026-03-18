@@ -1,68 +1,71 @@
-"""Dagster resource wrapping stdf_platform.ftp_client."""
+"""Dagster resource wrapping stdf_platform.ftp_client.
+
+FTP connection settings are loaded from config.yaml (via STDFConfigResource)
+at runtime, not hardcoded in the resource definition.
+"""
 
 from pathlib import Path
 from typing import Optional
 
 from dagster import ConfigurableResource
 
-from stdf_platform.config import FTPConfig
+from stdf_platform.config import Config
 from stdf_platform.ftp_client import FTPClient
 
 
 class FTPResource(ConfigurableResource):
     """FTP connection resource for STDF file retrieval.
 
-    Configuration is loaded from STDFConfigResource at runtime.
-    Provides a context-managed FTP client.
+    All connection settings (host, port, username, password, base_path, patterns)
+    are loaded from config.yaml at runtime. Environment variables in config.yaml
+    (e.g. ${FTP_USER}) are automatically expanded.
     """
 
-    host: str = "localhost"
-    port: int = 21
-    username: str = ""
-    password: str = ""
-    base_path: str = "/"
-    patterns: list[str] = ["*.stdf", "*.stdf.gz", "*.std", "*.std.gz"]
+    config_path: str = "config.yaml"
+
+    def _load_ftp_config(self) -> Config:
+        """Load the full config including FTP settings."""
+        return Config.load(Path(self.config_path))
 
     def get_client(self) -> FTPClient:
-        """Create and return an FTPClient instance."""
-        config = FTPConfig(
-            host=self.host,
-            port=self.port,
-            username=self.username,
-            password=self.password,
-            base_path=self.base_path,
-            patterns=self.patterns,
-        )
-        return FTPClient(config)
+        """Create and return an FTPClient using config.yaml settings."""
+        config = self._load_ftp_config()
+        return FTPClient(config.ftp)
 
     def list_new_files(
         self,
         downloaded: set[str],
-        products: Optional[list[str]] = None,
-        test_types: Optional[list[str]] = None,
+        config: Optional[Config] = None,
     ) -> list[dict]:
         """List STDF files on FTP that haven't been downloaded yet.
 
+        Applies product/test_type filters from config.yaml.
+
         Args:
             downloaded: Set of already-downloaded remote paths.
-            products: Optional product filter.
-            test_types: Optional test type filter.
+            config: Optional pre-loaded Config (avoids double-loading).
 
         Returns:
             List of dicts with keys: remote_path, product, test_type, filename
         """
+        if config is None:
+            config = self._load_ftp_config()
+
         new_files = []
         with self.get_client() as client:
-            for remote_path, product, test_type, filename in client.list_stdf_files(
-                products=products, test_types=test_types
-            ):
-                if remote_path not in downloaded:
-                    new_files.append({
-                        "remote_path": remote_path,
-                        "product": product,
-                        "test_type": test_type,
-                        "filename": filename,
-                    })
+            for remote_path, product, test_type, filename in client.list_stdf_files():
+                # Skip already-downloaded files
+                if remote_path in downloaded:
+                    continue
+                # Apply product/test_type filters from config.yaml
+                if not config.should_fetch(product, test_type):
+                    continue
+                new_files.append({
+                    "remote_path": remote_path,
+                    "product": product,
+                    "test_type": test_type,
+                    "filename": filename,
+                })
         return new_files
 
     def download(self, remote_path: str, local_dir: Path) -> Path:
