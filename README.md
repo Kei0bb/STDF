@@ -198,7 +198,7 @@ rm -rf data-dev/
 ## アーキテクチャ
 
 ```
-FTP Server ─── (ftp_sensor) ──→ Dagster Pipeline
+FTP Server ─── (ftp_sensor / 3時間間隔) ──→ Dagster Pipeline
                                       ↓
                               ┌───────────────┐
   CLI / Web UI (Python) ──→   │  parse_stdf() │
