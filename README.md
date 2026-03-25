@@ -107,10 +107,13 @@ stdf2pq export lot E6A773.00 E6A774.00 results.csv     # Lot → CSV (JMP対応)
 ### FTP 差分同期
 
 ```bash
-stdf2pq fetch                # config.yaml に従って差分取得
-stdf2pq fetch -p SCT101A     # 製品指定
-stdf2pq fetch --force         # 強制再ダウンロード
-stdf2pq fetch --no-ingest     # ダウンロードのみ
+stdf2pq fetch                       # config.yaml に従って差分取得
+stdf2pq fetch -p SCT101A            # 製品指定
+stdf2pq fetch --force               # 強制再ダウンロード
+stdf2pq fetch --no-ingest           # ダウンロードのみ
+stdf2pq fetch --reingest            # DL済み未ingestを再試行（FTP接続なし）
+stdf2pq fetch --timeout 120         # ingest タイムアウト 120秒（デフォルト 300秒）
+stdf2pq fetch --reingest --timeout 60  # 再ingest + 短めタイムアウト
 ```
 
 ### Web UI
