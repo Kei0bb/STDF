@@ -376,6 +376,103 @@ def shell(ctx):
     subprocess.run(["duckdb", str(config.storage.database)])
 
 
+def _run_ingest_batch(
+    config,
+    sync_manager,
+    to_ingest: list[tuple],
+    cleanup: bool,
+    timeout: int,
+    verbose: bool,
+):
+    """Ingest a batch of STDF files with per-file timeout."""
+    import multiprocessing
+    from .storage import _get_test_category
+
+    storage = ParquetStorage(config.storage)
+    success = 0
+    failed = 0
+    timed_out = 0
+    ingested_files = []
+
+    for remote_path, local_path, prod, ttype in to_ingest:
+        try:
+            # Run parse_stdf in a subprocess with timeout
+            result_queue = multiprocessing.Queue()
+            proc = multiprocessing.Process(
+                target=_parse_in_process,
+                args=(local_path, result_queue),
+            )
+            proc.start()
+            proc.join(timeout=timeout)
+
+            if proc.is_alive():
+                proc.terminate()
+                proc.join(timeout=5)
+                if proc.is_alive():
+                    proc.kill()
+                console.print(f"  [yellow]⏱[/yellow] {local_path.name}: timed out ({timeout}s)")
+                timed_out += 1
+                continue
+
+            if result_queue.empty():
+                console.print(f"  [red]✗[/red] {local_path.name}: parser crashed")
+                failed += 1
+                continue
+
+            parse_result = result_queue.get_nowait()
+            if isinstance(parse_result, Exception):
+                raise parse_result
+
+            data = parse_result
+
+            sub_process = data.test_code or "UNKNOWN"
+            test_category = _get_test_category(sub_process)
+
+            storage.save_stdf_data(
+                data,
+                product=prod,
+                test_category=test_category,
+                sub_process=sub_process,
+                source_file=local_path.name,
+                compression=config.processing.compression,
+            )
+            sync_manager.mark_ingested(remote_path)
+            console.print(f"  [green]✓[/green] {local_path.name} ({prod}/{test_category}/{sub_process})")
+            success += 1
+            ingested_files.append(local_path)
+        except Exception as e:
+            console.print(f"  [red]✗[/red] {local_path.name}: {e}")
+            failed += 1
+
+    console.print(f"\n[green]✓[/green] Ingested {success} files")
+    if timed_out:
+        console.print(f"[yellow]![/yellow] {timed_out} files timed out (will retry on next fetch)")
+    if failed:
+        console.print(f"[yellow]![/yellow] {failed} files failed (will retry on next fetch)")
+
+    # Cleanup source files after successful ingest
+    if cleanup and ingested_files:
+        console.print("\n[bold]Cleaning up source files...[/bold]")
+        cleaned = 0
+        for local_path in ingested_files:
+            try:
+                if local_path.exists():
+                    local_path.unlink()
+                    cleaned += 1
+            except Exception as e:
+                if verbose:
+                    console.print(f"  [yellow]![/yellow] Could not delete {local_path.name}: {e}")
+        console.print(f"[green]✓[/green] Deleted {cleaned} source files")
+
+
+def _parse_in_process(file_path, result_queue):
+    """Parse STDF file in a separate process (for timeout support)."""
+    try:
+        data = parse_stdf(file_path)
+        result_queue.put(data)
+    except Exception as e:
+        result_queue.put(e)
+
 @main.command()
 @click.option("--product", "-p", multiple=True, help="Product filter (can specify multiple)")
 @click.option("--test-type", "-t", multiple=True, help="Test type filter (CP, FT)")
@@ -383,15 +480,18 @@ def shell(ctx):
 @click.option("--ingest/--no-ingest", default=True, help="Auto-ingest after download")
 @click.option("--cleanup/--no-cleanup", default=True, help="Delete source files after successful ingest")
 @click.option("--force", "-f", is_flag=True, help="Force re-download even if file exists")
+@click.option("--reingest", is_flag=True, help="Re-ingest downloaded files (skip FTP download)")
+@click.option("--timeout", type=int, default=300, help="Timeout per file ingest in seconds (default: 300)")
 @click.option("--verbose", "-v", is_flag=True, help="Verbose output")
 @click.pass_context
-def fetch(ctx, product: tuple, test_type: tuple, limit: int | None, ingest: bool, cleanup: bool, force: bool, verbose: bool):
+def fetch(ctx, product: tuple, test_type: tuple, limit: int | None, ingest: bool, cleanup: bool, force: bool, reingest: bool, timeout: int, verbose: bool):
     """
     Fetch STDF files from FTP server with incremental sync.
 
     Downloads only new files from FTP (skips already downloaded).
     Uses filters from config.yaml, or override with --product and --test-type.
     Use --force to re-download all files.
+    Use --reingest to re-ingest previously downloaded files without FTP.
     """
     from .ftp_client import FTPClient
 
@@ -402,6 +502,21 @@ def fetch(ctx, product: tuple, test_type: tuple, limit: int | None, ingest: bool
     sync_history_file = config.storage.download_dir / ".sync_history.json"
     sync_manager = SyncManager(sync_history_file)
 
+    # --reingest mode: skip FTP, just re-ingest pending files
+    if reingest:
+        console.print(f"\n[bold]stdf2pq - Re-ingest pending files[/bold]")
+        console.print(f"  Sync History: {sync_manager.get_downloaded_count()} files tracked")
+        console.print()
+
+        pending = sync_manager.get_pending_ingest()
+        if not pending:
+            console.print("[dim]No pending files to ingest[/dim]")
+            return
+
+        console.print(f"  Pending files: {len(pending)}")
+        _run_ingest_batch(config, sync_manager, pending, cleanup, timeout, verbose)
+        return
+
     console.print(f"\n[bold]STDF Platform - Fetch from FTP[/bold]")
     console.print(f"  Host: {config.ftp.host}")
     console.print(f"  Sync History: {sync_manager.get_downloaded_count()} files tracked")
@@ -411,7 +526,6 @@ def fetch(ctx, product: tuple, test_type: tuple, limit: int | None, ingest: bool
     cli_test_types = list(test_type) if test_type else None
     
     if cli_products or cli_test_types:
-        # CLI override
         if cli_products:
             console.print(f"  Products (CLI): {', '.join(cli_products)}")
         else:
@@ -482,99 +596,52 @@ def fetch(ctx, product: tuple, test_type: tuple, limit: int | None, ingest: bool
             from rich.progress import BarColumn
 
             downloaded = []
-            with Progress(
-                SpinnerColumn(),
-                TextColumn("[progress.description]{task.description}"),
-                BarColumn(),
-                TextColumn("{task.completed}/{task.total}"),
-            ) as progress:
-                dl_task = progress.add_task("Downloading...", total=len(files))
+            if files:
+                with Progress(
+                    SpinnerColumn(),
+                    TextColumn("[progress.description]{task.description}"),
+                    BarColumn(),
+                    TextColumn("{task.completed}/{task.total}"),
+                    console=console,
+                ) as progress:
+                    dl_task = progress.add_task("Downloading...", total=len(files))
 
-                for remote_path, prod, ttype, filename in files:
-                    # Create subdirectory structure: downloads/product/test_type/
-                    local_dir = config.storage.download_dir / prod / ttype
-                    local_file = client.download_file(remote_path, local_dir, decompress=True)
+                    for remote_path, prod, ttype, filename in files:
+                        # Create subdirectory structure: downloads/product/test_type/
+                        local_dir = config.storage.download_dir / prod / ttype
+                        local_file = client.download_file(remote_path, local_dir, decompress=True)
 
-                    # Track in sync history
-                    sync_manager.mark_downloaded(
-                        remote_path=remote_path,
-                        local_path=local_file,
-                        product=prod,
-                        test_type=ttype,
-                    )
+                        # Track in sync history
+                        sync_manager.mark_downloaded(
+                            remote_path=remote_path,
+                            local_path=local_file,
+                            product=prod,
+                            test_type=ttype,
+                        )
 
-                    downloaded.append((remote_path, local_file, prod, ttype))
-                    progress.update(dl_task, advance=1, description=f"Downloaded {filename}")
+                        downloaded.append((remote_path, local_file, prod, ttype))
+                        progress.update(dl_task, advance=1, description=f"Downloaded {filename}")
 
         console.print(f"\n[green]✓[/green] Downloaded {len(downloaded)} files")
 
         # Auto-ingest if enabled
         if ingest:
-            # Combine newly downloaded + previously failed (pending) files
             to_ingest = list(downloaded)
             pending = sync_manager.get_pending_ingest()
-            # Add pending files that aren't already in the download list
             downloaded_remotes = {r for r, _, _, _ in downloaded}
             for remote_path, local_path, prod, ttype in pending:
                 if remote_path not in downloaded_remotes and local_path.exists():
                     to_ingest.append((remote_path, local_path, prod, ttype))
 
-            if not to_ingest:
-                console.print("\n[dim]No files to ingest[/dim]")
-            else:
-                if len(to_ingest) > len(downloaded):
-                    retry_count = len(to_ingest) - len(downloaded)
+            if to_ingest:
+                retry_count = len(to_ingest) - len(downloaded)
+                if retry_count > 0:
                     console.print(f"\n[bold]Ingesting files...[/bold] ({retry_count} pending retry)")
                 else:
                     console.print("\n[bold]Ingesting files...[/bold]")
-                storage = ParquetStorage(config.storage)
-                success = 0
-                failed = 0
-                ingested_files = []
-
-                from .storage import _get_test_category
-
-                for remote_path, local_path, prod, ttype in to_ingest:
-                    try:
-                        data = parse_stdf(local_path)
-                        
-                        # Use STDF MIR.TEST_COD as sub_process
-                        sub_process = data.test_code or "UNKNOWN"
-                        test_category = _get_test_category(sub_process)
-                        
-                        storage.save_stdf_data(
-                            data, 
-                            product=prod, 
-                            test_category=test_category,
-                            sub_process=sub_process,
-                            source_file=local_path.name,
-                            compression=config.processing.compression
-                        )
-                        sync_manager.mark_ingested(remote_path)
-                        console.print(f"  [green]✓[/green] {local_path.name} ({prod}/{test_category}/{sub_process})")
-                        success += 1
-                        ingested_files.append(local_path)
-                    except Exception as e:
-                        console.print(f"  [red]✗[/red] {local_path.name}: {e}")
-                        failed += 1
-
-                console.print(f"\n[green]✓[/green] Ingested {success} files")
-                if failed:
-                    console.print(f"[yellow]![/yellow] {failed} files failed (will retry on next fetch)")
-
-                # Cleanup source files after successful ingest
-                if cleanup and ingested_files:
-                    console.print("\n[bold]Cleaning up source files...[/bold]")
-                    cleaned = 0
-                    for local_path in ingested_files:
-                        try:
-                            if local_path.exists():
-                                local_path.unlink()
-                                cleaned += 1
-                        except Exception as e:
-                            if verbose:
-                                console.print(f"  [yellow]![/yellow] Could not delete {local_path.name}: {e}")
-                    console.print(f"[green]✓[/green] Deleted {cleaned} source files")
+                _run_ingest_batch(config, sync_manager, to_ingest, cleanup, timeout, verbose)
+            else:
+                console.print("\n[dim]No files to ingest[/dim]")
 
     except Exception as e:
         console.print(f"[red]Error:[/red] {e}")
