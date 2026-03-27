@@ -384,11 +384,16 @@ def _run_ingest_batch(
     timeout: int,
     verbose: bool,
 ):
-    """Ingest a batch of STDF files with per-file timeout."""
-    import multiprocessing
-    from .storage import _get_test_category
+    """Ingest a batch of STDF files with per-file timeout.
 
-    storage = ParquetStorage(config.storage)
+    Each file is parsed and saved in an isolated subprocess via
+    stdf_platform._ingest_worker. If the subprocess hangs, it is
+    killed with SIGKILL after `timeout` seconds.
+    """
+    import json
+    import subprocess
+    import sys
+
     success = 0
     failed = 0
     timed_out = 0
@@ -396,46 +401,44 @@ def _run_ingest_batch(
 
     for remote_path, local_path, prod, ttype in to_ingest:
         try:
-            # Run parse_stdf in a subprocess with timeout
-            result_queue = multiprocessing.Queue()
-            proc = multiprocessing.Process(
-                target=_parse_in_process,
-                args=(local_path, result_queue),
+            # Run parse + save in a completely separate process
+            proc = subprocess.Popen(
+                [
+                    sys.executable, "-m", "stdf_platform._ingest_worker",
+                    str(local_path),
+                    prod,
+                    str(config.storage.data_dir),
+                    config.processing.compression,
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
             )
-            proc.start()
-            proc.join(timeout=timeout)
 
-            if proc.is_alive():
-                proc.terminate()
-                proc.join(timeout=5)
-                if proc.is_alive():
-                    proc.kill()
+            try:
+                stdout, stderr = proc.communicate(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
                 console.print(f"  [yellow]⏱[/yellow] {local_path.name}: timed out ({timeout}s)")
                 timed_out += 1
                 continue
 
-            if result_queue.empty():
-                console.print(f"  [red]✗[/red] {local_path.name}: parser crashed")
+            if proc.returncode != 0:
+                error_msg = stderr.strip() if stderr else "unknown error"
+                console.print(f"  [red]✗[/red] {local_path.name}: {error_msg}")
                 failed += 1
                 continue
 
-            parse_result = result_queue.get_nowait()
-            if isinstance(parse_result, Exception):
-                raise parse_result
+            # Parse worker output
+            try:
+                result = json.loads(stdout)
+                sub_process = result.get("sub_process", "UNKNOWN")
+                test_category = result.get("test_category", "OTHER")
+            except json.JSONDecodeError:
+                sub_process = "UNKNOWN"
+                test_category = "OTHER"
 
-            data = parse_result
-
-            sub_process = data.test_code or "UNKNOWN"
-            test_category = _get_test_category(sub_process)
-
-            storage.save_stdf_data(
-                data,
-                product=prod,
-                test_category=test_category,
-                sub_process=sub_process,
-                source_file=local_path.name,
-                compression=config.processing.compression,
-            )
             sync_manager.mark_ingested(remote_path)
             console.print(f"  [green]✓[/green] {local_path.name} ({prod}/{test_category}/{sub_process})")
             success += 1
@@ -464,14 +467,6 @@ def _run_ingest_batch(
                     console.print(f"  [yellow]![/yellow] Could not delete {local_path.name}: {e}")
         console.print(f"[green]✓[/green] Deleted {cleaned} source files")
 
-
-def _parse_in_process(file_path, result_queue):
-    """Parse STDF file in a separate process (for timeout support)."""
-    try:
-        data = parse_stdf(file_path)
-        result_queue.put(data)
-    except Exception as e:
-        result_queue.put(e)
 
 @main.command()
 @click.option("--product", "-p", multiple=True, help="Product filter (can specify multiple)")
