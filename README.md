@@ -1,7 +1,8 @@
 # stdf2pq
 
-半導体テストデータ（STDF）を Parquet + DuckDB に変換する高速ETLツール。
+半導体テストデータ（STDF）を Parquet + DuckDB + PostgreSQL に変換する高速ETLパイプライン。
 コアパーサーは **Rust (PyO3)** で実装し、Python フォールバックも内蔵。
+**Dagster** によるパイプラインオーケストレーション、**PostgreSQL** による社内共有（JMP / BI ツール接続）に対応。
 
 ## インストール
 
@@ -122,6 +123,22 @@ stdf2pq fetch --reingest --timeout 60  # 再ingest + 短めタイムアウト
 stdf2pq web  # http://localhost:8501
 ```
 
+### Dagster パイプライン
+
+```bash
+# 依存関係インストール
+uv pip install "dagster>=1.9.0" "dagster-webserver>=1.9.0" "psycopg2-binary>=2.9.0"
+
+# PostgreSQL 起動（初回のみ）
+docker compose up -d
+
+# Dagster UI 起動
+uv run dagster dev -m stdf_dagster
+# → http://localhost:3000
+```
+
+詳細: [src/stdf_dagster/README.md](src/stdf_dagster/README.md)
+
 ---
 
 ## データ構造
@@ -184,20 +201,48 @@ rm -rf data-dev/
 ## アーキテクチャ
 
 ```
-CLI / Web UI (Python)
-      ↓
-  parse_stdf()
-      ↓
-┌─────────────────┐
-│ stdf2pq_rs      │ ← Rust (PyO3), 高速
-│ (auto-fallback) │
-│ Python parser   │ ← フォールバック
-└─────────────────┘
-      ↓
-  STDFData → Parquet → DuckDB
+FTP Server ─── (ftp_sensor / 3時間間隔) ──→ Dagster Pipeline
+                                      ↓
+                              ┌───────────────┐
+  CLI / Web UI (Python) ──→   │  parse_stdf() │
+                              │  Rust (PyO3)  │ ← 高速, 自動フォールバック
+                              └───────┬───────┘
+                                      ↓
+                              STDFData → Parquet (Hive)
+                                      ↓
+                              ┌───────┴───────┐
+                              ↓               ↓
+                           DuckDB        PostgreSQL
+                          (ローカル)     (社内共有)
+                              ↓               ↓
+                           CLI分析       JMP / BI ツール
 ```
 
 詳細: [docs/rust_architecture.md](docs/rust_architecture.md)
+
+---
+
+## PostgreSQL（社内共有）
+
+複数ユーザーが JMP 等から直接 SQL クエリできます。
+
+### 起動
+
+```bash
+docker compose up -d   # PostgreSQL 起動
+```
+
+### JMP / BI ツール接続情報
+
+| 項目 | 値 |
+|------|-----|
+| Host | サーバーの IP アドレス |
+| Port | `5432` |
+| Database | `stdf` |
+| User | `stdf_reader` |
+| Password | `stdf_read_only` |
+
+> 全テーブル（lots, wafers, parts, test_data）の生データにアクセス可能です。
 
 ---
 
