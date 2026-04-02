@@ -13,8 +13,6 @@ from rich.progress import Progress, SpinnerColumn, TextColumn
 
 from . import __version__
 from .config import Config
-from .parser import parse_stdf
-from .storage import ParquetStorage
 from .database import Database
 from .sync_manager import SyncManager
 
@@ -53,8 +51,6 @@ def ingest(ctx, stdf_file: Path, product: str | None, sub_process: str | None, f
     Product is specified via -p or auto-detected with --from-path.
     Sub-process is determined from STDF MIR.TEST_COD (e.g. CP1, FT2).
     """
-    from .storage import _get_test_category
-    
     config: Config = ctx.obj["config"]
     config.ensure_directories()
 
@@ -90,60 +86,11 @@ def ingest(ctx, stdf_file: Path, product: str | None, sub_process: str | None, f
             file_to_parse = Path(temp_file.name)
             console.print("  [green]✓[/green] Decompressed")
 
-        # Parse STDF
-        with Progress(
-            SpinnerColumn(),
-            TextColumn("[progress.description]{task.description}"),
-            console=console,
-        ) as progress:
-            task = progress.add_task("Parsing STDF file...", total=None)
-            data = parse_stdf(file_to_parse)
-            progress.update(task, description="[green]✓[/green] Parsed STDF file")
-
-        # Determine sub_process: CLI option > STDF MIR.TEST_COD > UNKNOWN
-        if sub_process is None:
-            sub_process = data.test_code or "UNKNOWN"
-        test_category = _get_test_category(sub_process)
-
-        console.print(f"  Lot ID: {data.lot_id}")
-        console.print(f"  Part Type: {data.part_type}")
-        console.print(f"  Job: {data.job_name} ({data.job_rev})")
-        console.print(f"  Test Code (STDF): {data.test_code or '(empty)'}")
-        console.print(f"  Sub-Process: {sub_process}")
-        console.print(f"  Test Category: {test_category}")
-        console.print(f"  Wafers: {len(data.wafers)}")
-        console.print(f"  Parts: {len(data.parts)}")
-        console.print(f"  Tests: {len(data.tests)}")
-        console.print(f"  Test Results: {len(data.test_results)}")
-        console.print()
-
-        # Save to Parquet
-        storage = ParquetStorage(config.storage)
-        with Progress(
-            SpinnerColumn(),
-            TextColumn("[progress.description]{task.description}"),
-            console=console,
-        ) as progress:
-            prog_task = progress.add_task("Saving to Parquet...", total=None)
-            counts = storage.save_stdf_data(
-                data, 
-                product=product, 
-                test_category=test_category,
-                sub_process=sub_process,
-                source_file=stdf_file.name,
-                compression=config.processing.compression
-            )
-            progress.update(prog_task, description="[green]✓[/green] Saved to Parquet")
-
-        # Show results
-        table = Table(title="Saved Records")
-        table.add_column("Table", style="cyan")
-        table.add_column("Count", justify="right", style="green")
-
-        for table_name, count in counts.items():
-            table.add_row(table_name, f"{count:,}")
-
-        console.print(table)
+        # Using isolated subprocess for parsing and saving
+        # 4th element (ttype) is not used by the worker; it determines sub_process internally from the STDF file
+        to_ingest = [(None, file_to_parse, product, "")]
+        sync_manager = SyncManager(config.storage.data_dir / "sync_history.json")
+        _run_ingest_batch(config, sync_manager, to_ingest, cleanup=False, verbose=verbose)
         console.print(f"\n[green]✓[/green] Successfully ingested {stdf_file.name}")
 
     except Exception as e:
@@ -381,14 +328,13 @@ def _run_ingest_batch(
     sync_manager,
     to_ingest: list[tuple],
     cleanup: bool,
-    timeout: int,
     verbose: bool,
 ):
-    """Ingest a batch of STDF files with per-file timeout.
+    """Ingest a batch of STDF files using an isolated subprocess.
 
     Each file is parsed and saved in an isolated subprocess via
-    stdf_platform._ingest_worker. If the subprocess hangs, it is
-    killed with SIGKILL after `timeout` seconds.
+    stdf_platform._ingest_worker to efficiently release memory
+    and avoid crashing the main process.
     """
     import json
     import subprocess
@@ -396,7 +342,6 @@ def _run_ingest_batch(
 
     success = 0
     failed = 0
-    timed_out = 0
     ingested_files = []
 
     for remote_path, local_path, prod, ttype in to_ingest:
@@ -415,14 +360,7 @@ def _run_ingest_batch(
                 text=True,
             )
 
-            try:
-                stdout, stderr = proc.communicate(timeout=timeout)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-                proc.wait()
-                console.print(f"  [yellow]⏱[/yellow] {local_path.name}: timed out ({timeout}s)")
-                timed_out += 1
-                continue
+            stdout, stderr = proc.communicate()
 
             if proc.returncode != 0:
                 error_msg = stderr.strip() if stderr else "unknown error"
@@ -448,8 +386,6 @@ def _run_ingest_batch(
             failed += 1
 
     console.print(f"\n[green]✓[/green] Ingested {success} files")
-    if timed_out:
-        console.print(f"[yellow]![/yellow] {timed_out} files timed out (will retry on next fetch)")
     if failed:
         console.print(f"[yellow]![/yellow] {failed} files failed (will retry on next fetch)")
 
@@ -476,10 +412,9 @@ def _run_ingest_batch(
 @click.option("--cleanup/--no-cleanup", default=True, help="Delete source files after successful ingest")
 @click.option("--force", "-f", is_flag=True, help="Force re-download even if file exists")
 @click.option("--reingest", is_flag=True, help="Re-ingest downloaded files (skip FTP download)")
-@click.option("--timeout", type=int, default=300, help="Timeout per file ingest in seconds (default: 300)")
 @click.option("--verbose", "-v", is_flag=True, help="Verbose output")
 @click.pass_context
-def fetch(ctx, product: tuple, test_type: tuple, limit: int | None, ingest: bool, cleanup: bool, force: bool, reingest: bool, timeout: int, verbose: bool):
+def fetch(ctx, product: tuple, test_type: tuple, limit: int | None, ingest: bool, cleanup: bool, force: bool, reingest: bool, verbose: bool):
     """
     Fetch STDF files from FTP server with incremental sync.
 
@@ -494,7 +429,7 @@ def fetch(ctx, product: tuple, test_type: tuple, limit: int | None, ingest: bool
     config.ensure_directories()
 
     # Initialize sync manager
-    sync_history_file = config.storage.download_dir / ".sync_history.json"
+    sync_history_file = config.storage.data_dir / "sync_history.json"
     sync_manager = SyncManager(sync_history_file)
 
     # --reingest mode: skip FTP, just re-ingest pending files
@@ -509,7 +444,7 @@ def fetch(ctx, product: tuple, test_type: tuple, limit: int | None, ingest: bool
             return
 
         console.print(f"  Pending files: {len(pending)}")
-        _run_ingest_batch(config, sync_manager, pending, cleanup, timeout, verbose)
+        _run_ingest_batch(config, sync_manager, pending, cleanup, verbose)
         return
 
     console.print(f"\n[bold]STDF Platform - Fetch from FTP[/bold]")
@@ -634,7 +569,7 @@ def fetch(ctx, product: tuple, test_type: tuple, limit: int | None, ingest: bool
                     console.print(f"\n[bold]Ingesting files...[/bold] ({retry_count} pending retry)")
                 else:
                     console.print("\n[bold]Ingesting files...[/bold]")
-                _run_ingest_batch(config, sync_manager, to_ingest, cleanup, timeout, verbose)
+                _run_ingest_batch(config, sync_manager, to_ingest, cleanup, verbose)
             else:
                 console.print("\n[dim]No files to ingest[/dim]")
 

@@ -16,7 +16,7 @@ full_pipeline_job = define_asset_job(
 ingestion_job = define_asset_job(
     name="ingestion_only",
     description="FTPダウンロード → パース → Parquet保存（DuckDBビュー更新なし）",
-    selection=AssetSelection.assets("raw_stdf_files", "parsed_stdf_data", "stdf_parquet_tables"),
+    selection=AssetSelection.assets("raw_stdf_files", "stdf_parquet_tables"),
 )
 
 # Refresh views only: DuckDB views update (no new data ingestion)

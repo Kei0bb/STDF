@@ -53,6 +53,10 @@ def main():
         "ok": True,
         "sub_process": sub_process,
         "test_category": test_category,
+        "lot_id": data.lot_id,
+        "wafer_count": len(data.wafers),
+        "part_count": len(data.parts),
+        "test_count": len(data.tests),
     }, sys.stdout)
 
 

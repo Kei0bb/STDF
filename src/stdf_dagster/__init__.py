@@ -2,7 +2,7 @@
 
 from dagster import Definitions
 
-from .assets.ingestion import raw_stdf_files, parsed_stdf_data
+from .assets.ingestion import raw_stdf_files
 from .assets.tables import stdf_parquet_tables, duckdb_views
 from .assets.analytics import yield_summary, bin_distribution, test_fail_ranking
 from .assets.postgres_sync import postgres_sync
@@ -16,7 +16,6 @@ defs = Definitions(
     assets=[
         # Ingestion pipeline
         raw_stdf_files,
-        parsed_stdf_data,
         stdf_parquet_tables,
         duckdb_views,
         # Analytics

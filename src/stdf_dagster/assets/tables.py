@@ -8,10 +8,8 @@ from dagster import (
     RetryPolicy,
 )
 
-from stdf_dagster.resources.parquet import ParquetStorageResource
 from stdf_dagster.resources.duckdb_resource import DuckDBResource
 from stdf_dagster.resources.stdf_config import STDFConfigResource
-from stdf_platform.storage import _get_test_category
 from stdf_platform.sync_manager import SyncManager
 
 
@@ -23,83 +21,89 @@ from stdf_platform.sync_manager import SyncManager
 )
 def stdf_parquet_tables(
     context: AssetExecutionContext,
-    parquet_storage: ParquetStorageResource,
     stdf_config: STDFConfigResource,
-    parsed_stdf_data: list[dict],
+    raw_stdf_files: list[dict],
 ) -> MaterializeResult:
     """Save parsed STDF data to Hive-partitioned Parquet files.
 
     Writes lots, wafers, parts, and test_data tables, then marks
     each file as ingested in the sync history.
     """
-    if not parsed_stdf_data:
-        context.log.info("No parsed data to save")
+    if not raw_stdf_files:
+        context.log.info("No files to process")
         return MaterializeResult(
-            metadata={"files_saved": MetadataValue.int(0)}
+            metadata={"files_processed": MetadataValue.int(0)}
         )
 
     config = stdf_config.load_config()
     sync = SyncManager(config.storage.data_dir / "sync_history.json")
 
-    saved_count = 0
-    total_lots = 0
-    total_wafers = 0
-    total_parts = 0
-    total_tests = 0
+    import subprocess
+    import sys
+    import json
+    from pathlib import Path
 
-    for item in parsed_stdf_data:
-        data = item["data"]
-        product = item["product"]
-        test_type = item["test_type"]
-        remote_path = item["remote_path"]
-        filename = item["filename"]
+    success_count = 0
+    failed_count = 0
 
-        # Determine test_category from test_type (sub_process)
-        sub_process = data.test_code if data.test_code else test_type
-        test_category = _get_test_category(sub_process)
+    for file_info in raw_stdf_files:
+        local_path = Path(file_info["local_path"])
+        remote_path = file_info["remote_path"]
+        product = file_info["product"]
+        test_type = file_info["test_type"]
+        filename = file_info["filename"]
 
-        context.log.info(
-            f"Saving: {filename} (product={product}, "
-            f"category={test_category}, sub={sub_process})"
-        )
+        context.log.info(f"Processing: {filename}")
 
         try:
-            result = parquet_storage.save(
-                data=data,
-                product=product,
-                test_category=test_category,
-                sub_process=sub_process,
-                source_file=filename,
+            # Run parse + save in a completely separate process (no timeout)
+            proc = subprocess.Popen(
+                [
+                    sys.executable, "-m", "stdf_platform._ingest_worker",
+                    str(local_path),
+                    product,
+                    str(config.storage.data_dir),
+                    config.processing.compression,
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
             )
 
-            # Track counts
-            total_lots += 1
-            total_wafers += item.get("wafer_count", 0)
-            total_parts += item.get("part_count", 0)
-            total_tests += item.get("test_count", 0)
-            saved_count += 1
+            stdout, stderr = proc.communicate()
 
-            # Mark as ingested in sync history
+            if proc.returncode != 0:
+                error_msg = stderr.strip() if stderr else "unknown error"
+                context.log.error(f"  ✗ Failed {filename}: {error_msg}")
+                failed_count += 1
+                continue
+
+            # Parse worker output
+            try:
+                result = json.loads(stdout)
+                sub_process = result.get("sub_process", "UNKNOWN")
+                test_category = result.get("test_category", "OTHER")
+            except json.JSONDecodeError:
+                sub_process = "UNKNOWN"
+                test_category = "OTHER"
+
             sync.mark_ingested(remote_path)
-
-            context.log.info(f"  ✓ Saved {filename}")
+            context.log.info(f"  ✓ Saved {filename} ({product}/{test_category}/{sub_process})")
+            success_count += 1
 
         except Exception as e:
-            context.log.error(f"  ✗ Failed to save {filename}: {e}")
+            context.log.error(f"  ✗ Failed {filename}: {e}")
+            failed_count += 1
 
     context.log.info(
-        f"Saved {saved_count}/{len(parsed_stdf_data)} files: "
-        f"lots={total_lots}, wafers={total_wafers}, "
-        f"parts={total_parts}, tests={total_tests}"
+        f"Processed {len(raw_stdf_files)} files: "
+        f"{success_count} success, {failed_count} failed"
     )
 
     return MaterializeResult(
         metadata={
-            "files_saved": MetadataValue.int(saved_count),
-            "total_lots": MetadataValue.int(total_lots),
-            "total_wafers": MetadataValue.int(total_wafers),
-            "total_parts": MetadataValue.int(total_parts),
-            "total_tests": MetadataValue.int(total_tests),
+            "files_saved": MetadataValue.int(success_count),
+            "files_failed": MetadataValue.int(failed_count),
         }
     )
 
