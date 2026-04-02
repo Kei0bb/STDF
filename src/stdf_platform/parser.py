@@ -497,6 +497,11 @@ class STDFParser:
             while True:
                 try:
                     rec_len, rec_typ, rec_sub = self._read_header(f)
+
+                    # rec_len=0 means zero-padded or corrupt data — skip
+                    if rec_len == 0:
+                        continue
+
                     rec_key = (rec_typ, rec_sub)
                     start_pos = f.tell()
 
@@ -536,7 +541,7 @@ class STDFParser:
                 except EOFError:
                     break
                 except Exception as e:
-                    # Skip problematic record and continue
+                    logger.debug("Skipping record (typ=%s, sub=%s): %s", rec_typ, rec_sub, e)
                     continue
 
         return self.data

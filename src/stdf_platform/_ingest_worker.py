@@ -23,22 +23,36 @@ def main():
         print("Usage: _ingest_worker <file> <product> <data_dir> <compression>", file=sys.stderr)
         sys.exit(1)
 
+    import time
+
     file_path = Path(sys.argv[1])
     product = sys.argv[2]
     data_dir = Path(sys.argv[3])
     compression = sys.argv[4]
 
+    file_size_mb = file_path.stat().st_size / (1024 * 1024)
+    print(f"[worker] start: {file_path.name} ({file_size_mb:.1f} MB)", file=sys.stderr)
+
     from .parser import parse_stdf
     from .storage import ParquetStorage, _get_test_category
     from .config import StorageConfig
 
+    t0 = time.monotonic()
     data = parse_stdf(file_path)
+    t_parse = time.monotonic() - t0
+    print(
+        f"[worker] parsed: {len(data.parts)} parts, {len(data.test_results)} results "
+        f"({t_parse:.1f}s)",
+        file=sys.stderr,
+    )
 
     sub_process = data.test_code or "UNKNOWN"
     test_category = _get_test_category(sub_process)
 
     storage_config = StorageConfig(data_dir=data_dir)
     storage = ParquetStorage(storage_config)
+
+    t1 = time.monotonic()
     storage.save_stdf_data(
         data,
         product=product,
@@ -47,6 +61,8 @@ def main():
         source_file=file_path.name,
         compression=compression,
     )
+    t_save = time.monotonic() - t1
+    print(f"[worker] saved ({t_save:.1f}s)", file=sys.stderr)
 
     # Output result as JSON for parent process
     json.dump({

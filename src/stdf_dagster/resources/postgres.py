@@ -81,22 +81,23 @@ class PostgresResource(ConfigurableResource):
         if not conflict_columns:
             # Plain INSERT (no upsert) — used after delete_lot_data
             sql = f"INSERT INTO {table} ({col_names}) VALUES ({placeholders})"
-        elif update_cols:
-            conflict_cols = ", ".join(conflict_columns)
-            update_clause = ", ".join(f"{c} = EXCLUDED.{c}" for c in update_cols)
-            sql = f"""
-                INSERT INTO {table} ({col_names})
-                VALUES ({placeholders})
-                ON CONFLICT ({conflict_cols})
-                DO UPDATE SET {update_clause}
-            """
         else:
             conflict_cols = ", ".join(conflict_columns)
-            sql = f"""
-                INSERT INTO {table} ({col_names})
-                VALUES ({placeholders})
-                ON CONFLICT ({conflict_cols}) DO NOTHING
-            """
+            update_cols = [c for c in columns if c not in conflict_columns]
+            if update_cols:
+                update_clause = ", ".join(f"{c} = EXCLUDED.{c}" for c in update_cols)
+                sql = f"""
+                    INSERT INTO {table} ({col_names})
+                    VALUES ({placeholders})
+                    ON CONFLICT ({conflict_cols})
+                    DO UPDATE SET {update_clause}
+                """
+            else:
+                sql = f"""
+                    INSERT INTO {table} ({col_names})
+                    VALUES ({placeholders})
+                    ON CONFLICT ({conflict_cols}) DO NOTHING
+                """
 
         total = 0
         with self.get_connection() as conn:

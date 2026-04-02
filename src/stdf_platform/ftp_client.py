@@ -2,13 +2,12 @@
 
 import ftplib
 import gzip
+import shutil
 import fnmatch
 from pathlib import Path
 from typing import Generator
 
-from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn
-
-from .config import FTPConfig, Config
+from .config import FTPConfig
 
 
 class FTPClient:
@@ -167,7 +166,7 @@ class FTPClient:
 
             with gzip.open(local_path, "rb") as f_in:
                 with open(decompressed_path, "wb") as f_out:
-                    f_out.write(f_in.read())
+                    shutil.copyfileobj(f_in, f_out)
 
             # Remove compressed file
             local_path.unlink()
@@ -176,52 +175,3 @@ class FTPClient:
         return local_path
 
 
-def fetch_stdf_files(
-    config: Config,
-    products: list[str] | None = None,
-    test_types: list[str] | None = None,
-    limit: int | None = None,
-) -> list[tuple[Path, str, str]]:
-    """
-    Fetch STDF files from FTP server.
-
-    Args:
-        config: Full configuration
-        products: Product filter (overrides config if provided)
-        test_types: Test type filter (overrides config if provided)
-        limit: Maximum number of files to download
-
-    Returns:
-        List of tuples (local_path, product, test_type)
-    """
-    # Use CLI args if provided, else config
-    filter_products = products if products else (config.products if config.products else None)
-    filter_test_types = test_types if test_types else config.test_types
-
-    downloaded = []
-
-    with FTPClient(config.ftp) as client:
-        files = list(client.list_stdf_files(
-            products=filter_products,
-            test_types=filter_test_types,
-        ))
-
-        if limit:
-            files = files[:limit]
-
-        with Progress(
-            SpinnerColumn(),
-            TextColumn("[progress.description]{task.description}"),
-            BarColumn(),
-            TextColumn("{task.completed}/{task.total}"),
-        ) as progress:
-            task = progress.add_task("Downloading...", total=len(files))
-
-            for remote_path, product, test_type, filename in files:
-                # Create subdirectory structure: downloads/product/test_type/
-                local_dir = config.storage.download_dir / product / test_type
-                local_file = client.download_file(remote_path, local_dir, decompress=True)
-                downloaded.append((local_file, product, test_type))
-                progress.update(task, advance=1, description=f"Downloaded {filename}")
-
-    return downloaded

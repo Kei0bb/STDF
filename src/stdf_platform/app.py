@@ -34,6 +34,12 @@ def get_database():
 db = get_database()
 
 
+def _in_placeholders(values: list | tuple, offset: int = 1) -> tuple[str, list]:
+    """Build $1,$2,... placeholders and param list for IN clause."""
+    phs = ", ".join(f"${offset + i}" for i in range(len(values)))
+    return phs, list(values)
+
+
 # Get available products and test types
 @st.cache_data(ttl=60)
 def get_products():
@@ -67,15 +73,20 @@ def get_sub_processes():
 def get_lots(product_filter: tuple = (), test_category_filter: tuple = ()):
     try:
         conditions = []
+        params = []
+        idx = 1
         if product_filter:
-            prod_list = ", ".join(f"'{p}'" for p in product_filter)
-            conditions.append(f"product IN ({prod_list})")
+            phs, p = _in_placeholders(product_filter, idx)
+            conditions.append(f"product IN ({phs})")
+            params.extend(p)
+            idx += len(p)
         if test_category_filter:
-            tc_list = ", ".join(f"'{t}'" for t in test_category_filter)
-            conditions.append(f"test_category IN ({tc_list})")
-        
+            phs, p = _in_placeholders(test_category_filter, idx)
+            conditions.append(f"test_category IN ({phs})")
+            params.extend(p)
+
         where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
-        results = db.query(f"SELECT DISTINCT lot_id FROM lots {where} ORDER BY lot_id")
+        results = db.query(f"SELECT DISTINCT lot_id FROM lots {where} ORDER BY lot_id", params or None)
         return [r["lot_id"] for r in results]
     except Exception:
         return []
@@ -137,12 +148,12 @@ if not selected_lots:
 @st.cache_data(ttl=60)
 def check_has_wafers(lot_ids: tuple) -> bool:
     """Check if selected lots have wafer data (CP) or not (FT)."""
-    lot_list = ", ".join(f"'{lot}'" for lot in lot_ids)
+    phs, params = _in_placeholders(lot_ids)
     try:
         results = db.query(f"""
-            SELECT COUNT(*) as cnt FROM wafers 
-            WHERE lot_id IN ({lot_list}) AND wafer_id IS NOT NULL AND wafer_id != ''
-        """)
+            SELECT COUNT(*) as cnt FROM wafers
+            WHERE lot_id IN ({phs}) AND wafer_id IS NOT NULL AND wafer_id != ''
+        """, params)
         return results[0]["cnt"] > 0 if results else False
     except Exception:
         return False
@@ -151,13 +162,13 @@ def check_has_wafers(lot_ids: tuple) -> bool:
 # Get wafers for selected lots (only for CP)
 @st.cache_data(ttl=60)
 def get_wafers(lot_ids: tuple):
-    lot_list = ", ".join(f"'{lot}'" for lot in lot_ids)
+    phs, params = _in_placeholders(lot_ids)
     try:
         results = db.query(f"""
-            SELECT DISTINCT wafer_id FROM wafers 
-            WHERE lot_id IN ({lot_list}) AND wafer_id IS NOT NULL AND wafer_id != ''
+            SELECT DISTINCT wafer_id FROM wafers
+            WHERE lot_id IN ({phs}) AND wafer_id IS NOT NULL AND wafer_id != ''
             ORDER BY wafer_id
-        """)
+        """, params)
         return [r["wafer_id"] for r in results if r["wafer_id"]]
     except Exception:
         return []
@@ -166,20 +177,20 @@ def get_wafers(lot_ids: tuple):
 # Get tests for selected lots as DataFrame
 @st.cache_data(ttl=60)
 def get_tests_df(lot_ids: tuple):
-    lot_list = ", ".join(f"'{lot}'" for lot in lot_ids)
+    phs, params = _in_placeholders(lot_ids)
     try:
         return db.query_df(f"""
-            SELECT DISTINCT 
+            SELECT DISTINCT
                 test_num,
                 test_name,
                 rec_type,
                 units,
                 lo_limit,
                 hi_limit
-            FROM test_data 
-            WHERE lot_id IN ({lot_list}) 
+            FROM test_data
+            WHERE lot_id IN ({phs})
             ORDER BY test_num
-        """)
+        """, params)
     except Exception:
         return pd.DataFrame()
 
@@ -287,9 +298,9 @@ st.success(f"✅ {len(selected_test_nums)} parameters selected")
 st.divider()
 st.header("📈 Lot Summary")
 
-lot_list = ", ".join(f"'{lot}'" for lot in selected_lots)
+lot_phs, lot_params = _in_placeholders(selected_lots)
 summary_df = db.query_df(f"""
-    SELECT 
+    SELECT
         l.lot_id,
         l.product,
         l.test_category,
@@ -302,10 +313,10 @@ summary_df = db.query_df(f"""
         ROUND(100.0 * SUM(COALESCE(w.good_count, 0)) / NULLIF(SUM(COALESCE(w.part_count, 0)), 0), 2) as yield_pct
     FROM lots l
     LEFT JOIN wafers w ON l.lot_id = w.lot_id
-    WHERE l.lot_id IN ({lot_list})
+    WHERE l.lot_id IN ({lot_phs})
     GROUP BY l.lot_id, l.product, l.test_category, l.sub_process, l.part_type, l.job_name
     ORDER BY l.product, l.test_category, l.sub_process, l.lot_id
-""")
+""", lot_params)
 
 st.dataframe(summary_df, width="stretch", hide_index=True)
 
@@ -313,12 +324,24 @@ st.dataframe(summary_df, width="stretch", hide_index=True)
 # ============================================
 # Build WHERE clause helper
 # ============================================
-def build_where_clause(lot_list: str, wafer_list: str | None, test_list: str) -> str:
-    """Build WHERE clause for queries, handling FT (no wafer) and CP (with wafer)."""
-    conditions = [f"tr.lot_id IN ({lot_list})", f"tr.test_num IN ({test_list})"]
-    if wafer_list:
-        conditions.append(f"tr.wafer_id IN ({wafer_list})")
-    return " AND ".join(conditions)
+def build_where_clause(
+    lots: list, wafers: list | None, test_nums: list
+) -> tuple[str, list]:
+    """Build parameterized WHERE clause. Returns (clause, params)."""
+    params = []
+    idx = 1
+    lot_phs = ", ".join(f"${idx + i}" for i in range(len(lots)))
+    params.extend(lots)
+    idx += len(lots)
+    test_phs = ", ".join(f"${idx + i}" for i in range(len(test_nums)))
+    params.extend(test_nums)
+    idx += len(test_nums)
+    conditions = [f"td.lot_id IN ({lot_phs})", f"td.test_num IN ({test_phs})"]
+    if wafers:
+        wafer_phs = ", ".join(f"${idx + i}" for i in range(len(wafers)))
+        params.extend(wafers)
+        conditions.append(f"td.wafer_id IN ({wafer_phs})")
+    return " AND ".join(conditions), params
 
 
 # ============================================
@@ -326,12 +349,12 @@ def build_where_clause(lot_list: str, wafer_list: str | None, test_list: str) ->
 # ============================================
 with st.expander("👁️ Data Preview (Optional)", expanded=False):
     if selected_test_nums:
-        wafer_list = ", ".join(f"'{w}'" for w in selected_wafers) if selected_wafers else None
-        test_list = ", ".join(str(t) for t in selected_test_nums[:10])  # Limit for preview
-        where_clause = build_where_clause(lot_list, wafer_list, test_list)
-        
+        where_clause, where_params = build_where_clause(
+            selected_lots, selected_wafers, selected_test_nums[:10]
+        )
+
         preview_df = db.query_df(f"""
-            SELECT 
+            SELECT
                 td.lot_id,
                 td.wafer_id,
                 td.part_id,
@@ -347,8 +370,8 @@ with st.expander("👁️ Data Preview (Optional)", expanded=False):
             WHERE {where_clause}
             ORDER BY td.lot_id, td.wafer_id, td.part_id, td.test_num
             LIMIT 500
-        """)
-        
+        """, where_params)
+
         st.write(f"Showing {len(preview_df):,} rows (max 500, first 10 params)")
         st.dataframe(preview_df, width="stretch", hide_index=True)
     else:
@@ -381,16 +404,16 @@ with col3:
 
 if generate_btn:
     if selected_test_nums:
-        wafer_list = ", ".join(f"'{w}'" for w in selected_wafers) if selected_wafers else None
-        test_list = ", ".join(str(t) for t in selected_test_nums)
-        where_clause = build_where_clause(lot_list, wafer_list, test_list)
-        
+        where_clause, where_params = build_where_clause(
+            selected_lots, selected_wafers, selected_test_nums
+        )
+
         with st.spinner("Generating export..."):
             if "Pivot" in export_format:
                 # Pivot format
                 export_df = db.query_df(f"""
                     PIVOT (
-                        SELECT 
+                        SELECT
                             td.lot_id,
                             td.wafer_id,
                             td.part_id,
@@ -409,11 +432,11 @@ if generate_btn:
                     USING first(result)
                     GROUP BY lot_id, wafer_id, part_id, x_coord, y_coord, hard_bin, soft_bin, part_passed
                     ORDER BY lot_id, wafer_id, part_id
-                """)
+                """, where_params)
             else:
                 # Long format
                 export_df = db.query_df(f"""
-                    SELECT 
+                    SELECT
                         td.lot_id,
                         td.wafer_id,
                         td.part_id,
@@ -432,7 +455,7 @@ if generate_btn:
                     JOIN parts p ON td.part_id = p.part_id AND td.lot_id = p.lot_id
                     WHERE {where_clause}
                     ORDER BY td.lot_id, td.wafer_id, td.part_id, td.test_num
-                """)
+                """, where_params)
             
             if not export_df.empty:
                 st.success(f"✅ Generated {len(export_df):,} rows")
@@ -458,4 +481,5 @@ if generate_btn:
 
 # Footer
 st.divider()
-st.caption("stdf2pq DB v0.3.0 | Product → Lot → Wafer (CP only) → Parameters → Export")
+from stdf_platform import __version__
+st.caption(f"stdf2pq DB v{__version__} | Product → Lot → Wafer (CP only) → Parameters → Export")

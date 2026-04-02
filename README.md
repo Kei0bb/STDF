@@ -69,14 +69,20 @@ uv run python -c "from stdf_platform.parser import _USE_RUST; print(f'Rust parse
 ### STDF ファイルの取り込み
 
 ```bash
-# 基本（パスから product/test_type 自動推定）
-stdf2pq ingest ./downloads/SCT101A/CP/lot001.stdf
+# パスから product 自動推定（.../SCT101A/CP/... の構造を検出）
+stdf2pq ingest ./downloads/SCT101A/CP/lot001.stdf --from-path
 
-# 明示的に指定
-stdf2pq ingest sample.stdf --product SCT101A --test-type CP
+# product を明示的に指定（sub_process は STDF MIR.TEST_COD から自動取得）
+stdf2pq ingest sample.stdf --product SCT101A
+
+# sub_process も明示指定
+stdf2pq ingest sample.stdf --product SCT101A --sub-process CP11
 
 # dev環境に取り込み（本番DBと分離）
-stdf2pq --env dev ingest test.stdf --product SCT101A --test-type CP
+stdf2pq --env dev ingest test.stdf --product SCT101A
+
+# 詳細ログ付き（ハング調査時に有用）
+stdf2pq ingest sample.stdf --product SCT101A --verbose
 ```
 
 ### DB 操作
@@ -113,6 +119,7 @@ stdf2pq fetch -p SCT101A            # 製品指定
 stdf2pq fetch --force               # 強制再ダウンロード
 stdf2pq fetch --no-ingest           # ダウンロードのみ
 stdf2pq fetch --reingest            # DL済み未ingestを再試行（FTP接続なし）
+stdf2pq fetch --verbose             # 各ファイルのparse/save時間を表示
 ```
 
 ### Web UI

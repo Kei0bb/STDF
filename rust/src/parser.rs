@@ -472,6 +472,11 @@ fn parse_stream<R: Read>(reader: &mut R) -> io::Result<StdfData> {
         let rec_typ = header_buf[2];
         let rec_sub = header_buf[3];
 
+        // rec_len=0 means zero-padded or corrupt data — skip
+        if rec_len == 0 {
+            continue;
+        }
+
         // Read record data
         let mut rec_data = vec![0u8; rec_len as usize];
         if reader.read_exact(&mut rec_data).is_err() {

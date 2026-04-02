@@ -329,6 +329,7 @@ def _run_ingest_batch(
     to_ingest: list[tuple],
     cleanup: bool,
     verbose: bool,
+    timeout: int = 300,
 ):
     """Ingest a batch of STDF files using an isolated subprocess.
 
@@ -360,7 +361,18 @@ def _run_ingest_batch(
                 text=True,
             )
 
-            stdout, stderr = proc.communicate()
+            try:
+                stdout, stderr = proc.communicate(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.communicate()
+                console.print(f"  [red]✗[/red] {local_path.name}: timed out after {timeout}s")
+                failed += 1
+                continue
+
+            if verbose and stderr:
+                for line in stderr.strip().splitlines():
+                    console.print(f"    [dim]{line}[/dim]")
 
             if proc.returncode != 0:
                 error_msg = stderr.strip() if stderr else "unknown error"
@@ -653,14 +665,15 @@ def export_lot(ctx, lot_ids: tuple, output: Path, pivot: bool):
     console.print(f"  Pivot: {'Yes' if pivot else 'No'}")
     console.print()
 
-    lot_list = ", ".join(f"'{lot}'" for lot in lot_ids)
+    placeholders = ", ".join(f"${i+1}" for i in range(len(lot_ids)))
+    params = list(lot_ids)
 
     try:
         with Database(config.storage) as db_conn:
             if pivot:
                 sql = f"""
                 PIVOT (
-                    SELECT 
+                    SELECT
                         tr.lot_id,
                         tr.wafer_id,
                         tr.part_id,
@@ -674,7 +687,7 @@ def export_lot(ctx, lot_ids: tuple, output: Path, pivot: bool):
                     FROM test_results tr
                     JOIN parts p ON tr.part_id = p.part_id
                     JOIN tests t ON tr.test_num = t.test_num AND tr.lot_id = t.lot_id
-                    WHERE tr.lot_id IN ({lot_list})
+                    WHERE tr.lot_id IN ({placeholders})
                 )
                 ON test_name
                 USING first(result)
@@ -683,7 +696,7 @@ def export_lot(ctx, lot_ids: tuple, output: Path, pivot: bool):
                 """
             else:
                 sql = f"""
-                SELECT 
+                SELECT
                     tr.lot_id,
                     tr.wafer_id,
                     tr.part_id,
@@ -701,11 +714,11 @@ def export_lot(ctx, lot_ids: tuple, output: Path, pivot: bool):
                 FROM test_results tr
                 JOIN parts p ON tr.part_id = p.part_id
                 JOIN tests t ON tr.test_num = t.test_num AND tr.lot_id = t.lot_id
-                WHERE tr.lot_id IN ({lot_list})
+                WHERE tr.lot_id IN ({placeholders})
                 ORDER BY tr.lot_id, tr.wafer_id, tr.part_id, t.test_num
                 """
 
-            df = db_conn.query_df(sql)
+            df = db_conn.query_df(sql, params)
 
             if df.empty:
                 console.print("[yellow]No results to export[/yellow]")
