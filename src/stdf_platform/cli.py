@@ -340,62 +340,90 @@ def _run_ingest_batch(
     import json
     import subprocess
     import sys
+    import threading
+    import time
+    from pathlib import Path
+
+    log_path = Path(config.storage.data_dir) / "ingest_worker.log"
+
+    def _stream_stderr(proc, log_file):
+        """Read stderr line by line and write to log file in real time."""
+        for line in proc.stderr:
+            log_file.write(line)
+            log_file.flush()
 
     success = 0
     failed = 0
     ingested_files = []
 
-    for remote_path, local_path, prod, ttype in to_ingest:
-        try:
-            # Run parse + save in a completely separate process
-            proc = subprocess.Popen(
-                [
-                    sys.executable, "-m", "stdf_platform._ingest_worker",
-                    str(local_path),
-                    prod,
-                    str(config.storage.data_dir),
-                    config.processing.compression,
-                ],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-            )
+    with open(log_path, "a", encoding="utf-8") as log_file:
+        console.print(f"  [dim]Worker log: {log_path}[/dim]")
 
+        for remote_path, local_path, prod, ttype in to_ingest:
             try:
-                stdout, stderr = proc.communicate(timeout=timeout)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-                proc.communicate()
-                console.print(f"  [red]✗[/red] {local_path.name}: timed out after {timeout}s")
+                log_file.write(f"\n=== {local_path.name} [{time.strftime('%Y-%m-%d %H:%M:%S')}] ===\n")
+                log_file.flush()
+
+                # Run parse + save in a completely separate process
+                proc = subprocess.Popen(
+                    [
+                        sys.executable, "-m", "stdf_platform._ingest_worker",
+                        str(local_path),
+                        prod,
+                        str(config.storage.data_dir),
+                        config.processing.compression,
+                    ],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                )
+
+                # Stream stderr to log file in real time (so it's visible even on hang)
+                stderr_thread = threading.Thread(target=_stream_stderr, args=(proc, log_file), daemon=True)
+                stderr_thread.start()
+
+                try:
+                    stdout = proc.stdout.read()
+                    proc.wait(timeout=timeout)
+                    stderr_thread.join(timeout=5)
+                    stderr = ""  # already written to log
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.communicate()
+                    stderr_thread.join(timeout=5)
+                    log_file.write(f"[TIMEOUT] {local_path.name} timed out after {timeout}s\n")
+                    log_file.flush()
+                    console.print(f"  [red]✗[/red] {local_path.name}: timed out after {timeout}s (see {log_path})")
+                    failed += 1
+                    continue
+
+                if verbose:
+                    # Re-read the last lines from the log for this file
+                    console.print(f"    [dim]  → see {log_path} for worker output[/dim]")
+
+                if proc.returncode != 0:
+                    log_file.write(f"[FAILED] returncode={proc.returncode}\n")
+                    log_file.flush()
+                    console.print(f"  [red]✗[/red] {local_path.name}: failed (returncode={proc.returncode}, see {log_path})")
+                    failed += 1
+                    continue
+
+                # Parse worker output
+                try:
+                    result = json.loads(stdout)
+                    sub_process = result.get("sub_process", "UNKNOWN")
+                    test_category = result.get("test_category", "OTHER")
+                except json.JSONDecodeError:
+                    sub_process = "UNKNOWN"
+                    test_category = "OTHER"
+
+                sync_manager.mark_ingested(remote_path)
+                console.print(f"  [green]✓[/green] {local_path.name} ({prod}/{test_category}/{sub_process})")
+                success += 1
+                ingested_files.append(local_path)
+            except Exception as e:
+                console.print(f"  [red]✗[/red] {local_path.name}: {e}")
                 failed += 1
-                continue
-
-            if verbose and stderr:
-                for line in stderr.strip().splitlines():
-                    console.print(f"    [dim]{line}[/dim]")
-
-            if proc.returncode != 0:
-                error_msg = stderr.strip() if stderr else "unknown error"
-                console.print(f"  [red]✗[/red] {local_path.name}: {error_msg}")
-                failed += 1
-                continue
-
-            # Parse worker output
-            try:
-                result = json.loads(stdout)
-                sub_process = result.get("sub_process", "UNKNOWN")
-                test_category = result.get("test_category", "OTHER")
-            except json.JSONDecodeError:
-                sub_process = "UNKNOWN"
-                test_category = "OTHER"
-
-            sync_manager.mark_ingested(remote_path)
-            console.print(f"  [green]✓[/green] {local_path.name} ({prod}/{test_category}/{sub_process})")
-            success += 1
-            ingested_files.append(local_path)
-        except Exception as e:
-            console.print(f"  [red]✗[/red] {local_path.name}: {e}")
-            failed += 1
 
     console.print(f"\n[green]✓[/green] Ingested {success} files")
     if failed:
