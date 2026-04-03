@@ -369,27 +369,34 @@ def _run_ingest_batch(
         try:
             stderr_lines.clear()
 
+            cmd = [
+                sys.executable, "-m", "stdf_platform._ingest_worker",
+                str(local_path),
+                prod,
+                str(config.storage.data_dir),
+                config.processing.compression,
+            ]
+            console.print(f"  [dim]cmd: {' '.join(cmd)}[/dim]")
+
             # Run parse + save in a completely separate process
-            proc = subprocess.Popen(
-                [
-                    sys.executable, "-m", "stdf_platform._ingest_worker",
-                    str(local_path),
-                    prod,
-                    str(config.storage.data_dir),
-                    config.processing.compression,
-                ],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-            )
+            try:
+                proc = subprocess.Popen(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                )
+            except Exception as popen_err:
+                console.print(f"  [red]✗[/red] {local_path.name}: Popen failed: {popen_err}")
+                failed += 1
+                continue
 
             # Stream stderr in real time (visible in log even on hang)
             stderr_thread = threading.Thread(target=_collect_stderr, args=(proc,), daemon=True)
             stderr_thread.start()
 
             try:
-                stdout = proc.stdout.read()
-                proc.wait(timeout=timeout)
+                stdout, _ = proc.communicate(timeout=timeout)
                 stderr_thread.join(timeout=5)
             except subprocess.TimeoutExpired:
                 proc.kill()
@@ -401,12 +408,14 @@ def _run_ingest_batch(
                 failed += 1
                 continue
 
+            console.print(f"  [dim]returncode={proc.returncode}, stderr_lines={len(stderr_lines)}, stdout_len={len(stdout)}[/dim]")
+
             if proc.returncode != 0:
-                error_msg = stderr_lines[-1] if stderr_lines else "unknown error"
-                console.print(f"  [red]✗[/red] {local_path.name}: {error_msg}")
-                if verbose and len(stderr_lines) > 1:
-                    for line in stderr_lines[:-1]:
-                        console.print(f"    [dim]{line}[/dim]")
+                if stderr_lines:
+                    for line in stderr_lines:
+                        console.print(f"    [red]{line}[/red]")
+                else:
+                    console.print(f"  [red]✗[/red] {local_path.name}: worker exited with code {proc.returncode}, no stderr output")
                 failed += 1
                 continue
 
