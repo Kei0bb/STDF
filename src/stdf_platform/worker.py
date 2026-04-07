@@ -8,7 +8,6 @@ for memory safety while gaining true parallelism across files.
 import json
 import sys
 import subprocess
-import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
@@ -45,7 +44,12 @@ def _run_single(
     timeout: int,
     log_path: Optional[Path],
 ) -> IngestResult:
-    """Run one ingest worker subprocess. Called from a thread pool worker."""
+    """Run one ingest worker subprocess. Called from a thread pool worker.
+
+    stderr is captured via communicate() to avoid a race condition where a
+    separate reader thread and communicate() both try to close the same pipe
+    (causes ValueError on Windows/CPython 3.14).
+    """
     cmd = [
         sys.executable, "-m", "stdf_platform._ingest_worker",
         str(local_path),
@@ -54,27 +58,11 @@ def _run_single(
         compression,
     ]
 
-    stderr_lines: list[str] = []
-
-    def _collect_stderr(proc):
-        try:
-            log_file = open(log_path, "a", encoding="utf-8") if log_path else None
-        except OSError:
-            log_file = None
-        for line in proc.stderr:
-            stderr_lines.append(line.rstrip())
-            if log_file:
-                log_file.write(line)
-                log_file.flush()
-        if log_file:
-            log_file.close()
-
     try:
         proc = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            text=True,
             encoding="utf-8",  # explicit UTF-8 for WSL2 / Windows compatibility
         )
     except Exception as e:
@@ -83,23 +71,27 @@ def _run_single(
             success=False, error=f"Popen failed: {e}",
         )
 
-    stderr_thread = threading.Thread(target=_collect_stderr, args=(proc,), daemon=True)
-    stderr_thread.start()
-
     try:
-        stdout, _ = proc.communicate(timeout=timeout)
-        stderr_thread.join(timeout=5)
+        stdout, stderr = proc.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:
         proc.kill()
-        proc.communicate()
-        stderr_thread.join(timeout=5)
-        last = stderr_lines[-1] if stderr_lines else "no output"
+        _, stderr = proc.communicate()
+        last_line = (stderr or "").strip().splitlines()[-1] if stderr else "no output"
         return IngestResult(
             local_path=local_path, remote_path=None,
-            success=False, error=f"timed out after {timeout}s (last: {last})",
+            success=False, error=f"timed out after {timeout}s (last: {last_line})",
         )
 
+    # Append stderr to log file after process exits (avoids pipe race condition)
+    if log_path and stderr:
+        try:
+            with open(log_path, "a", encoding="utf-8") as f:
+                f.write(stderr)
+        except OSError:
+            pass
+
     if proc.returncode != 0:
+        stderr_lines = (stderr or "").strip().splitlines()
         error_msg = stderr_lines[-1] if stderr_lines else f"exit code {proc.returncode}"
         return IngestResult(
             local_path=local_path, remote_path=None,
