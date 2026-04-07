@@ -10,9 +10,9 @@ dependencies = [
     "click>=8.1.0",
     "rich>=13.0.0",
     "pyyaml>=6.0",
-    "streamlit>=1.30.0",
+    "fastapi>=0.111.0",
+    "uvicorn[standard]>=0.29.0",
     "pandas>=2.0.0",
-    "streamlit-aggrid>=1.2.1.post2",
 ]
 
 [project.optional-dependencies]
@@ -32,3 +32,8 @@ packages = ["src/stdf_platform"]
 
 [tool.hatch.build.targets.sdist]
 include = ["src/stdf_platform"]
+
+[dependency-groups]
+dev = [
+    "httpx>=0.28.1",
+]

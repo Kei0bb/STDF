@@ -1,0 +1,414 @@
+<!DOCTYPE html>
+<html lang="ja" class="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>stdf2pq</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: { extend: {} }
+    }
+  </script>
+  <!-- AG Grid Community -->
+  <script src="https://cdn.jsdelivr.net/npm/ag-grid-community@28.2.1/dist/ag-grid-community.min.js"></script>
+  <!-- Plotly -->
+  <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
+  <!-- Alpine.js -->
+  <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+
+  <style>
+    [x-cloak] { display: none !important; }
+    body { background: #0f172a; color: #e2e8f0; font-family: system-ui, sans-serif; }
+    .sidebar { background: #1e293b; border-right: 1px solid #334155; }
+    .card { background: #1e293b; border: 1px solid #334155; border-radius: 8px; }
+    .tab-active { background: #6366f1; color: #fff; }
+    .tab-inactive { color: #94a3b8; }
+    .tab-inactive:hover { background: #334155; color: #e2e8f0; }
+    .btn-primary { background: #6366f1; color: #fff; border-radius: 6px; padding: 8px 20px; font-weight: 600; transition: background .15s; }
+    .btn-primary:hover { background: #4f46e5; }
+    .btn-primary:disabled { background: #475569; cursor: not-allowed; }
+    .btn-secondary { background: #334155; color: #e2e8f0; border-radius: 6px; padding: 6px 14px; }
+    .btn-secondary:hover { background: #475569; }
+    .input { background: #0f172a; border: 1px solid #475569; border-radius: 6px; padding: 6px 10px; color: #e2e8f0; width: 100%; }
+    .input:focus { outline: none; border-color: #6366f1; }
+    .select { background: #0f172a; border: 1px solid #475569; border-radius: 6px; padding: 6px 10px; color: #e2e8f0; width: 100%; }
+    .lot-item { padding: 5px 8px; border-radius: 4px; cursor: pointer; display: flex; align-items: center; gap: 8px; }
+    .lot-item:hover { background: #334155; }
+    .lot-item.selected { background: #312e81; }
+    .metric-card { background: #334155; border-radius: 8px; padding: 14px 18px; }
+    /* AG Grid dark theme overrides */
+    .ag-theme-alpine-dark { --ag-background-color: #1e293b; --ag-header-background-color: #0f172a; --ag-odd-row-background-color: #1e293b; --ag-row-hover-color: #334155; --ag-border-color: #475569; --ag-foreground-color: #e2e8f0; --ag-header-foreground-color: #94a3b8; --ag-selected-row-background-color: #312e81; }
+    .ag-theme-alpine-dark .ag-root-wrapper { border: 1px solid #475569; border-radius: 6px; }
+    /* Scrollbar */
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-track { background: #0f172a; }
+    ::-webkit-scrollbar-thumb { background: #475569; border-radius: 3px; }
+  </style>
+</head>
+<body x-data="app()" x-init="init()" x-cloak class="h-screen flex flex-col overflow-hidden">
+
+  <!-- Header -->
+  <header class="flex items-center justify-between px-5 py-3 border-b border-slate-700 shrink-0" style="background:#1e293b">
+    <div class="flex items-center gap-3">
+      <span class="text-indigo-400 text-xl font-bold tracking-tight">stdf2pq</span>
+      <span class="text-slate-500 text-sm">Semiconductor Test Data Explorer</span>
+    </div>
+    <div class="flex items-center gap-3">
+      <span x-show="loading" class="text-xs text-slate-400 animate-pulse">Loading…</span>
+      <a href="/api/docs" target="_blank" class="text-xs text-slate-500 hover:text-indigo-400">API docs</a>
+    </div>
+  </header>
+
+  <div class="flex flex-1 overflow-hidden">
+
+    <!-- Sidebar -->
+    <aside class="sidebar w-64 shrink-0 flex flex-col overflow-hidden">
+      <div class="flex-1 overflow-y-auto p-3 space-y-4">
+
+        <!-- Product filter -->
+        <div>
+          <div class="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-1">Product</div>
+          <select multiple class="select h-24 text-sm" @change="onProductChange($event)">
+            <template x-for="p in products" :key="p">
+              <option :value="p" :selected="selProducts.includes(p)" x-text="p"></option>
+            </template>
+          </select>
+          <div class="text-xs text-slate-500 mt-1">Ctrl+click for multi-select</div>
+        </div>
+
+        <!-- Test category filter -->
+        <div>
+          <div class="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-1">Category</div>
+          <div class="flex gap-2 flex-wrap">
+            <template x-for="cat in testCategories" :key="cat">
+              <button
+                class="text-xs px-3 py-1 rounded-full border transition-colors"
+                :class="selCategories.includes(cat)
+                  ? 'bg-indigo-600 border-indigo-500 text-white'
+                  : 'border-slate-600 text-slate-400 hover:border-indigo-500'"
+                @click="toggleCategory(cat)">
+                <span x-text="cat"></span>
+              </button>
+            </template>
+          </div>
+        </div>
+
+        <!-- Lot list -->
+        <div>
+          <div class="flex items-center justify-between mb-1">
+            <div class="text-xs font-semibold text-slate-400 uppercase tracking-wider">Lots</div>
+            <div class="flex gap-1">
+              <button class="text-xs text-indigo-400 hover:text-indigo-300" @click="selectAllLots()">All</button>
+              <span class="text-slate-600">·</span>
+              <button class="text-xs text-slate-500 hover:text-slate-300" @click="clearLots()">None</button>
+            </div>
+          </div>
+          <div x-show="lots.length === 0" class="text-xs text-slate-500 italic py-2">No lots found</div>
+          <div class="space-y-0.5 max-h-48 overflow-y-auto">
+            <template x-for="lot in lots" :key="lot">
+              <div class="lot-item text-sm" :class="selLots.has(lot) ? 'selected' : ''" @click="toggleLot(lot)">
+                <div class="w-3.5 h-3.5 rounded border flex-shrink-0 flex items-center justify-center transition-colors"
+                     :class="selLots.has(lot) ? 'bg-indigo-500 border-indigo-400' : 'border-slate-500'">
+                  <svg x-show="selLots.has(lot)" class="w-2.5 h-2.5 text-white" fill="currentColor" viewBox="0 0 12 12">
+                    <path d="M10 3L5 8.5 2 5.5" stroke="white" stroke-width="1.5" fill="none" stroke-linecap="round"/>
+                  </svg>
+                </div>
+                <span x-text="lot"></span>
+              </div>
+            </template>
+          </div>
+        </div>
+
+        <!-- Wafer list (CP only) -->
+        <div x-show="hasWafers && wafers.length > 0">
+          <div class="flex items-center justify-between mb-1">
+            <div class="text-xs font-semibold text-slate-400 uppercase tracking-wider">Wafers</div>
+            <div class="flex gap-1">
+              <button class="text-xs text-indigo-400 hover:text-indigo-300" @click="selectAllWafers()">All</button>
+              <span class="text-slate-600">·</span>
+              <button class="text-xs text-slate-500 hover:text-slate-300" @click="clearWafers()">None</button>
+            </div>
+          </div>
+          <div class="flex flex-wrap gap-1 max-h-32 overflow-y-auto">
+            <template x-for="w in wafers" :key="w">
+              <button
+                class="text-xs px-2 py-0.5 rounded border transition-colors"
+                :class="selWafers.has(w) ? 'bg-indigo-700 border-indigo-500 text-white' : 'border-slate-600 text-slate-400 hover:border-slate-400'"
+                @click="toggleWafer(w)" x-text="w">
+              </button>
+            </template>
+          </div>
+        </div>
+
+      </div>
+
+      <!-- Apply button -->
+      <div class="p-3 border-t border-slate-700">
+        <button class="btn-primary w-full text-sm" @click="applyFilters()" :disabled="selLots.size === 0">
+          <span x-text="selLots.size === 0 ? 'Select lots above' : `Apply (${selLots.size} lots)`"></span>
+        </button>
+      </div>
+    </aside>
+
+    <!-- Main content -->
+    <main class="flex-1 flex flex-col overflow-hidden">
+
+      <!-- Tab bar -->
+      <div class="flex items-center gap-1 px-4 py-2 border-b border-slate-700 shrink-0" style="background:#1e293b">
+        <template x-for="t in tabs" :key="t.id">
+          <button
+            class="px-4 py-1.5 text-sm rounded-md font-medium transition-colors"
+            :class="activeTab === t.id ? 'tab-active' : 'tab-inactive'"
+            @click="setTab(t.id)">
+            <span x-text="t.label"></span>
+          </button>
+        </template>
+      </div>
+
+      <!-- Tab content -->
+      <div class="flex-1 overflow-y-auto p-4">
+
+        <!-- No data message -->
+        <div x-show="!applied" class="flex flex-col items-center justify-center h-full text-center">
+          <div class="text-5xl mb-4">📊</div>
+          <div class="text-xl font-semibold text-slate-300 mb-2">No data selected</div>
+          <div class="text-slate-500 text-sm">Select lots in the sidebar and click Apply</div>
+          <div x-show="lots.length === 0" class="mt-4 text-xs text-slate-600">
+            No ingested data found. Run: <code class="bg-slate-800 px-2 py-0.5 rounded">stdf2pq ingest-all ./data -p PRODUCT</code>
+          </div>
+        </div>
+
+        <!-- Dashboard tab -->
+        <div x-show="applied && activeTab === 'dashboard'" class="space-y-4">
+
+          <!-- Metrics row -->
+          <div class="grid grid-cols-4 gap-3">
+            <div class="metric-card">
+              <div class="text-xs text-slate-400 mb-1">Lots</div>
+              <div class="text-2xl font-bold text-indigo-400" x-text="summaryRows.length"></div>
+            </div>
+            <div class="metric-card">
+              <div class="text-xs text-slate-400 mb-1">Total Parts</div>
+              <div class="text-2xl font-bold" x-text="totalParts.toLocaleString()"></div>
+            </div>
+            <div class="metric-card">
+              <div class="text-xs text-slate-400 mb-1">Good Parts</div>
+              <div class="text-2xl font-bold text-green-400" x-text="totalGood.toLocaleString()"></div>
+            </div>
+            <div class="metric-card">
+              <div class="text-xs text-slate-400 mb-1">Avg Yield</div>
+              <div class="text-2xl font-bold"
+                   :class="avgYield >= 90 ? 'text-green-400' : avgYield >= 80 ? 'text-yellow-400' : 'text-red-400'"
+                   x-text="avgYield.toFixed(1) + '%'"></div>
+            </div>
+          </div>
+
+          <!-- Yield chart -->
+          <div class="card p-4">
+            <div class="text-sm font-semibold text-slate-300 mb-3">Yield by Lot</div>
+            <div id="chart-yield-lot" style="height:280px"></div>
+          </div>
+
+          <!-- Summary table -->
+          <div class="card p-4">
+            <div class="text-sm font-semibold text-slate-300 mb-3">Lot Summary</div>
+            <div class="overflow-x-auto">
+              <table class="w-full text-sm">
+                <thead>
+                  <tr class="text-left text-slate-400 border-b border-slate-700">
+                    <th class="pb-2 pr-4">Lot ID</th>
+                    <th class="pb-2 pr-4">Product</th>
+                    <th class="pb-2 pr-4">Category</th>
+                    <th class="pb-2 pr-4">Sub-Process</th>
+                    <th class="pb-2 pr-4 text-right">Wafers</th>
+                    <th class="pb-2 pr-4 text-right">Parts</th>
+                    <th class="pb-2 text-right">Yield</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <template x-for="r in summaryRows" :key="r.lot_id">
+                    <tr class="border-b border-slate-800 hover:bg-slate-800/50">
+                      <td class="py-1.5 pr-4 font-mono text-indigo-300" x-text="r.lot_id"></td>
+                      <td class="py-1.5 pr-4 text-slate-300" x-text="r.product"></td>
+                      <td class="py-1.5 pr-4 text-slate-400" x-text="r.test_category"></td>
+                      <td class="py-1.5 pr-4 text-slate-400" x-text="r.sub_process"></td>
+                      <td class="py-1.5 pr-4 text-right" x-text="r.wafer_count"></td>
+                      <td class="py-1.5 pr-4 text-right" x-text="(r.total_parts||0).toLocaleString()"></td>
+                      <td class="py-1.5 text-right font-semibold"
+                          :class="(r.yield_pct||0)>=90?'text-green-400':(r.yield_pct||0)>=80?'text-yellow-400':'text-red-400'"
+                          x-text="(r.yield_pct||0).toFixed(1)+'%'"></td>
+                    </tr>
+                  </template>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+
+        <!-- Wafer tab -->
+        <div x-show="applied && activeTab === 'wafer'" class="space-y-4">
+          <div x-show="!hasWafers" class="text-slate-400 text-sm py-8 text-center">FT data — no wafer-level data available.</div>
+          <div x-show="hasWafers" class="space-y-4">
+
+            <!-- Wafer selector + yield chart -->
+            <div class="grid grid-cols-2 gap-4">
+              <div class="card p-4">
+                <div class="text-sm font-semibold text-slate-300 mb-3">Wafer Yield</div>
+                <div class="flex items-center gap-3 mb-3">
+                  <select class="select text-sm flex-1" x-model="selectedLotForWafer" @change="loadWaferYield()">
+                    <template x-for="lot in [...selLots]" :key="lot">
+                      <option :value="lot" x-text="lot"></option>
+                    </template>
+                  </select>
+                </div>
+                <div id="chart-wafer-yield" style="height:240px"></div>
+              </div>
+              <div class="card p-4">
+                <div class="text-sm font-semibold text-slate-300 mb-3">Wafer Map</div>
+                <div class="flex items-center gap-3 mb-3">
+                  <select class="select text-sm flex-1" x-model="selectedWaferForMap" @change="loadWaferMap()">
+                    <template x-for="w in wafers" :key="w">
+                      <option :value="w" x-text="w"></option>
+                    </template>
+                  </select>
+                  <select class="select text-sm w-32" x-model="wafermapColor" @change="loadWaferMap()">
+                    <option value="passed">Pass/Fail</option>
+                    <option value="soft_bin">Soft Bin</option>
+                    <option value="hard_bin">Hard Bin</option>
+                  </select>
+                </div>
+                <div id="chart-wafermap" style="height:240px"></div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Tests tab -->
+        <div x-show="applied && activeTab === 'tests'" class="space-y-4">
+
+          <!-- Parameter grid -->
+          <div class="card p-4">
+            <div class="flex items-center justify-between mb-3">
+              <div class="text-sm font-semibold text-slate-300">
+                Parameters
+                <span class="text-slate-500 font-normal ml-2" x-text="`(${selTestNums.size} selected of ${tests.length})`"></span>
+              </div>
+              <div class="flex gap-2">
+                <button class="btn-secondary text-xs" @click="selectAllTests()">Select All</button>
+                <button class="btn-secondary text-xs" @click="clearTests()">Clear</button>
+              </div>
+            </div>
+            <input class="input text-sm mb-2" placeholder="Search parameters…" x-model="testSearch" @input="filterTestGrid()" />
+            <div id="test-grid" class="ag-theme-alpine-dark w-full" style="height:280px"></div>
+          </div>
+
+          <!-- Distribution + Pareto -->
+          <div class="grid grid-cols-2 gap-4" x-show="selTestNums.size > 0">
+            <div class="card p-4">
+              <div class="flex items-center gap-3 mb-3">
+                <div class="text-sm font-semibold text-slate-300">Distribution</div>
+                <select class="select text-sm flex-1" x-model="selectedTestForDist" @change="loadDistribution()">
+                  <template x-for="t in [...selTestNums]" :key="t">
+                    <option :value="t" x-text="getTestName(t)"></option>
+                  </template>
+                </select>
+              </div>
+              <div id="chart-distribution" style="height:240px"></div>
+            </div>
+            <div class="card p-4">
+              <div class="text-sm font-semibold text-slate-300 mb-3">Fail Pareto</div>
+              <div id="chart-pareto" style="height:240px"></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Export tab -->
+        <div x-show="applied && activeTab === 'export'" class="max-w-2xl space-y-5">
+
+          <div class="card p-5 space-y-4">
+            <div class="text-base font-semibold text-slate-200">Export to CSV</div>
+
+            <!-- Selection summary -->
+            <div class="bg-slate-800/60 rounded-lg p-4 text-sm space-y-1.5">
+              <div class="flex justify-between">
+                <span class="text-slate-400">Selected lots</span>
+                <span class="text-slate-200 font-mono" x-text="[...selLots].join(', ') || '—'"></span>
+              </div>
+              <div class="flex justify-between" x-show="hasWafers">
+                <span class="text-slate-400">Selected wafers</span>
+                <span class="text-slate-200" x-text="selWafers.size === wafers.length ? `All (${wafers.length})` : `${selWafers.size} of ${wafers.length}`"></span>
+              </div>
+              <div class="flex justify-between">
+                <span class="text-slate-400">Parameters</span>
+                <span class="text-slate-200" x-text="selTestNums.size > 0 ? `${selTestNums.size} selected` : 'All'"></span>
+              </div>
+              <div class="border-t border-slate-700 pt-1.5 flex justify-between" x-show="exportPreview.long_rows > 0">
+                <span class="text-slate-400">Estimated rows</span>
+                <span class="text-indigo-300 font-semibold">
+                  <span x-text="exportFormat === 'pivot' ? exportPreview.pivot_rows.toLocaleString() : exportPreview.long_rows.toLocaleString()"></span>
+                  rows ×
+                  <span x-text="exportFormat === 'pivot' ? (exportPreview.tests + 7) + ' cols' : '14 cols'"></span>
+                </span>
+              </div>
+            </div>
+
+            <!-- Format selector -->
+            <div>
+              <div class="text-sm text-slate-400 mb-2">Format</div>
+              <div class="grid grid-cols-2 gap-3">
+                <button
+                  class="p-3 rounded-lg border text-sm text-left transition-colors"
+                  :class="exportFormat === 'pivot' ? 'bg-indigo-900/50 border-indigo-500 text-white' : 'border-slate-600 text-slate-400 hover:border-slate-500'"
+                  @click="exportFormat = 'pivot'; refreshPreview()">
+                  <div class="font-semibold mb-0.5">Pivot</div>
+                  <div class="text-xs opacity-75">1 row per part, tests as columns — recommended for JMP / Excel correlation</div>
+                </button>
+                <button
+                  class="p-3 rounded-lg border text-sm text-left transition-colors"
+                  :class="exportFormat === 'long' ? 'bg-indigo-900/50 border-indigo-500 text-white' : 'border-slate-600 text-slate-400 hover:border-slate-500'"
+                  @click="exportFormat = 'long'; refreshPreview()">
+                  <div class="font-semibold mb-0.5">Long</div>
+                  <div class="text-xs opacity-75">1 row per test result with limits — for statistical tools / Python analysis</div>
+                </button>
+              </div>
+            </div>
+
+            <!-- Filename -->
+            <div>
+              <div class="text-sm text-slate-400 mb-1">Filename</div>
+              <input class="input text-sm" x-model="exportFilename" placeholder="stdf_export.csv" />
+            </div>
+
+            <!-- Download button -->
+            <button
+              class="btn-primary w-full py-3 text-base flex items-center justify-center gap-2"
+              @click="downloadCSV()"
+              :disabled="exporting || selLots.size === 0">
+              <svg x-show="!exporting" class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                      d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/>
+              </svg>
+              <svg x-show="exporting" class="w-5 h-5 animate-spin" fill="none" viewBox="0 0 24 24">
+                <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z"></path>
+              </svg>
+              <span x-text="exporting ? 'Generating…' : 'Download CSV'"></span>
+            </button>
+
+            <!-- Status message -->
+            <div x-show="exportStatus" class="text-sm text-center"
+                 :class="exportStatus?.ok ? 'text-green-400' : 'text-red-400'"
+                 x-text="exportStatus?.msg"></div>
+          </div>
+        </div>
+
+      </div><!-- /tab content -->
+    </main>
+  </div>
+
+  <script src="/static/plots.js"></script>
+  <script src="/static/app.js"></script>
+</body>
+</html>
