@@ -113,39 +113,67 @@ def ingest(ctx, stdf_file: Path, product: str | None, sub_process: str | None, f
 @click.option("--glob", "-g", default="*.stdf*", show_default=True, help="File glob pattern")
 @click.option("--workers", "-w", default=4, show_default=True, help="Concurrent worker count")
 @click.option("--timeout", default=300, show_default=True, help="Per-file timeout (seconds)")
+@click.option("--force", "-f", is_flag=True, help="Re-ingest files even if already ingested")
 @click.option("--verbose", "-v", is_flag=True, help="Verbose output")
 @click.pass_context
-def ingest_all(ctx, directory: Path, product: str, glob: str, workers: int, timeout: int, verbose: bool):
+def ingest_all(ctx, directory: Path, product: str, glob: str, workers: int, timeout: int, force: bool, verbose: bool):
     """Ingest all STDF files in a directory using a concurrent worker pool.
+
+    Already-ingested files are skipped automatically — safe to re-run after
+    an interrupted ingest. Use --force to re-ingest everything.
 
     DIRECTORY: Path to directory containing STDF files.
 
     Example: stdf2pq ingest-all ./downloads -p SCT101A --workers 8
     """
     from .worker import run_ingest_pool
+    from .ingest_history import IngestHistory
 
     config: Config = ctx.obj["config"]
     config.ensure_directories()
 
-    stdf_files = sorted(directory.glob(glob))
-    if not stdf_files:
+    all_files = sorted(directory.glob(glob))
+    if not all_files:
         console.print(f"[yellow]No files matching '{glob}' in {directory}[/yellow]")
         return
 
+    history = IngestHistory(config.storage.data_dir / "ingest_history.json")
+
+    if force:
+        stdf_files = all_files
+        skipped_count = 0
+    else:
+        stdf_files = [f for f in all_files if not history.is_done(f)]
+        skipped_count = len(all_files) - len(stdf_files)
+
     console.print(f"\n[bold]stdf2pq - Ingest All[/bold]")
     console.print(f"  Directory : {directory}")
-    console.print(f"  Files     : {len(stdf_files)}")
+    console.print(f"  Files     : {len(all_files)} found")
+    if skipped_count:
+        console.print(f"  Skipped   : [dim]{skipped_count} already ingested[/dim]")
+    console.print(f"  To ingest : {len(stdf_files)}")
     console.print(f"  Product   : {product}")
     console.print(f"  Workers   : {workers}")
+    if force:
+        console.print(f"  [yellow]Force mode: re-ingesting all files[/yellow]")
     console.print()
+
+    if not stdf_files:
+        console.print("[green]✓[/green] Nothing to do — all files already ingested.")
+        console.print("[dim]Use --force to re-ingest.[/dim]")
+        return
 
     to_ingest = [(None, f, product, "") for f in stdf_files]
     sync_manager = SyncManager(config.storage.data_dir / "sync_history.json")
-    _run_ingest_batch(
+    successes, failures = _run_ingest_batch(
         config, sync_manager, to_ingest,
         cleanup=False, verbose=verbose,
         timeout=timeout, max_workers=workers,
     )
+
+    # Record successes so they are skipped on next run
+    if successes:
+        history.mark_done_batch([r.local_path for r in successes])
 
 
 # ── db group ──────────────────────────────────────────────────────
@@ -373,7 +401,11 @@ def _run_ingest_batch(
     timeout: int = 300,
     max_workers: int = 4,
 ):
-    """Ingest a batch of STDF files using a concurrent subprocess worker pool."""
+    """Ingest a batch of STDF files using a concurrent subprocess worker pool.
+
+    Returns:
+        (successes, failures) lists of IngestResult.
+    """
     from .worker import run_ingest_pool
 
     successes, failures = run_ingest_pool(
@@ -403,6 +435,8 @@ def _run_ingest_batch(
                 if verbose:
                     console.print(f"  [yellow]![/yellow] Could not delete {result.local_path.name}: {e}")
         console.print(f"[green]✓[/green] Deleted {cleaned} source files")
+
+    return successes, failures
 
 
 @main.command()

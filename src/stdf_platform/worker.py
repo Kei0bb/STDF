@@ -75,6 +75,7 @@ def _run_single(
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            encoding="utf-8",  # explicit UTF-8 for WSL2 / Windows compatibility
         )
     except Exception as e:
         return IngestResult(
