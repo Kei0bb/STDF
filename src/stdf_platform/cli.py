@@ -107,6 +107,47 @@ def ingest(ctx, stdf_file: Path, product: str | None, sub_process: str | None, f
                 pass
 
 
+@main.command("ingest-all")
+@click.argument("directory", type=click.Path(exists=True, file_okay=False, path_type=Path))
+@click.option("--product", "-p", required=True, help="Product name")
+@click.option("--glob", "-g", default="*.stdf*", show_default=True, help="File glob pattern")
+@click.option("--workers", "-w", default=4, show_default=True, help="Concurrent worker count")
+@click.option("--timeout", default=300, show_default=True, help="Per-file timeout (seconds)")
+@click.option("--verbose", "-v", is_flag=True, help="Verbose output")
+@click.pass_context
+def ingest_all(ctx, directory: Path, product: str, glob: str, workers: int, timeout: int, verbose: bool):
+    """Ingest all STDF files in a directory using a concurrent worker pool.
+
+    DIRECTORY: Path to directory containing STDF files.
+
+    Example: stdf2pq ingest-all ./downloads -p SCT101A --workers 8
+    """
+    from .worker import run_ingest_pool
+
+    config: Config = ctx.obj["config"]
+    config.ensure_directories()
+
+    stdf_files = sorted(directory.glob(glob))
+    if not stdf_files:
+        console.print(f"[yellow]No files matching '{glob}' in {directory}[/yellow]")
+        return
+
+    console.print(f"\n[bold]stdf2pq - Ingest All[/bold]")
+    console.print(f"  Directory : {directory}")
+    console.print(f"  Files     : {len(stdf_files)}")
+    console.print(f"  Product   : {product}")
+    console.print(f"  Workers   : {workers}")
+    console.print()
+
+    to_ingest = [(None, f, product, "") for f in stdf_files]
+    sync_manager = SyncManager(config.storage.data_dir / "sync_history.json")
+    _run_ingest_batch(
+        config, sync_manager, to_ingest,
+        cleanup=False, verbose=verbose,
+        timeout=timeout, max_workers=workers,
+    )
+
+
 # ── db group ──────────────────────────────────────────────────────
 
 @main.group()
@@ -330,132 +371,37 @@ def _run_ingest_batch(
     cleanup: bool,
     verbose: bool,
     timeout: int = 300,
+    max_workers: int = 4,
 ):
-    """Ingest a batch of STDF files using an isolated subprocess.
+    """Ingest a batch of STDF files using a concurrent subprocess worker pool."""
+    from .worker import run_ingest_pool
 
-    Each file is parsed and saved in an isolated subprocess via
-    stdf_platform._ingest_worker to efficiently release memory
-    and avoid crashing the main process.
-    """
-    import json
-    import subprocess
-    import sys
-    import threading
-    import time
-    from pathlib import Path
+    successes, failures = run_ingest_pool(
+        files=to_ingest,
+        data_dir=config.storage.data_dir,
+        compression=config.processing.compression,
+        max_workers=max_workers,
+        timeout=timeout,
+    )
 
-    log_path = Path(config.storage.data_dir) / "ingest_worker.log"
-    stderr_lines: list[str] = []
+    for result in successes:
+        sync_manager.mark_ingested(result.remote_path)
 
-    def _collect_stderr(proc):
-        """Read stderr line by line into a list (and optionally log file)."""
-        try:
-            log_file = open(log_path, "a", encoding="utf-8")
-        except OSError:
-            log_file = None
-        for line in proc.stderr:
-            stderr_lines.append(line.rstrip())
-            if log_file:
-                log_file.write(line)
-                log_file.flush()
-        if log_file:
-            log_file.close()
+    console.print(f"\n[green]✓[/green] Ingested {len(successes)} files")
+    if failures:
+        console.print(f"[yellow]![/yellow] {len(failures)} files failed (will retry on next fetch)")
 
-    success = 0
-    failed = 0
-    ingested_files = []
-
-    for remote_path, local_path, prod, ttype in to_ingest:
-        try:
-            stderr_lines.clear()
-
-            cmd = [
-                sys.executable, "-m", "stdf_platform._ingest_worker",
-                str(local_path),
-                prod,
-                str(config.storage.data_dir),
-                config.processing.compression,
-            ]
-            console.print(f"  [dim]cmd: {' '.join(cmd)}[/dim]")
-
-            # Run parse + save in a completely separate process
-            try:
-                proc = subprocess.Popen(
-                    cmd,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    text=True,
-                )
-            except Exception as popen_err:
-                console.print(f"  [red]✗[/red] {local_path.name}: Popen failed: {popen_err}")
-                failed += 1
-                continue
-
-            # Stream stderr in real time (visible in log even on hang)
-            stderr_thread = threading.Thread(target=_collect_stderr, args=(proc,), daemon=True)
-            stderr_thread.start()
-
-            try:
-                stdout, _ = proc.communicate(timeout=timeout)
-                stderr_thread.join(timeout=5)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-                proc.communicate()
-                stderr_thread.join(timeout=5)
-                last_log = stderr_lines[-1] if stderr_lines else "no output"
-                console.print(f"  [red]✗[/red] {local_path.name}: timed out after {timeout}s")
-                console.print(f"    [dim]last worker output: {last_log}[/dim]")
-                failed += 1
-                continue
-
-            console.print(f"  [dim]returncode={proc.returncode}, stderr_lines={len(stderr_lines)}, stdout_len={len(stdout)}[/dim]")
-
-            if proc.returncode != 0:
-                if stderr_lines:
-                    for line in stderr_lines:
-                        console.print(f"    [red]{line}[/red]")
-                else:
-                    console.print(f"  [red]✗[/red] {local_path.name}: worker exited with code {proc.returncode}, no stderr output")
-                failed += 1
-                continue
-
-            if verbose and stderr_lines:
-                for line in stderr_lines:
-                    console.print(f"    [dim]{line}[/dim]")
-
-            # Parse worker output
-            try:
-                result = json.loads(stdout)
-                sub_process = result.get("sub_process", "UNKNOWN")
-                test_category = result.get("test_category", "OTHER")
-            except json.JSONDecodeError:
-                sub_process = "UNKNOWN"
-                test_category = "OTHER"
-
-            sync_manager.mark_ingested(remote_path)
-            console.print(f"  [green]✓[/green] {local_path.name} ({prod}/{test_category}/{sub_process})")
-            success += 1
-            ingested_files.append(local_path)
-        except Exception as e:
-            console.print(f"  [red]✗[/red] {local_path.name}: {e}")
-            failed += 1
-
-    console.print(f"\n[green]✓[/green] Ingested {success} files")
-    if failed:
-        console.print(f"[yellow]![/yellow] {failed} files failed (will retry on next fetch)")
-
-    # Cleanup source files after successful ingest
-    if cleanup and ingested_files:
+    if cleanup and successes:
         console.print("\n[bold]Cleaning up source files...[/bold]")
         cleaned = 0
-        for local_path in ingested_files:
+        for result in successes:
             try:
-                if local_path.exists():
-                    local_path.unlink()
+                if result.local_path.exists():
+                    result.local_path.unlink()
                     cleaned += 1
             except Exception as e:
                 if verbose:
-                    console.print(f"  [yellow]![/yellow] Could not delete {local_path.name}: {e}")
+                    console.print(f"  [yellow]![/yellow] Could not delete {result.local_path.name}: {e}")
         console.print(f"[green]✓[/green] Deleted {cleaned} source files")
 
 

@@ -8,3 +8,4 @@ config.yaml
 data/
 data-*/
 downloads/
+test_data/

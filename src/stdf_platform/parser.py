@@ -1,4 +1,4 @@
-"""STDF binary parser - no external dependencies."""
+"""STDF binary parser - pure Python, no external dependencies."""
 
 import struct
 import logging
@@ -7,6 +7,10 @@ from dataclasses import dataclass, field
 from typing import BinaryIO
 
 logger = logging.getLogger(__name__)
+
+# Pre-compiled struct objects (module-level, endian-neutral sizes used for header)
+_STRUCT_HEADER_LE = struct.Struct("<H")
+_STRUCT_HEADER_BE = struct.Struct(">H")
 
 
 @dataclass
@@ -59,54 +63,58 @@ REC_SDR = (1, 80)
 
 
 class STDFParser:
-    """Binary STDF V4 parser."""
+    """Binary STDF V4 parser with pre-compiled struct objects for performance."""
 
     def __init__(self):
         self.data = STDFData()
         self._part_counter = 0
-        self._endian = "<"  # Little endian by default
+        self._set_endian("<")  # Little endian by default
+
+    def _set_endian(self, endian: str):
+        """Set endianness and rebuild all pre-compiled struct objects."""
+        self._endian = endian
+        self._s_u1 = struct.Struct(endian + "B")
+        self._s_u2 = struct.Struct(endian + "H")
+        self._s_u4 = struct.Struct(endian + "I")
+        self._s_i1 = struct.Struct(endian + "b")
+        self._s_i2 = struct.Struct(endian + "h")
+        self._s_r4 = struct.Struct(endian + "f")
 
     def _read_u1(self, f: BinaryIO) -> int:
-        """Read unsigned 1-byte integer."""
         data = f.read(1)
         if len(data) < 1:
             raise EOFError()
-        return struct.unpack(self._endian + "B", data)[0]
+        return self._s_u1.unpack(data)[0]
 
     def _read_u2(self, f: BinaryIO) -> int:
-        """Read unsigned 2-byte integer."""
         data = f.read(2)
         if len(data) < 2:
             raise EOFError()
-        return struct.unpack(self._endian + "H", data)[0]
+        return self._s_u2.unpack(data)[0]
 
     def _read_u4(self, f: BinaryIO) -> int:
-        """Read unsigned 4-byte integer."""
         data = f.read(4)
         if len(data) < 4:
             raise EOFError()
-        return struct.unpack(self._endian + "I", data)[0]
+        return self._s_u4.unpack(data)[0]
 
     def _read_i1(self, f: BinaryIO) -> int:
-        """Read signed 1-byte integer."""
         data = f.read(1)
         if len(data) < 1:
             raise EOFError()
-        return struct.unpack(self._endian + "b", data)[0]
+        return self._s_i1.unpack(data)[0]
 
     def _read_i2(self, f: BinaryIO) -> int:
-        """Read signed 2-byte integer."""
         data = f.read(2)
         if len(data) < 2:
             raise EOFError()
-        return struct.unpack(self._endian + "h", data)[0]
+        return self._s_i2.unpack(data)[0]
 
     def _read_r4(self, f: BinaryIO) -> float:
-        """Read 4-byte float."""
         data = f.read(4)
         if len(data) < 4:
             raise EOFError()
-        return struct.unpack(self._endian + "f", data)[0]
+        return self._s_r4.unpack(data)[0]
 
     def _read_cn(self, f: BinaryIO) -> str:
         """Read character string (length-prefixed)."""
@@ -120,24 +128,20 @@ class STDFParser:
             return ""
 
     def _read_header(self, f: BinaryIO) -> tuple[int, int, int]:
-        """Read record header. Returns (rec_len, rec_typ, rec_sub)."""
+        """Read 4-byte record header. Returns (rec_len, rec_typ, rec_sub)."""
         data = f.read(4)
         if len(data) < 4:
             raise EOFError()
-        rec_len = struct.unpack(self._endian + "H", data[0:2])[0]
+        rec_len = self._s_u2.unpack(data[0:2])[0]
         rec_typ = data[2]
         rec_sub = data[3]
         return rec_len, rec_typ, rec_sub
 
     def _parse_far(self, f: BinaryIO, rec_len: int):
-        """Parse File Attributes Record."""
+        """Parse File Attributes Record — sets endianness for all subsequent reads."""
         cpu_type = self._read_u1(f)
-        stdf_ver = self._read_u1(f)
-        # Set endianness based on CPU type
-        if cpu_type == 1:
-            self._endian = ">"  # Big endian (Sun)
-        else:
-            self._endian = "<"  # Little endian (x86)
+        _stdf_ver = self._read_u1(f)
+        self._set_endian(">" if cpu_type == 1 else "<")
 
     def _parse_mir(self, f: BinaryIO, rec_len: int):
         """Parse Master Information Record."""
@@ -547,45 +551,7 @@ class STDFParser:
         return self.data
 
 
-def _parse_stdf_python(file_path: Path) -> STDFData:
-    """Parse an STDF file using the Python parser."""
+def parse_stdf(file_path: Path) -> STDFData:
+    """Parse an STDF file using the optimized Python parser."""
     parser = STDFParser()
     return parser.parse(file_path)
-
-
-def _convert_rust_result(d: dict) -> STDFData:
-    """Convert Rust parser dict result to STDFData."""
-    data = STDFData()
-    data.lot_id = d.get("lot_id", "")
-    data.part_type = d.get("part_type", "")
-    data.job_name = d.get("job_name", "")
-    data.job_rev = d.get("job_rev", "")
-    data.start_time = d.get("start_time", 0)
-    data.finish_time = d.get("finish_time", 0)
-    data.tester_type = d.get("tester_type", "")
-    data.operator = d.get("operator", "")
-    data.test_code = d.get("test_code", "")
-    data.wafers = d.get("wafers", [])
-    data.parts = d.get("parts", [])
-    data.test_results = d.get("test_results", [])
-    data.tests = {int(k): v for k, v in d.get("tests", {}).items()}
-    data.bins_hard = {int(k): v for k, v in d.get("bins_hard", {}).items()}
-    data.bins_soft = {int(k): v for k, v in d.get("bins_soft", {}).items()}
-    return data
-
-
-# Rust parser availability
-try:
-    from stdf2pq_rs import parse_stdf as _parse_stdf_rs
-    _USE_RUST = True
-except ImportError:
-    _USE_RUST = False
-    logger.warning("Rust parser not available — using Python parser (slower)")
-
-
-def parse_stdf(file_path: Path) -> STDFData:
-    """Parse an STDF file. Uses Rust parser if available, Python fallback otherwise."""
-    if _USE_RUST:
-        result = _parse_stdf_rs(str(file_path))
-        return _convert_rust_result(result)
-    return _parse_stdf_python(file_path)
