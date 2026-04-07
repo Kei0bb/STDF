@@ -3,6 +3,39 @@
 `schema.md` で定義された 4 テーブル（`lots` / `wafers` / `parts` / `test_data`）を  
 DuckDB ビュー経由で検索する際のリファレンスです。
 
+## 実行方法
+
+### VS Code で対話的に実行（推奨）
+
+プロジェクトルートの **`query.py`** を VS Code で開き、各セル (`# %%`) を Shift+Enter で実行します。  
+[Python 拡張](https://marketplace.visualstudio.com/items?itemName=ms-python.python) + Jupyter サポートが必要です。
+
+```
+# セットアップセルを実行後、LOT_ID を書き換えて各セルを実行
+LOT_ID = "E6A773.00"
+```
+
+### CLI から直接実行
+
+```bash
+# DuckDB シェル（対話モード）
+stdf2pq db shell
+
+# 1 クエリを実行して表示
+stdf2pq db query "SELECT lot_id, product FROM lots ORDER BY start_time DESC LIMIT 10"
+```
+
+### Python スクリプトから
+
+```python
+import duckdb
+con = duckdb.connect(":memory:")
+con.execute("CREATE VIEW lots AS SELECT * FROM read_parquet('data/lots/**/*.parquet', hive_partitioning=true)")
+df = con.execute("SELECT * FROM lots").fetchdf()
+```
+
+---
+
 > [!TIP]
 > パーティション列（`product`, `test_category`, `sub_process`, `lot_id`）で絞ると高速です。
 
