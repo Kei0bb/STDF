@@ -4,47 +4,39 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-`stdf2pq` is a high-speed ETL pipeline for semiconductor test data (STDF format) → Parquet + DuckDB + PostgreSQL. It supports CLI usage, a Streamlit web UI, and Dagster orchestration. The Rust parser (via PyO3) provides 10–30x speedup over the Python fallback.
+`stdf2pq` is a high-speed ETL pipeline for semiconductor test data (STDF format) → Parquet + DuckDB + PostgreSQL. It supports CLI usage and a FastAPI + Alpine.js web UI. Python-only parser with ProcessPoolExecutor for parallel batch ingestion.
 
 ## Commands
 
 ### Setup
 ```bash
-uv sync                                                        # Install dependencies
-uv pip install "dagster>=1.9.0" "dagster-webserver>=1.9.0" "psycopg2-binary>=2.9.0"  # Optional Dagster deps
-```
-
-### Building the Rust Parser (optional)
-```bash
-cd rust
-uv run maturin develop --features python --release
+uv sync                                    # Install dependencies
+uv pip install "psycopg2-binary>=2.9.0"   # Optional: PostgreSQL sync
 ```
 
 ### Running
 ```bash
-stdf2pq ingest <file>          # Ingest STDF file (auto-uses Rust parser if built)
-stdf2pq fetch                   # FTP differential sync
-stdf2pq web                     # Streamlit UI at http://localhost:8501
-uv run streamlit run src/stdf_platform/app.py  # Alternative web UI launch
+stdf2pq ingest <file> --product PROD       # Ingest single STDF file
+stdf2pq ingest-all ./downloads -p PROD     # Batch ingest directory (parallel workers)
+stdf2pq fetch                              # FTP differential sync
+stdf2pq web                                # Web UI at http://localhost:8000
 
-docker compose up -d            # Start PostgreSQL (required for postgres_sync)
-uv run dagster dev -m stdf_dagster  # Dagster UI at http://localhost:3000
+docker compose up -d                       # Start PostgreSQL (optional, for multi-user access)
 ```
 
-### Testing
+### Generate test data
 ```bash
-uv run python test_ingest.py    # Integration test
-uv run python test_timeout.py   # Timeout/subprocess test
+uv run python make_test_stdf.py            # Generate synthetic STDF files in test_data/
 ```
 
 ## Architecture
 
 ### Data Flow
 ```
-STDF file → Rust parser (PyO3) or Python fallback → Parquet (Hive-partitioned) → DuckDB views → PostgreSQL
+STDF file → Python parser (struct.Struct optimized) → Parquet (Hive-partitioned) → DuckDB views → Web UI / PostgreSQL
 ```
 
-The ingest worker runs in an **isolated subprocess** (`_ingest_worker.py`) for memory safety — parser crashes don't affect the main process.
+The ingest worker runs in an **isolated subprocess** (`_ingest_worker.py`) for memory safety — parser crashes don't affect the main process. Batch ingestion uses `ThreadPoolExecutor` with configurable worker count.
 
 ### Storage Layout (Hive partitioning)
 ```
@@ -61,31 +53,39 @@ The `retest_num` is derived from partition depth, not stored in STDF — duplica
 - **test_data** — parametric measurements from PTR/MPR/FTR records (no PK, large table)
 
 ### Modules
-- `src/stdf_platform/` — core library: CLI (`cli.py`), Python parser (`parser.py`), DuckDB (`database.py`), Parquet storage (`storage.py`), FTP (`ftp_client.py`), Streamlit UI (`app.py`)
-- `src/stdf_dagster/` — Dagster orchestration: assets in `assets/`, resources in `resources/`, sensor polling FTP every 3h, daily refresh schedule at 6:00 UTC
-- `rust/` — Rust binary parser with PyO3 bindings; `python.rs` exposes the interface
-- `src/stdf2parquet/` — legacy module, kept for compatibility
+- `src/stdf_platform/` — core library
+  - `cli.py` — Click CLI entry point
+  - `parser.py` — Pure Python STDF V4 parser
+  - `database.py` — DuckDB view management
+  - `storage.py` — Parquet Hive-partition writer
+  - `ftp_client.py` — FTP differential sync
+  - `_ingest_worker.py` — Isolated subprocess worker
+  - `web/` — FastAPI web app
+    - `server.py` — FastAPI app + router registration
+    - `api/filters.py` — products, categories, lots, wafers endpoints
+    - `api/data.py` — summary, wafermap, tests, distribution endpoints
+    - `api/export.py` — CSV export (pivot & long format)
+    - `api/deps.py` — per-request `:memory:` DuckDB connection
+    - `static/` — Alpine.js SPA (index.html, app.js, plots.js)
 
-### Dagster Asset Graph
-```
-raw_stdf_files → stdf_parquet_tables → duckdb_views → yield_summary / bin_distribution / test_fail_ranking
-                                                    └→ postgres_sync (DuckDB → PostgreSQL bulk upsert)
-```
-
-Jobs: `full_pipeline`, `ingestion_only`, `refresh_views`. Sensor and schedule are OFF by default — enable in Dagster UI.
+### Web UI DuckDB Connection Pattern
+Each FastAPI request gets its own `duckdb.connect(":memory:")` connection — avoids file-locking conflicts under concurrent requests. Views are rebuilt from Parquet on each request via `_setup_views()` (cheap: metadata only, no data copy).
 
 ### Configuration
 `config.yaml` (not tracked; copy from `config.yaml.example`). Supports `${ENV_VAR}` expansion. The `--env dev` flag isolates data to `data-dev/` and skips sync history tracking.
 
-### PostgreSQL Multi-User Access
-- `stdf` user: read/write (Dagster pipeline)
+### PostgreSQL Multi-User Access (optional)
+- `stdf` user: read/write
 - `stdf_reader` user: read-only (JMP, Excel, BI tools)
 - Schema initialized from `docker/postgres/init.sql`
 - Indexes optimized for JMP query patterns on `test_data`
 
 ## Key Design Decisions
 
-- **Rust parser is optional**: Python parser is always the fallback. Check availability via `try: import stdf2pq_rs`.
+- **No Rust dependency**: Pure Python parser is the only parser. Removed for simplicity.
+- **Subprocess isolation**: Each ingest runs in a separate process — memory leaks or parser crashes are contained.
+- **DuckDB :memory: for web**: Avoids file locking; Parquet is the source of truth.
+- **pandas pivot for CSV export**: DuckDB dynamic PIVOT cannot be combined with `?` parameters. pandas `pivot_table()` is used instead after fetching long-format data.
 - **FTP deduplication**: `sync_history.json` tracks ingested files. `--env dev` bypasses this.
 - **Gzip auto-detection**: Files matching `*.stdf.gz`, `*.std.gz` are decompressed to a temp path before parsing.
 - **Windows path safety**: Partition values are sanitized to remove characters invalid on Windows filesystems.
