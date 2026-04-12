@@ -158,7 +158,7 @@ def get_distribution(
                 WHERE lot_id IN ({placeholders}) AND test_num = ?
             """, list(lot) + [test_num]).fetchone()
 
-            if not meta:
+            if not meta or meta[0] is None:
                 return {}
 
             vals = db.execute(f"""
