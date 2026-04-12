@@ -1,8 +1,9 @@
 # stdf2pq
 
-半導体テストデータ（STDF V4）を **Parquet + ClickHouse** に変換する高速ETLパイプライン。  
-Pure Python パーサー × ThreadPoolExecutor による並列処理で、100ファイル以上のバッチ取り込みに対応。  
-FastAPI + Alpine.js + Plotly.js の Web UI でデータを分析・CSV エクスポート。
+半導体テストデータ（STDF V4）を **Parquet + DuckDB** に変換する高速 ETL パイプライン。  
+Pure Python パーサー × ThreadPoolExecutor による並列処理で、1000 ファイル以上のバッチ取り込みに対応。  
+FastAPI + Alpine.js + Plotly.js の Web UI でデータを分析・CSV エクスポート。  
+**Docker 不要 — `uv sync` のみでセットアップ完了。**
 
 ---
 
@@ -12,16 +13,13 @@ FastAPI + Alpine.js + Plotly.js の Web UI でデータを分析・CSV エクス
 # 1. 依存インストール
 uv sync
 
-# 2. ClickHouse 起動（Web UI 使用時に必要）
-docker compose up -d
-
-# 3. config.yaml を設定（example をコピー）
+# 2. config.yaml を設定（example をコピー）
 cp config.yaml.example config.yaml
 
-# 4. データ取り込み
+# 3. データ取り込み
 stdf2pq ingest-all ./downloads -p YOUR_PRODUCT
 
-# 5. Web UI 起動
+# 4. Web UI 起動
 stdf2pq web   # → http://localhost:8000
 ```
 
@@ -34,17 +32,16 @@ STDF ファイル
      ↓
 parse_stdf()  ←  Pure Python (struct.Struct 最適化)
      ↓
- ┌───┴───────────────────────────┐
- │                               │
-Parquet                    ClickHouse
-(Hive パーティション)        (MergeTree エンジン)
-data/{table}/               lots / wafers
-product={}/                 parts / test_data
-test_category={}/                  ↓
-lot_id={}/                   Web UI / query.py
+Parquet (Hive パーティション)
+data/{table}/
+product={}/
+test_category={}/
+lot_id={}/
 data.parquet
      ↓
-DuckDB ビュー（CLI / query.py フォールバック）
+DuckDB glob ビュー（サーバー起動時に1回登録、ingest後は再起動不要）
+     ↓
+FastAPI endpoints → Web UI / CSV Export / query.py
 ```
 
 ### バッチ処理の仕組み
@@ -53,13 +50,18 @@ DuckDB ビュー（CLI / query.py フォールバック）
 100 ファイル
      ↓
 ThreadPoolExecutor (max_workers=N)
-├── Thread 1 → subprocess(_ingest_worker) → Parquet + ClickHouse
-├── Thread 2 → subprocess(_ingest_worker) → Parquet + ClickHouse
-└── Thread N → subprocess(_ingest_worker) → Parquet + ClickHouse
+├── Thread 1 → subprocess(_ingest_worker) → Parquet
+├── Thread 2 → subprocess(_ingest_worker) → Parquet
+└── Thread N → subprocess(_ingest_worker) → Parquet
 ```
 
 - 各 subprocess はメモリ分離（クラッシュしても他のワーカーに影響しない）
 - 成功済みファイルを `data/ingest_history.json` に記録 → 中断後の再実行で自動スキップ
+
+### Web API の DuckDB シングルトン
+
+FastAPI 起動時に DuckDB `:memory:` 接続を1つ作成し、`threading.Lock` で並列リクエストを直列化。  
+glob ビュー (`read_parquet('data/**/*.parquet', hive_partitioning=true)`) はクエリのたびにファイルシステムをスキャンするため、**ingest 後にサーバーを再起動せずとも新データが即座に見える。**
 
 ---
 
@@ -73,6 +75,12 @@ PostgreSQL を使う場合（オプション）:
 
 ```bash
 uv pip install "psycopg2-binary>=2.9.0"
+```
+
+ClickHouse を使う場合（Linux サーバー移行時・オプション）:
+
+```bash
+uv pip install "stdf2pq[clickhouse]"
 ```
 
 ---
@@ -111,7 +119,7 @@ stdf2pq web   # http://localhost:8000
 
 ```bash
 # VS Code で query.py を開いて Shift+Enter でセルを実行
-# ClickHouse が起動していれば自動的に CH を使用、なければ DuckDB/Parquet にフォールバック
+# DuckDB をデフォルト使用。config.yaml の clickhouse.host が非空の場合のみ CH を使用
 ```
 
 ### CLI クエリ
@@ -146,12 +154,12 @@ stdf2pq fetch --reingest        # DL済み未 ingest を再試行（FTP接続な
 
 ### 4 テーブル
 
-| テーブル | エンジン (CH) | 説明 |
-|---------|---|------|
-| `lots` | ReplacingMergeTree | ロット情報（product, test_category, sub_process） |
-| `wafers` | ReplacingMergeTree | ウェハー歩留まり（リテスト追跡含む） |
-| `parts` | MergeTree | 個片結果（Bin, X/Y 座標） |
-| `test_data` | MergeTree | テスト測定値（PTR/MPR/FTR 統合） |
+| テーブル | 説明 |
+|---------|------|
+| `lots` | ロット情報（product, test_category, sub_process） |
+| `wafers` | ウェハー歩留まり（リテスト追跡含む） |
+| `parts` | 個片結果（Bin, X/Y 座標） |
+| `test_data` | テスト測定値（PTR/MPR/FTR 統合） |
 
 ### Parquet パーティション構造
 
@@ -165,15 +173,6 @@ data/
                     └── (wafer_id={id}/retest={n}/)  ← wafers のみ
                         └── data.parquet
 ```
-
-### ClickHouse ソートキー
-
-| テーブル | ORDER BY | 最適化されるクエリ |
-|---|---|---|
-| `lots` | `lot_id` | ロット検索 |
-| `wafers` | `(lot_id, wafer_id, retest_num)` | ウェハー検索・リテスト |
-| `parts` | `(lot_id, wafer_id, part_id)` | 個片検索・ウェハーマップ |
-| `test_data` | `(lot_id, test_num, part_id)` | テスト集計・Fail率 |
 
 ---
 
@@ -197,31 +196,6 @@ rm -rf data-dev/   # リセット
 
 ---
 
-## ClickHouse
-
-Web UI と `query.py` のバックエンド。OLAP に最適化されたカラム型データベース。
-
-```bash
-docker compose up -d clickhouse   # 起動
-# HTTP interface: http://localhost:8123
-# Native TCP:     localhost:9000 (DBeaver, clickhouse-client)
-```
-
-デフォルト接続情報:
-
-| 項目 | 値 |
-|---|---|
-| Host | `localhost` |
-| HTTP Port | `8123` |
-| TCP Port | `9000` |
-| Database | `stdf` |
-| User | `default` |
-| Password | （空） |
-
-`config.yaml` の `clickhouse:` セクションで変更可能。
-
----
-
 ## PostgreSQL（オプション）
 
 JMP / Excel / BI ツールから ODBC/JDBC で直接接続する場合に使用。
@@ -240,12 +214,39 @@ docker compose up -d postgres
 
 ---
 
+## ClickHouse（将来のサーバー移行用・オプション）
+
+Linux サーバー環境で大規模運用する場合に使用。**POC では不要。**
+
+```bash
+# ClickHouse を有効化（Linux サーバー移行時）
+docker compose up -d --profile clickhouse
+uv pip install "stdf2pq[clickhouse]"
+
+# config.yaml の clickhouse.host を設定
+# clickhouse:
+#   host: localhost
+```
+
+デフォルト接続情報:
+
+| 項目 | 値 |
+|---|---|
+| Host | `localhost` |
+| HTTP Port | `8123` |
+| TCP Port | `9000` |
+| Database | `stdf` |
+| User | `default` |
+| Password | （空） |
+
+---
+
 ## WSL2 での注意点
 
 | 問題 | 対策 |
 |---|---|
 | メモリ不足でワーカーが強制終了 | `.wslconfig` で `memory=8GB` を設定、`--workers 2` に減らす |
-| `/mnt/c/` からのファイルが遅い | STDFファイルを Linux 側（`~/`）にコピーしてから実行 |
+| `/mnt/c/` からのファイルが遅い | STDF ファイルを Linux 側（`~/`）にコピーしてから実行 |
 | 中断後の再開 | `ingest-all` を再実行するだけ（成功済みは自動スキップ） |
 
 ---

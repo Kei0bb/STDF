@@ -4,6 +4,7 @@ services:
   clickhouse:
     image: clickhouse/clickhouse-server:24-alpine
     container_name: stdf-clickhouse
+    profiles: [clickhouse]   # opt-in: docker compose up -d --profile clickhouse
     restart: unless-stopped
     environment:
       CLICKHOUSE_DB: stdf
