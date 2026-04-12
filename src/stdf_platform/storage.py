@@ -225,10 +225,8 @@ class ParquetStorage:
             {table_name: row_count}
         """
         counts = {}
-
         # Extract test_rev from filename
         test_rev = extract_test_rev_from_filename(source_file)
-
 
         # Save lot info
         lot_path = self._get_table_path("lots", product, test_category, sub_process) / f"lot_id={self._sanitize(data.lot_id)}"
