@@ -13,12 +13,14 @@ dependencies = [
     "fastapi>=0.111.0",
     "uvicorn[standard]>=0.29.0",
     "pandas>=2.0.0",
-    "clickhouse-connect>=0.7.0",
 ]
 
 [project.optional-dependencies]
 postgres = [
     "psycopg2-binary>=2.9.0",
+]
+clickhouse = [
+    "clickhouse-connect>=0.7.0",
 ]
 
 [project.scripts]
