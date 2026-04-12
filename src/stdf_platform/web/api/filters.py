@@ -1,33 +1,38 @@
 """Filter option endpoints — products, lots, wafers."""
 
+from threading import Lock
 from typing import Annotated
 
-from clickhouse_connect.driver import Client
+import duckdb
 from fastapi import APIRouter, Depends, Query
 
-from .deps import get_ch
+from .deps import get_db
 
 router = APIRouter(tags=["filters"])
-CH = Annotated[Client, Depends(get_ch)]
+DB = Annotated[tuple[duckdb.DuckDBPyConnection, Lock], Depends(get_db)]
 
 
 @router.get("/products")
-def get_products(ch: CH) -> list[str]:
+def get_products(db_tuple: DB) -> list[str]:
+    db, lock = db_tuple
     try:
-        rows = ch.query(
-            "SELECT DISTINCT product FROM lots WHERE product != '' ORDER BY product"
-        ).result_rows
+        with lock:
+            rows = db.execute(
+                "SELECT DISTINCT product FROM lots WHERE product != '' ORDER BY product"
+            ).fetchall()
         return [r[0] for r in rows]
     except Exception:
         return []
 
 
 @router.get("/test-categories")
-def get_test_categories(ch: CH) -> list[str]:
+def get_test_categories(db_tuple: DB) -> list[str]:
+    db, lock = db_tuple
     try:
-        rows = ch.query(
-            "SELECT DISTINCT test_category FROM lots WHERE test_category != '' ORDER BY test_category"
-        ).result_rows
+        with lock:
+            rows = db.execute(
+                "SELECT DISTINCT test_category FROM lots WHERE test_category != '' ORDER BY test_category"
+            ).fetchall()
         return [r[0] for r in rows]
     except Exception:
         return []
@@ -35,23 +40,27 @@ def get_test_categories(ch: CH) -> list[str]:
 
 @router.get("/lots")
 def get_lots(
-    ch: CH,
+    db_tuple: DB,
     product: Annotated[list[str], Query()] = [],
     category: Annotated[list[str], Query()] = [],
 ) -> list[str]:
+    db, lock = db_tuple
     try:
-        conds, params = [], {}
+        conds, params = [], []
         if product:
-            conds.append("product IN {products:Array(String)}")
-            params["products"] = product
+            placeholders = ",".join(["?" for _ in product])
+            conds.append(f"product IN ({placeholders})")
+            params.extend(product)
         if category:
-            conds.append("test_category IN {categories:Array(String)}")
-            params["categories"] = category
+            placeholders = ",".join(["?" for _ in category])
+            conds.append(f"test_category IN ({placeholders})")
+            params.extend(category)
         where = f"WHERE {' AND '.join(conds)}" if conds else ""
-        rows = ch.query(
-            f"SELECT DISTINCT lot_id FROM lots {where} ORDER BY lot_id",
-            parameters=params,
-        ).result_rows
+        with lock:
+            rows = db.execute(
+                f"SELECT DISTINCT lot_id FROM lots {where} ORDER BY lot_id",
+                params if params else None,
+            ).fetchall()
         return [r[0] for r in rows]
     except Exception:
         return []
@@ -59,19 +68,22 @@ def get_lots(
 
 @router.get("/wafers")
 def get_wafers(
-    ch: CH,
+    db_tuple: DB,
     lot: Annotated[list[str], Query()] = [],
 ) -> dict:
     if not lot:
         return {"wafer_ids": [], "has_wafers": False}
+    db, lock = db_tuple
     try:
-        rows = ch.query(
-            """SELECT DISTINCT wafer_id FROM wafers
-               WHERE lot_id IN {lot_ids:Array(String)}
-                 AND wafer_id != ''
-               ORDER BY wafer_id""",
-            parameters={"lot_ids": lot},
-        ).result_rows
+        placeholders = ",".join(["?" for _ in lot])
+        with lock:
+            rows = db.execute(
+                f"""SELECT DISTINCT wafer_id FROM wafers
+                    WHERE lot_id IN ({placeholders})
+                      AND wafer_id != ''
+                    ORDER BY wafer_id""",
+                list(lot),
+            ).fetchall()
         ids = [r[0] for r in rows]
         return {"wafer_ids": ids, "has_wafers": len(ids) > 0}
     except Exception:

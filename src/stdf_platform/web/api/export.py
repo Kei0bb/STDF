@@ -1,18 +1,19 @@
-"""CSV export endpoint — most important feature."""
+"""CSV export endpoint."""
 
 import io
+from threading import Lock
 from typing import Annotated, Literal
 
+import duckdb
 import pandas as pd
-from clickhouse_connect.driver import Client
 from fastapi import APIRouter, Depends
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from .deps import get_ch
+from .deps import get_db
 
 router = APIRouter(tags=["export"])
-CH = Annotated[Client, Depends(get_ch)]
+DB = Annotated[tuple[duckdb.DuckDBPyConnection, Lock], Depends(get_db)]
 
 
 class ExportRequest(BaseModel):
@@ -23,29 +24,33 @@ class ExportRequest(BaseModel):
     filename: str = "stdf_export.csv"
 
 
-def _build_params(
+def _build_where(
     lots: list[str],
     wafers: list[str] | None,
     test_nums: list[int] | None,
-) -> tuple[str, dict]:
-    """Return (WHERE clause, parameters dict) for ClickHouse query."""
-    conds: list[str] = ["td.lot_id IN {lot_ids:Array(String)}"]
-    params: dict = {"lot_ids": lots}
+) -> tuple[str, list]:
+    """Return (WHERE clause, params list) for DuckDB positional params."""
+    lot_ph = ",".join(["?" for _ in lots])
+    conds = [f"td.lot_id IN ({lot_ph})"]
+    params: list = list(lots)
 
     if wafers:
-        conds.append("td.wafer_id IN {wafer_ids:Array(String)}")
-        params["wafer_ids"] = wafers
+        w_ph = ",".join(["?" for _ in wafers])
+        conds.append(f"td.wafer_id IN ({w_ph})")
+        params.extend(wafers)
 
     if test_nums:
-        conds.append("td.test_num IN {test_nums:Array(Int32)}")
-        params["test_nums"] = test_nums
+        t_ph = ",".join(["?" for _ in test_nums])
+        conds.append(f"td.test_num IN ({t_ph})")
+        params.extend(test_nums)
 
     return " AND ".join(conds), params
 
 
 @router.post("/export/csv")
-def export_csv(req: ExportRequest, ch: CH) -> StreamingResponse:
-    where, params = _build_params(req.lots, req.wafers, req.test_nums)
+def export_csv(req: ExportRequest, db_tuple: DB) -> StreamingResponse:
+    db, lock = db_tuple
+    where, params = _build_where(req.lots, req.wafers, req.test_nums)
 
     if req.format == "pivot":
         sql = f"""
@@ -61,7 +66,8 @@ def export_csv(req: ExportRequest, ch: CH) -> StreamingResponse:
             WHERE {where}
             ORDER BY td.lot_id, td.wafer_id, td.part_id, td.test_name
         """
-        df = ch.query_df(sql, parameters=params)
+        with lock:
+            df = db.execute(sql, params).fetchdf()
         index_cols = ["lot_id", "wafer_id", "part_id", "x_coord", "y_coord",
                       "hard_bin", "soft_bin", "part_passed"]
         df = df.pivot_table(index=index_cols, columns="test_name",
@@ -82,7 +88,8 @@ def export_csv(req: ExportRequest, ch: CH) -> StreamingResponse:
             WHERE {where}
             ORDER BY td.lot_id, td.wafer_id, td.part_id, td.test_num
         """
-        df = ch.query_df(sql, parameters=params)
+        with lock:
+            df = db.execute(sql, params).fetchdf()
 
     buf = io.StringIO()
     df.to_csv(buf, index=False)
@@ -100,17 +107,19 @@ def export_csv(req: ExportRequest, ch: CH) -> StreamingResponse:
 
 
 @router.post("/export/preview")
-def export_preview(req: ExportRequest, ch: CH) -> dict:
-    where, params = _build_params(req.lots, req.wafers, req.test_nums)
+def export_preview(req: ExportRequest, db_tuple: DB) -> dict:
+    db, lock = db_tuple
+    where, params = _build_where(req.lots, req.wafers, req.test_nums)
     try:
-        row = ch.query(f"""
-            SELECT
-                countDistinct(td.part_id) AS parts,
-                countDistinct(td.test_num) AS tests,
-                count() AS total_rows
-            FROM test_data td
-            WHERE {where}
-        """, parameters=params).first_row
+        with lock:
+            row = db.execute(f"""
+                SELECT
+                    COUNT(DISTINCT td.part_id) AS parts,
+                    COUNT(DISTINCT td.test_num) AS tests,
+                    COUNT(*) AS total_rows
+                FROM test_data td
+                WHERE {where}
+            """, params).fetchone()
         parts, tests, total = row or (0, 0, 0)
         return {
             "parts": int(parts or 0),

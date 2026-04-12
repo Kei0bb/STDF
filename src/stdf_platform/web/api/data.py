@@ -1,159 +1,173 @@
 """Chart data endpoints."""
 
+from threading import Lock
 from typing import Annotated
 
-from clickhouse_connect.driver import Client
+import duckdb
 from fastapi import APIRouter, Depends, Query
 
-from .deps import get_ch
+from .deps import get_db
 
 router = APIRouter(tags=["data"])
-CH = Annotated[Client, Depends(get_ch)]
+DB = Annotated[tuple[duckdb.DuckDBPyConnection, Lock], Depends(get_db)]
 
 
 @router.get("/summary")
-def get_summary(ch: CH, lot: Annotated[list[str], Query()] = []) -> list[dict]:
+def get_summary(db_tuple: DB, lot: Annotated[list[str], Query()] = []) -> list[dict]:
     if not lot:
         return []
+    db, lock = db_tuple
     try:
-        rows = ch.query("""
-            SELECT
-                l.lot_id, l.product, l.test_category, l.sub_process,
-                l.part_type, l.job_name, l.job_rev,
-                countDistinct(w.wafer_id)                     AS wafer_count,
-                sum(w.part_count)                             AS total_parts,
-                sum(w.good_count)                             AS good_parts,
-                round(100.0 * sum(w.good_count)
-                    / nullIf(sum(w.part_count), 0), 2)        AS yield_pct
-            FROM lots l
-            LEFT JOIN (
-                SELECT *, row_number() OVER (
-                    PARTITION BY lot_id, wafer_id ORDER BY retest_num DESC
-                ) AS rn FROM wafers
-            ) w ON l.lot_id = w.lot_id AND w.rn = 1
-            WHERE l.lot_id IN {lot_ids:Array(String)}
-            GROUP BY l.lot_id, l.product, l.test_category, l.sub_process,
-                     l.part_type, l.job_name, l.job_rev
-            ORDER BY l.product, l.test_category, l.lot_id
-        """, parameters={"lot_ids": lot}).named_results()
-        return list(rows)
+        placeholders = ",".join(["?" for _ in lot])
+        with lock:
+            rows = db.execute(f"""
+                SELECT
+                    l.lot_id, l.product, l.test_category, l.sub_process,
+                    l.part_type, l.job_name, l.job_rev,
+                    COUNT(DISTINCT w.wafer_id)                              AS wafer_count,
+                    SUM(w.part_count)                                       AS total_parts,
+                    SUM(w.good_count)                                       AS good_parts,
+                    ROUND(100.0 * SUM(w.good_count)
+                        / NULLIF(SUM(w.part_count), 0), 2)                 AS yield_pct
+                FROM lots l
+                LEFT JOIN (
+                    SELECT *, ROW_NUMBER() OVER (
+                        PARTITION BY lot_id, wafer_id ORDER BY retest_num DESC
+                    ) AS rn FROM wafers
+                ) w ON l.lot_id = w.lot_id AND w.rn = 1
+                WHERE l.lot_id IN ({placeholders})
+                GROUP BY l.lot_id, l.product, l.test_category, l.sub_process,
+                         l.part_type, l.job_name, l.job_rev
+                ORDER BY l.product, l.test_category, l.lot_id
+            """, list(lot)).fetchdf()
+        return rows.to_dict(orient="records")
     except Exception:
         return []
 
 
 @router.get("/wafer-yield")
-def get_wafer_yield(ch: CH, lot: str = "") -> list[dict]:
+def get_wafer_yield(db_tuple: DB, lot: str = "") -> list[dict]:
     if not lot:
         return []
+    db, lock = db_tuple
     try:
-        rows = ch.query("""
-            SELECT wafer_id,
-                   part_count AS total,
-                   good_count AS good,
-                   round(100.0 * good_count / nullIf(part_count, 0), 2) AS yield_pct,
-                   retest_num
-            FROM (
-                SELECT *, row_number() OVER (
-                    PARTITION BY lot_id, wafer_id ORDER BY retest_num DESC
-                ) AS rn FROM wafers WHERE lot_id = {lot_id:String}
-            ) WHERE rn = 1
-            ORDER BY wafer_id
-        """, parameters={"lot_id": lot}).named_results()
-        return list(rows)
+        with lock:
+            rows = db.execute("""
+                SELECT wafer_id,
+                       part_count AS total,
+                       good_count AS good,
+                       ROUND(100.0 * good_count / NULLIF(part_count, 0), 2) AS yield_pct,
+                       retest_num
+                FROM (
+                    SELECT *, ROW_NUMBER() OVER (
+                        PARTITION BY lot_id, wafer_id ORDER BY retest_num DESC
+                    ) AS rn FROM wafers WHERE lot_id = ?
+                ) WHERE rn = 1
+                ORDER BY wafer_id
+            """, [lot]).fetchdf()
+        return rows.to_dict(orient="records")
     except Exception:
         return []
 
 
 @router.get("/wafermap")
-def get_wafermap(ch: CH, lot: str = "", wafer: str = "") -> list[dict]:
+def get_wafermap(db_tuple: DB, lot: str = "", wafer: str = "") -> list[dict]:
     if not lot or not wafer:
         return []
+    db, lock = db_tuple
     try:
-        rows = ch.query("""
-            SELECT x_coord, y_coord, soft_bin, hard_bin, passed, part_id
-            FROM parts
-            WHERE lot_id = {lot_id:String} AND wafer_id = {wafer_id:String}
-            ORDER BY part_id
-        """, parameters={"lot_id": lot, "wafer_id": wafer}).named_results()
-        return list(rows)
+        with lock:
+            rows = db.execute("""
+                SELECT x_coord, y_coord, soft_bin, hard_bin, passed, part_id
+                FROM parts
+                WHERE lot_id = ? AND wafer_id = ?
+                ORDER BY part_id
+            """, [lot, wafer]).fetchdf()
+        return rows.to_dict(orient="records")
     except Exception:
         return []
 
 
 @router.get("/tests")
-def get_tests(ch: CH, lot: Annotated[list[str], Query()] = []) -> list[dict]:
+def get_tests(db_tuple: DB, lot: Annotated[list[str], Query()] = []) -> list[dict]:
     if not lot:
         return []
+    db, lock = db_tuple
     try:
-        rows = ch.query("""
-            SELECT DISTINCT test_num, test_name, rec_type, units, lo_limit, hi_limit
-            FROM test_data
-            WHERE lot_id IN {lot_ids:Array(String)}
-            ORDER BY test_num
-        """, parameters={"lot_ids": lot}).named_results()
-        return list(rows)
+        placeholders = ",".join(["?" for _ in lot])
+        with lock:
+            rows = db.execute(f"""
+                SELECT DISTINCT test_num, test_name, rec_type, units, lo_limit, hi_limit
+                FROM test_data
+                WHERE lot_id IN ({placeholders})
+                ORDER BY test_num
+            """, list(lot)).fetchdf()
+        return rows.to_dict(orient="records")
     except Exception:
         return []
 
 
 @router.get("/fails")
 def get_fails(
-    ch: CH,
+    db_tuple: DB,
     lot: Annotated[list[str], Query()] = [],
     top_n: int = 20,
 ) -> list[dict]:
     if not lot:
         return []
+    db, lock = db_tuple
     try:
-        rows = ch.query("""
-            SELECT
-                test_num,
-                test_name,
-                count()                                     AS total,
-                countIf(passed = 'F')                       AS fail_count,
-                round(100.0 * countIf(passed = 'F')
-                    / count(), 2)                           AS fail_rate
-            FROM test_data
-            WHERE lot_id IN {lot_ids:Array(String)}
-            GROUP BY test_num, test_name
-            HAVING fail_count > 0
-            ORDER BY fail_rate DESC
-            LIMIT {top_n:UInt32}
-        """, parameters={"lot_ids": lot, "top_n": top_n}).named_results()
-        return list(rows)
+        placeholders = ",".join(["?" for _ in lot])
+        with lock:
+            rows = db.execute(f"""
+                SELECT
+                    test_num,
+                    test_name,
+                    COUNT(*)                                                    AS total,
+                    SUM(CASE WHEN passed = 'F' THEN 1 ELSE 0 END)              AS fail_count,
+                    ROUND(100.0 * SUM(CASE WHEN passed = 'F' THEN 1 ELSE 0 END)
+                        / COUNT(*), 2)                                          AS fail_rate
+                FROM test_data
+                WHERE lot_id IN ({placeholders})
+                GROUP BY test_num, test_name
+                HAVING SUM(CASE WHEN passed = 'F' THEN 1 ELSE 0 END) > 0
+                ORDER BY fail_rate DESC
+                LIMIT ?
+            """, list(lot) + [top_n]).fetchdf()
+        return rows.to_dict(orient="records")
     except Exception:
         return []
 
 
 @router.get("/distribution")
 def get_distribution(
-    ch: CH,
+    db_tuple: DB,
     lot: Annotated[list[str], Query()] = [],
     test_num: int = 0,
     limit: int = 5000,
 ) -> dict:
     if not lot or not test_num:
         return {}
+    db, lock = db_tuple
     try:
-        meta = ch.query("""
-            SELECT any(test_name) AS test_name,
-                   any(units)     AS units,
-                   any(lo_limit)  AS lo_limit,
-                   any(hi_limit)  AS hi_limit
-            FROM test_data
-            WHERE lot_id IN {lot_ids:Array(String)} AND test_num = {test_num:Int32}
-        """, parameters={"lot_ids": lot, "test_num": test_num}).first_row
+        placeholders = ",".join(["?" for _ in lot])
+        with lock:
+            meta = db.execute(f"""
+                SELECT FIRST(test_name), FIRST(units), FIRST(lo_limit), FIRST(hi_limit)
+                FROM test_data
+                WHERE lot_id IN ({placeholders}) AND test_num = ?
+            """, list(lot) + [test_num]).fetchone()
 
-        if not meta:
-            return {}
+            if not meta:
+                return {}
 
-        vals = ch.query("""
-            SELECT result FROM test_data
-            WHERE lot_id IN {lot_ids:Array(String)}
-              AND test_num = {test_num:Int32}
-              AND result IS NOT NULL
-            LIMIT {lim:UInt32}
-        """, parameters={"lot_ids": lot, "test_num": test_num, "lim": limit}).result_rows
+            vals = db.execute(f"""
+                SELECT result FROM test_data
+                WHERE lot_id IN ({placeholders})
+                  AND test_num = ?
+                  AND result IS NOT NULL
+                LIMIT ?
+            """, list(lot) + [test_num, limit]).fetchall()
 
         return {
             "test_num": test_num,
