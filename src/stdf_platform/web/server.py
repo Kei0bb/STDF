@@ -1,6 +1,5 @@
 """FastAPI web server for stdf2pq."""
 
-import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 from threading import Lock
