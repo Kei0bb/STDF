@@ -72,11 +72,26 @@ class ProductFilter:
 
 
 @dataclass
+class ClickHouseConfig:
+    """ClickHouse connection configuration."""
+    host: str = "localhost"
+    http_port: int = 8123
+    database: str = "stdf"
+    username: str = "default"
+    password: str = ""
+
+    @property
+    def enabled(self) -> bool:
+        return bool(self.host)
+
+
+@dataclass
 class Config:
     """Main configuration."""
     ftp: FTPConfig = field(default_factory=FTPConfig)
     storage: StorageConfig = field(default_factory=StorageConfig)
     processing: ProcessingConfig = field(default_factory=ProcessingConfig)
+    clickhouse: ClickHouseConfig = field(default_factory=ClickHouseConfig)
     filters: list[ProductFilter] = field(default_factory=list)
 
     def should_fetch(self, product: str, test_type: str) -> bool:
@@ -116,6 +131,7 @@ class Config:
         ftp_data = data.get("ftp", {})
         storage_data = data.get("storage", {})
         processing_data = data.get("processing", {})
+        ch_data = data.get("clickhouse", {})
         
         # Parse filters format
         filters_data = data.get("filters", []) or []
@@ -135,6 +151,7 @@ class Config:
             ftp=FTPConfig(**ftp_data) if ftp_data else FTPConfig(),
             storage=StorageConfig(**storage_data) if storage_data else StorageConfig(),
             processing=ProcessingConfig(**processing_data) if processing_data else ProcessingConfig(),
+            clickhouse=ClickHouseConfig(**ch_data) if ch_data else ClickHouseConfig(),
             filters=filters,
         )
 

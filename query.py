@@ -6,50 +6,77 @@
 #
 # **参考:** `docs/sample_queries.md` にクエリ集あり
 
-# %% Setup — DuckDB 接続とビュー作成
+# %% Setup — ClickHouse 接続（推奨）または DuckDB フォールバック
 import duckdb
 import pandas as pd
 from pathlib import Path
 
-# config.yaml からデータディレクトリを自動検出（なければ ./data）
-def _find_data_dir() -> Path:
+def _load_config() -> dict:
     config_path = Path(__file__).parent / "config.yaml"
     if config_path.exists():
         try:
             import yaml
-            cfg = yaml.safe_load(config_path.read_text(encoding="utf-8"))
-            p = cfg.get("storage", {}).get("data_dir")
-            if p:
-                return Path(p)
+            return yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
         except Exception:
             pass
-    return Path(__file__).parent / "data"
+    return {}
 
-DATA_DIR = _find_data_dir()
-print(f"Data dir: {DATA_DIR}")
+_cfg = _load_config()
 
-con = duckdb.connect(":memory:")
+# ── ClickHouse (primary) ──────────────────────────────────────────────────
+try:
+    import clickhouse_connect
+    _ch_cfg = _cfg.get("clickhouse", {})
+    ch = clickhouse_connect.get_client(
+        host=_ch_cfg.get("host", "localhost"),
+        port=_ch_cfg.get("http_port", 8123),
+        database=_ch_cfg.get("database", "stdf"),
+        username=_ch_cfg.get("username", "default"),
+        password=_ch_cfg.get("password", ""),
+        connect_timeout=5,
+    )
+    ch.ping()
+    print(f"✓ ClickHouse connected: {_ch_cfg.get('host','localhost')}:{_ch_cfg.get('http_port',8123)}/{_ch_cfg.get('database','stdf')}")
+    USE_CH = True
+except Exception as e:
+    print(f"ClickHouse unavailable ({e}), falling back to DuckDB")
+    ch = None
+    USE_CH = False
 
-for table in ["lots", "wafers", "parts", "test_data"]:
-    path = DATA_DIR / table
-    if path.exists():
-        con.execute(f"""
-            CREATE OR REPLACE VIEW {table} AS
-            SELECT * FROM read_parquet(
-                '{path}/**/*.parquet', hive_partitioning=true
-            )
-        """)
-        print(f"  ✓ {table}")
-    else:
-        print(f"  - {table}  (not found, skipping)")
+# ── DuckDB (fallback / Parquet直接アクセス) ───────────────────────────────
+if not USE_CH:
+    _storage = _cfg.get("storage", {})
+    DATA_DIR = Path(_storage.get("data_dir", "./data"))
+    print(f"Data dir: {DATA_DIR}")
 
-def q(sql: str, limit: int = 100) -> pd.DataFrame:
-    """SQL を実行して DataFrame を返す。limit=0 で全件取得。"""
+    con = duckdb.connect(":memory:")
+    for table in ["lots", "wafers", "parts", "test_data"]:
+        path = DATA_DIR / table
+        if path.exists():
+            con.execute(f"""
+                CREATE OR REPLACE VIEW {table} AS
+                SELECT * FROM read_parquet('{path}/**/*.parquet', hive_partitioning=true)
+            """)
+            print(f"  ✓ {table}")
+        else:
+            print(f"  - {table}  (not found)")
+else:
+    con = None
+
+def q(sql: str, limit: int = 100, parameters: dict | None = None) -> pd.DataFrame:
+    """SQL を実行して DataFrame を返す。limit=0 で全件取得。
+
+    ClickHouse パラメータ例:
+        q("SELECT * FROM lots WHERE lot_id = {lot_id:String}",
+          parameters={"lot_id": "E6A773.00"})
+    """
     if limit > 0 and "LIMIT" not in sql.upper():
         sql = sql.rstrip("; \n") + f"\nLIMIT {limit}"
+    if USE_CH:
+        return ch.query_df(sql, parameters=parameters or {})
     return con.execute(sql).fetchdf()
 
-print("\nReady.  con.execute(sql) または q(sql) で実行できます。")
+print("\nReady.  q(sql) で実行。ClickHouse の場合は {name:Type} パラメータ使用可。")
 
 
 # %% ロット一覧

@@ -53,7 +53,7 @@ def main():
     storage = ParquetStorage(storage_config)
 
     t1 = time.monotonic()
-    storage.save_stdf_data(
+    _counts, pa_tables = storage.save_stdf_data(
         data,
         product=product,
         test_category=test_category,
@@ -62,7 +62,27 @@ def main():
         compression=compression,
     )
     t_save = time.monotonic() - t1
-    print(f"[worker] saved ({t_save:.1f}s)", file=sys.stderr)
+    print(f"[worker] saved parquet ({t_save:.1f}s)", file=sys.stderr)
+
+    # Optional: write to ClickHouse (requires STDF_CH_HOST env var)
+    ch_host = sys.argv[5] if len(sys.argv) > 5 else ""
+    if ch_host:
+        import os
+        from .ch_writer import get_client, write_tables
+        t2 = time.monotonic()
+        try:
+            ch = get_client(
+                host=ch_host,
+                port=int(os.environ.get("STDF_CH_PORT", "8123")),
+                database=os.environ.get("STDF_CH_DB", "stdf"),
+                username=os.environ.get("STDF_CH_USER", "default"),
+                password=os.environ.get("STDF_CH_PASS", ""),
+            )
+            inserted = write_tables(ch, pa_tables)
+            t_ch = time.monotonic() - t2
+            print(f"[worker] clickhouse insert {inserted} ({t_ch:.1f}s)", file=sys.stderr)
+        except Exception as e:
+            print(f"[worker] clickhouse insert failed (parquet OK): {e}", file=sys.stderr)
 
     # Output result as JSON for parent process
     json.dump({

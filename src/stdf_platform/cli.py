@@ -408,12 +408,15 @@ def _run_ingest_batch(
     """
     from .worker import run_ingest_pool
 
+    ch_host = config.clickhouse.host if config.clickhouse.enabled else ""
+
     successes, failures = run_ingest_pool(
         files=to_ingest,
         data_dir=config.storage.data_dir,
         compression=config.processing.compression,
         max_workers=max_workers,
         timeout=timeout,
+        ch_host=ch_host,
     )
 
     for result in successes:
@@ -767,6 +770,11 @@ def web(ctx, port: int, host: str):
     config: Config = ctx.obj["config"]
     os.environ["STDF_DATA_DIR"] = str(config.storage.data_dir)
     os.environ["STDF_DB_PATH"] = str(config.storage.database)
+    os.environ["STDF_CH_HOST"] = config.clickhouse.host
+    os.environ["STDF_CH_PORT"] = str(config.clickhouse.http_port)
+    os.environ["STDF_CH_DB"] = config.clickhouse.database
+    os.environ["STDF_CH_USER"] = config.clickhouse.username
+    os.environ["STDF_CH_PASS"] = config.clickhouse.password
 
     console.print(f"\n[bold]stdf2pq - Web UI[/bold]")
     console.print(f"  URL:  [link]http://{host}:{port}[/link]")

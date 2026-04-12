@@ -29,3 +29,11 @@ storage:
 processing:
   batch_size: 1000
   compression: "gzip"  # snappy より遅いが互換性が高い
+
+# ClickHouse (docker compose up -d で起動)
+clickhouse:
+  host: "localhost"
+  http_port: 8123
+  database: "stdf"
+  username: "default"
+  password: ""

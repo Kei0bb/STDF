@@ -217,7 +217,7 @@ class ParquetStorage:
         sub_process: str = "",
         source_file: str = "",
         compression: str = "snappy",
-    ) -> dict[str, int]:
+    ) -> tuple[dict[str, int], dict[str, "pa.Table"]]:
         """
         Save STDF data to Parquet files.
 
@@ -230,9 +230,12 @@ class ParquetStorage:
             compression: Parquet compression method
 
         Returns:
-            Dictionary with counts of records saved per table
+            Tuple of (counts, pa_tables) where:
+              counts: {table_name: row_count}
+              pa_tables: {table_name: pa.Table} — for downstream CH insert
         """
         counts = {}
+        pa_tables: dict[str, pa.Table] = {}
 
         # Extract test_rev from filename
         test_rev = extract_test_rev_from_filename(source_file)
@@ -257,6 +260,7 @@ class ParquetStorage:
         }, schema=LOTS_SCHEMA)
         self._write_parquet(lot_table, lot_path / "data.parquet", compression)
         counts["lots"] = 1
+        pa_tables["lots"] = lot_table
 
         # Save wafers with retest tracking
         if data.wafers:
@@ -294,6 +298,12 @@ class ParquetStorage:
                 self._write_parquet(wafer_table, wafer_path / "data.parquet", compression)
 
             counts["wafers"] = len(data.wafers)
+            # Collect all wafer tables for CH (concat across wafer groups)
+            if "wafers" not in pa_tables:
+                pa_tables["wafers"] = wafer_table
+            else:
+                import pyarrow as _pa
+                pa_tables["wafers"] = _pa.concat_tables([pa_tables["wafers"], wafer_table])
 
         # Save parts (partitioned by lot_id, wafer_id)
         if data.parts:
@@ -325,6 +335,11 @@ class ParquetStorage:
                 self._write_parquet(part_table, part_path / "data.parquet", compression)
 
             counts["parts"] = len(data.parts)
+            if "parts" not in pa_tables:
+                pa_tables["parts"] = part_table
+            else:
+                import pyarrow as _pa
+                pa_tables["parts"] = _pa.concat_tables([pa_tables["parts"], part_table])
 
         # Save unified test data (merged tests + test_results)
         if data.test_results:
@@ -391,8 +406,13 @@ class ParquetStorage:
                 self._write_parquet(result_table, result_path / "data.parquet", compression)
 
             counts["test_data"] = len(data.test_results)
+            if "test_data" not in pa_tables:
+                pa_tables["test_data"] = result_table
+            else:
+                import pyarrow as _pa
+                pa_tables["test_data"] = _pa.concat_tables([pa_tables["test_data"], result_table])
 
-        return counts
+        return counts, pa_tables
 
     def get_lots(self) -> list[str]:
         """Get list of lot IDs in storage."""

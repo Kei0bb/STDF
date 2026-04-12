@@ -3,56 +3,51 @@
 import io
 from typing import Annotated, Literal
 
-import duckdb
+import pandas as pd
+from clickhouse_connect.driver import Client
 from fastapi import APIRouter, Depends
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from .deps import get_db
+from .deps import get_ch
 
 router = APIRouter(tags=["export"])
-DB = Annotated[duckdb.DuckDBPyConnection, Depends(get_db)]
+CH = Annotated[Client, Depends(get_ch)]
 
 
 class ExportRequest(BaseModel):
     lots: list[str]
-    wafers: list[str] | None = None       # None = all wafers
-    test_nums: list[int] | None = None    # None = all tests
+    wafers: list[str] | None = None
+    test_nums: list[int] | None = None
     format: Literal["pivot", "long"] = "pivot"
     filename: str = "stdf_export.csv"
 
 
-def _build_where(
+def _build_params(
     lots: list[str],
     wafers: list[str] | None,
     test_nums: list[int] | None,
-) -> tuple[str, list]:
-    params: list = []
-    conds: list[str] = []
-
-    lot_ph = ", ".join("?" * len(lots))
-    conds.append(f"td.lot_id IN ({lot_ph})")
-    params.extend(lots)
+) -> tuple[str, dict]:
+    """Return (WHERE clause, parameters dict) for ClickHouse query."""
+    conds: list[str] = ["td.lot_id IN {lot_ids:Array(String)}"]
+    params: dict = {"lot_ids": lots}
 
     if wafers:
-        w_ph = ", ".join("?" * len(wafers))
-        conds.append(f"td.wafer_id IN ({w_ph})")
-        params.extend(wafers)
+        conds.append("td.wafer_id IN {wafer_ids:Array(String)}")
+        params["wafer_ids"] = wafers
 
     if test_nums:
-        t_ph = ", ".join("?" * len(test_nums))
-        conds.append(f"td.test_num IN ({t_ph})")
-        params.extend(test_nums)
+        conds.append("td.test_num IN {test_nums:Array(Int32)}")
+        params["test_nums"] = test_nums
 
     return " AND ".join(conds), params
 
 
 @router.post("/export/csv")
-def export_csv(req: ExportRequest, db: DB) -> StreamingResponse:
-    where, params = _build_where(req.lots, req.wafers, req.test_nums)
+def export_csv(req: ExportRequest, ch: CH) -> StreamingResponse:
+    where, params = _build_params(req.lots, req.wafers, req.test_nums)
 
     if req.format == "pivot":
-        # Fetch long format; pandas pivot_table handles the wide transform below
         sql = f"""
             SELECT
                 td.lot_id, td.wafer_id, td.part_id,
@@ -66,6 +61,13 @@ def export_csv(req: ExportRequest, db: DB) -> StreamingResponse:
             WHERE {where}
             ORDER BY td.lot_id, td.wafer_id, td.part_id, td.test_name
         """
+        df = ch.query_df(sql, parameters=params)
+        index_cols = ["lot_id", "wafer_id", "part_id", "x_coord", "y_coord",
+                      "hard_bin", "soft_bin", "part_passed"]
+        df = df.pivot_table(index=index_cols, columns="test_name",
+                            values="result", aggfunc="first")
+        df.columns.name = None
+        df = df.reset_index()
     else:
         sql = f"""
             SELECT
@@ -80,19 +82,7 @@ def export_csv(req: ExportRequest, db: DB) -> StreamingResponse:
             WHERE {where}
             ORDER BY td.lot_id, td.wafer_id, td.part_id, td.test_num
         """
-
-    if req.format == "pivot":
-        # DuckDB dynamic PIVOT doesn't support parameters — fetch long format
-        # then pivot with pandas (already a dependency)
-        df = db.execute(sql, params).fetchdf()
-        index_cols = ["lot_id", "wafer_id", "part_id", "x_coord", "y_coord",
-                      "hard_bin", "soft_bin", "part_passed"]
-        df = df.pivot_table(index=index_cols, columns="test_name",
-                            values="result", aggfunc="first")
-        df.columns.name = None
-        df = df.reset_index()
-    else:
-        df = db.execute(sql, params).fetchdf()
+        df = ch.query_df(sql, parameters=params)
 
     buf = io.StringIO()
     df.to_csv(buf, index=False)
@@ -110,25 +100,23 @@ def export_csv(req: ExportRequest, db: DB) -> StreamingResponse:
 
 
 @router.post("/export/preview")
-def export_preview(req: ExportRequest, db: DB) -> dict:
-    """Return row/column count estimate without generating the full CSV."""
-    where, params = _build_where(req.lots, req.wafers, req.test_nums)
+def export_preview(req: ExportRequest, ch: CH) -> dict:
+    where, params = _build_params(req.lots, req.wafers, req.test_nums)
     try:
-        row = db.execute(f"""
+        row = ch.query(f"""
             SELECT
-                COUNT(DISTINCT td.part_id) AS parts,
-                COUNT(DISTINCT td.test_num) AS tests,
-                COUNT(*) AS total_rows
+                countDistinct(td.part_id) AS parts,
+                countDistinct(td.test_num) AS tests,
+                count() AS total_rows
             FROM test_data td
             WHERE {where}
-        """, params).fetchone()
+        """, parameters=params).first_row
         parts, tests, total = row or (0, 0, 0)
-        pivot_rows = parts if parts else 0
         return {
             "parts": int(parts or 0),
             "tests": int(tests or 0),
             "long_rows": int(total or 0),
-            "pivot_rows": int(pivot_rows),
+            "pivot_rows": int(parts or 0),
         }
     except Exception:
         return {"parts": 0, "tests": 0, "long_rows": 0, "pivot_rows": 0}
