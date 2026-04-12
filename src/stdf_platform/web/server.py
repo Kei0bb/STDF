@@ -20,7 +20,11 @@ async def lifespan(app: FastAPI):
     """Create DuckDB singleton connection at startup; close at shutdown."""
     data_dir = get_data_dir()
     con = duckdb.connect(":memory:")
-    registered = setup_views(con, data_dir)
+    try:
+        registered = setup_views(con, data_dir)
+    except Exception:
+        con.close()
+        raise
     app.state.db = con
     app.state.db_lock = Lock()
     if registered:
