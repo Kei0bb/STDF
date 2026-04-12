@@ -3,7 +3,6 @@
 import os
 from pathlib import Path
 from threading import Lock
-from typing import Generator
 
 import duckdb
 from fastapi import Request
