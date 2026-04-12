@@ -416,7 +416,6 @@ def _run_ingest_batch(
         compression=config.processing.compression,
         max_workers=max_workers,
         timeout=timeout,
-        ch_host=ch_host,
     )
 
     for result in successes:

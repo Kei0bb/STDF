@@ -53,7 +53,7 @@ def main():
     storage = ParquetStorage(storage_config)
 
     t1 = time.monotonic()
-    counts = storage.save_stdf_data(
+    _ = storage.save_stdf_data(
         data,
         product=product,
         test_category=test_category,

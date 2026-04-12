@@ -43,7 +43,6 @@ def _run_single(
     compression: str,
     timeout: int,
     log_path: Optional[Path],
-    ch_host: str = "",
 ) -> IngestResult:
     """Run one ingest worker subprocess. Called from a thread pool worker.
 
@@ -57,7 +56,6 @@ def _run_single(
         product,
         str(data_dir),
         compression,
-        ch_host,   # argv[5]: passed to worker for optional CH write
     ]
 
     try:
@@ -119,7 +117,6 @@ def run_ingest_pool(
     compression: str,
     max_workers: int = 4,
     timeout: int = 300,
-    ch_host: str = "",
 ) -> tuple[list[IngestResult], list[IngestResult]]:
     """Ingest files concurrently using a subprocess worker pool.
 
@@ -152,7 +149,7 @@ def run_ingest_pool(
             future_map = {
                 executor.submit(
                     _run_single,
-                    local_path, product, data_dir, compression, timeout, log_path, ch_host,
+                    local_path, product, data_dir, compression, timeout, log_path,
                 ): (remote_path, local_path, product)
                 for remote_path, local_path, product, _ttype in files
             }
