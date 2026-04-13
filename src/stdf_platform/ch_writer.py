@@ -60,7 +60,10 @@ def write_tables(client: Client, pa_tables: dict[str, pa.Table]) -> dict[str, in
 
     Args:
         client: ClickHouse client
-        pa_tables: {table_name: pa.Table} from storage.save_stdf_data()
+        pa_tables: {table_name: pa.Table} — NOTE: storage.save_stdf_data() no
+            longer returns pa_tables (returns dict[str, int] since DuckDB
+            migration). Callers must collect pa.Table objects separately before
+            passing them here.
 
     Returns:
         {table_name: rows_inserted}

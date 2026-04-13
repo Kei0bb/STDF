@@ -1,10 +1,13 @@
 """Filter option endpoints — products, lots, wafers."""
 
+import logging
 from threading import Lock
 from typing import Annotated
 
 import duckdb
 from fastapi import APIRouter, Depends, Query
+
+logger = logging.getLogger(__name__)
 
 from .deps import get_db
 
@@ -21,7 +24,8 @@ def get_products(db_tuple: DB) -> list[str]:
                 "SELECT DISTINCT product FROM lots WHERE product != '' ORDER BY product"
             ).fetchall()
         return [r[0] for r in rows]
-    except Exception:
+    except Exception as e:
+        logger.warning("get_products failed: %s", e)
         return []
 
 
@@ -34,7 +38,8 @@ def get_test_categories(db_tuple: DB) -> list[str]:
                 "SELECT DISTINCT test_category FROM lots WHERE test_category != '' ORDER BY test_category"
             ).fetchall()
         return [r[0] for r in rows]
-    except Exception:
+    except Exception as e:
+        logger.warning("get_test_categories failed: %s", e)
         return []
 
 
@@ -59,10 +64,11 @@ def get_lots(
         with lock:
             rows = db.execute(
                 f"SELECT DISTINCT lot_id FROM lots {where} ORDER BY lot_id",
-                params if params else None,
+                params,
             ).fetchall()
         return [r[0] for r in rows]
-    except Exception:
+    except Exception as e:
+        logger.warning("get_lots failed: %s", e)
         return []
 
 
@@ -86,5 +92,6 @@ def get_wafers(
             ).fetchall()
         ids = [r[0] for r in rows]
         return {"wafer_ids": ids, "has_wafers": len(ids) > 0}
-    except Exception:
+    except Exception as e:
+        logger.warning("get_wafers failed: %s", e)
         return {"wafer_ids": [], "has_wafers": False}

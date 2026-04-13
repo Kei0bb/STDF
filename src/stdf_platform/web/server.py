@@ -26,11 +26,14 @@ async def lifespan(app: FastAPI):
         con.close()
         raise
     app.state.db = con
+    # threading.Lock (not asyncio.Lock) — sync route handlers run in
+    # ThreadPoolExecutor, so asyncio.Lock cannot be acquired from them.
     app.state.db_lock = Lock()
     if registered:
+        print(f"[server] data_dir: {data_dir.resolve()}")
         print(f"[server] DuckDB views registered: {', '.join(registered)}")
     else:
-        print(f"[server] Warning: no Parquet data found in {data_dir}")
+        print(f"[server] Warning: no Parquet data found in {data_dir.resolve()}")
     yield
     con.close()
 

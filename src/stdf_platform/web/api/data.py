@@ -1,5 +1,6 @@
 """Chart data endpoints."""
 
+import logging
 from threading import Lock
 from typing import Annotated
 
@@ -7,6 +8,8 @@ import duckdb
 from fastapi import APIRouter, Depends, Query
 
 from .deps import get_db
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["data"])
 DB = Annotated[tuple[duckdb.DuckDBPyConnection, Lock], Depends(get_db)]
@@ -41,7 +44,8 @@ def get_summary(db_tuple: DB, lot: Annotated[list[str], Query()] = []) -> list[d
                 ORDER BY l.product, l.test_category, l.lot_id
             """, list(lot)).fetchdf()
         return rows.to_dict(orient="records")
-    except Exception:
+    except Exception as e:
+        logger.warning("%s failed: %s", __name__, e)
         return []
 
 
@@ -66,7 +70,8 @@ def get_wafer_yield(db_tuple: DB, lot: str = "") -> list[dict]:
                 ORDER BY wafer_id
             """, [lot]).fetchdf()
         return rows.to_dict(orient="records")
-    except Exception:
+    except Exception as e:
+        logger.warning("%s failed: %s", __name__, e)
         return []
 
 
@@ -84,7 +89,8 @@ def get_wafermap(db_tuple: DB, lot: str = "", wafer: str = "") -> list[dict]:
                 ORDER BY part_id
             """, [lot, wafer]).fetchdf()
         return rows.to_dict(orient="records")
-    except Exception:
+    except Exception as e:
+        logger.warning("%s failed: %s", __name__, e)
         return []
 
 
@@ -103,7 +109,8 @@ def get_tests(db_tuple: DB, lot: Annotated[list[str], Query()] = []) -> list[dic
                 ORDER BY test_num
             """, list(lot)).fetchdf()
         return rows.to_dict(orient="records")
-    except Exception:
+    except Exception as e:
+        logger.warning("%s failed: %s", __name__, e)
         return []
 
 
@@ -135,7 +142,8 @@ def get_fails(
                 LIMIT ?
             """, list(lot) + [top_n]).fetchdf()
         return rows.to_dict(orient="records")
-    except Exception:
+    except Exception as e:
+        logger.warning("%s failed: %s", __name__, e)
         return []
 
 
@@ -177,5 +185,6 @@ def get_distribution(
             "hi_limit": meta[3],
             "values": [r[0] for r in vals],
         }
-    except Exception:
+    except Exception as e:
+        logger.warning("%s failed: %s", __name__, e)
         return {}

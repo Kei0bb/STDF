@@ -1,14 +1,17 @@
 """CSV export endpoint."""
 
 import io
+import logging
 from threading import Lock
 from typing import Annotated, Literal
 
 import duckdb
 import pandas as pd
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
+
+logger = logging.getLogger(__name__)
 
 from .deps import get_db
 
@@ -51,59 +54,62 @@ def _build_where(
 def export_csv(req: ExportRequest, db_tuple: DB) -> StreamingResponse:
     db, lock = db_tuple
     where, params = _build_where(req.lots, req.wafers, req.test_nums)
+    try:
+        if req.format == "pivot":
+            sql = f"""
+                SELECT
+                    td.lot_id, td.wafer_id, td.part_id,
+                    td.x_coord, td.y_coord,
+                    p.hard_bin, p.soft_bin,
+                    p.passed AS part_passed,
+                    td.test_name,
+                    td.result
+                FROM test_data td
+                JOIN parts p ON td.part_id = p.part_id AND td.lot_id = p.lot_id
+                WHERE {where}
+                ORDER BY td.lot_id, td.wafer_id, td.part_id, td.test_name
+            """
+            with lock:
+                df = db.execute(sql, params).fetchdf()
+            index_cols = ["lot_id", "wafer_id", "part_id", "x_coord", "y_coord",
+                          "hard_bin", "soft_bin", "part_passed"]
+            df = df.pivot_table(index=index_cols, columns="test_name",
+                                values="result", aggfunc="first")
+            df.columns.name = None
+            df = df.reset_index()
+        else:
+            sql = f"""
+                SELECT
+                    td.lot_id, td.wafer_id, td.part_id,
+                    td.x_coord, td.y_coord,
+                    p.hard_bin, p.soft_bin,
+                    td.test_num, td.test_name,
+                    td.result, td.passed,
+                    td.lo_limit, td.hi_limit, td.units
+                FROM test_data td
+                JOIN parts p ON td.part_id = p.part_id AND td.lot_id = p.lot_id
+                WHERE {where}
+                ORDER BY td.lot_id, td.wafer_id, td.part_id, td.test_num
+            """
+            with lock:
+                df = db.execute(sql, params).fetchdf()
 
-    if req.format == "pivot":
-        sql = f"""
-            SELECT
-                td.lot_id, td.wafer_id, td.part_id,
-                td.x_coord, td.y_coord,
-                p.hard_bin, p.soft_bin,
-                p.passed AS part_passed,
-                td.test_name,
-                td.result
-            FROM test_data td
-            JOIN parts p ON td.part_id = p.part_id AND td.lot_id = p.lot_id
-            WHERE {where}
-            ORDER BY td.lot_id, td.wafer_id, td.part_id, td.test_name
-        """
-        with lock:
-            df = db.execute(sql, params).fetchdf()
-        index_cols = ["lot_id", "wafer_id", "part_id", "x_coord", "y_coord",
-                      "hard_bin", "soft_bin", "part_passed"]
-        df = df.pivot_table(index=index_cols, columns="test_name",
-                            values="result", aggfunc="first")
-        df.columns.name = None
-        df = df.reset_index()
-    else:
-        sql = f"""
-            SELECT
-                td.lot_id, td.wafer_id, td.part_id,
-                td.x_coord, td.y_coord,
-                p.hard_bin, p.soft_bin,
-                td.test_num, td.test_name,
-                td.result, td.passed,
-                td.lo_limit, td.hi_limit, td.units
-            FROM test_data td
-            JOIN parts p ON td.part_id = p.part_id AND td.lot_id = p.lot_id
-            WHERE {where}
-            ORDER BY td.lot_id, td.wafer_id, td.part_id, td.test_num
-        """
-        with lock:
-            df = db.execute(sql, params).fetchdf()
+        buf = io.StringIO()
+        df.to_csv(buf, index=False)
+        csv_bytes = buf.getvalue().encode("utf-8")
 
-    buf = io.StringIO()
-    df.to_csv(buf, index=False)
-    csv_bytes = buf.getvalue().encode("utf-8")
-
-    return StreamingResponse(
-        iter([csv_bytes]),
-        media_type="text/csv",
-        headers={
-            "Content-Disposition": f'attachment; filename="{req.filename}"',
-            "Content-Length": str(len(csv_bytes)),
-            "X-Row-Count": str(len(df)),
-        },
-    )
+        return StreamingResponse(
+            iter([csv_bytes]),
+            media_type="text/csv",
+            headers={
+                "Content-Disposition": f'attachment; filename="{req.filename}"',
+                "Content-Length": str(len(csv_bytes)),
+                "X-Row-Count": str(len(df)),
+            },
+        )
+    except Exception as e:
+        logger.error("export_csv failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.post("/export/preview")
@@ -127,5 +133,6 @@ def export_preview(req: ExportRequest, db_tuple: DB) -> dict:
             "long_rows": int(total or 0),
             "pivot_rows": int(parts or 0),
         }
-    except Exception:
+    except Exception as e:
+        logger.warning("export_preview failed: %s", e)
         return {"parts": 0, "tests": 0, "long_rows": 0, "pivot_rows": 0}
