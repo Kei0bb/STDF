@@ -63,6 +63,15 @@ ThreadPoolExecutor (max_workers=N)
 FastAPI 起動時に DuckDB `:memory:` 接続を1つ作成し、`threading.Lock` で並列リクエストを直列化。  
 glob ビュー (`read_parquet('data/**/*.parquet', hive_partitioning=true)`) はクエリのたびにファイルシステムをスキャンするため、**ingest 後にサーバーを再起動せずとも新データが即座に見える。**
 
+> **Note — `threading.Lock` を使う理由:** FastAPI の同期ルートハンドラは `asyncio` の `ThreadPoolExecutor` 上で動作するため、`asyncio.Lock` はスレッドから取得できない。将来 `async def` ハンドラに移行する場合は `asyncio.Lock` + `asyncio.to_thread()` パターンへの変更が必要。
+
+**起動ログ例:**
+```
+[server] data_dir: /home/user/stdf/data
+[server] DuckDB views registered: lots, wafers, parts, test_data
+```
+登録されたテーブル名が表示されない場合は `data_dir` のパスを確認してください。
+
 ---
 
 ## インストール
