@@ -206,6 +206,30 @@ stdf2pq fetch --no-ingest       # ダウンロードのみ
 stdf2pq fetch --reingest        # DL済み未 ingest を再試行（FTP接続なし）
 ```
 
+### 定期実行（Windows 11 — Task Scheduler）
+
+毎日朝 6:00 に `stdf2pq fetch` を自動実行するスクリプトを同梱しています。
+
+```cmd
+REM セットアップ（管理者権限で1回だけ実行）
+scripts\register_task.bat
+
+REM 動作テスト（即時実行）
+schtasks /Run /TN STDF_DailyFetch
+
+REM ログ確認
+type logs\fetch_*.log
+
+REM 登録解除
+scripts\unregister_task.bat
+```
+
+| ファイル | 役割 |
+|---------|------|
+| `scripts/daily_fetch.ps1` | メインスクリプト — `uv run stdf2pq fetch --verbose` 実行、`logs/fetch_YYYYMMDD_HHMMSS.log` に記録、30日超のログを自動削除 |
+| `scripts/register_task.bat` | Task Scheduler にタスク登録（毎日 06:00 トリガー） |
+| `scripts/unregister_task.bat` | タスク登録解除 |
+
 ---
 
 ## データ構造
