@@ -27,27 +27,73 @@ stdf2pq web   # → http://localhost:8000
 
 ## アーキテクチャ
 
+### 全体データフロー
+
 ```
-STDF ファイル
+FTP サーバー
+     ↓ ftp_client.py + sync_manager.py
+downloads/
+     ↓ worker.py (ThreadPoolExecutor)
+     ↓   ├── Thread 1 → subprocess(_ingest_worker) ─┐
+     ↓   ├── Thread 2 → subprocess(_ingest_worker) ─┤→ Parquet (Hive パーティション)
+     ↓   └── Thread N → subprocess(_ingest_worker) ─┘     data/{table}/product={P}/
+     ↓                    ↑                                 test_category={CP|FT}/
+     ↓               parser.py                              sub_process={CP11|FT2}/
+     ↓               storage.py                             lot_id={L}/
+     ↓                                                      data.parquet
      ↓
-parse_stdf()  ←  Pure Python (struct.Struct 最適化)
+DuckDB glob ビュー（起動時1回登録、クエリごとに fs スキャン）
      ↓
-Parquet (Hive パーティション)
-data/{table}/
-product={}/
-test_category={}/
-lot_id={}/
-data.parquet
-     ↓
-DuckDB glob ビュー（サーバー起動時に1回登録、ingest後は再起動不要）
-     ↓
-FastAPI endpoints → Web UI / CSV Export / query.py
+     ├── FastAPI Web UI  (http://localhost:8000)
+     ├── CSV エクスポート
+     └── query.py  (VS Code インタラクティブ)
 ```
+
+---
+
+### モジュール構成
+
+#### Ingest パイプライン
+
+| モジュール | 役割 |
+|---|---|
+| `cli.py` | Click CLI — `ingest` / `ingest-all` / `fetch` / `db` / `analyze` / `web` コマンド |
+| `worker.py` | `ThreadPoolExecutor` でファイルごとに subprocess を起動・タイムアウト管理 |
+| `_ingest_worker.py` | 独立 subprocess — 1ファイルを parse → Parquet 書き込みして JSON を stdout に出力 |
+| `parser.py` | Pure Python STDF V4 パーサー（`struct.Struct` 最適化、FAR/MIR/WIR/PIR/PRR/PTR/MPR/FTR対応） |
+| `storage.py` | PyArrow で Hive パーティション Parquet に書き込み、リテスト番号の自動採番 |
+| `ftp_client.py` | `ftplib` FTP 差分ダウンロード（`.stdf.gz` 自動展開） |
+| `sync_manager.py` | `sync_history.json` で FTP 取得済み・ingest 済みを追跡 |
+| `ingest_history.py` | `ingest_history.json` でローカル ingest 済みファイルを追跡（`ingest-all` の再開用） |
+
+> **Subprocess 分離の理由:** パーサーがクラッシュしても他のワーカーに影響しない。プロセスごとにメモリが解放されるため、1000+ ファイルのバッチ処理でもメモリリークが蓄積しない。
+
+#### ストレージ層
+
+| モジュール | 役割 |
+|---|---|
+| `storage.py` | Parquet Hive パーティション書き込み（4テーブル） |
+| `database.py` | CLI・`query.py` 用 DuckDB コンテキストマネージャー（`query()` / `query_df()` 等ヘルパー付き） |
+| `config.py` | `config.yaml` 読み込み（FTP / Storage / ClickHouse 設定、`${ENV_VAR}` 展開対応） |
+| `ch_writer.py` | ClickHouse 書き込み（オプション、Linux サーバー移行用に保持） |
+
+#### Web API 層
+
+| モジュール | 役割 |
+|---|---|
+| `web/server.py` | FastAPI app + lifespan（DuckDB シングルトン起動） |
+| `web/api/deps.py` | `get_db()` 依存関数、`setup_views()` でParquet glob ビュー登録 |
+| `web/api/filters.py` | `/api/products` `/api/lots` `/api/wafers` — UI フィルター用 |
+| `web/api/data.py` | `/api/summary` `/api/wafer-yield` `/api/wafermap` `/api/tests` `/api/fails` `/api/distribution` |
+| `web/api/export.py` | `/api/export/csv` (Pivot / Long 形式) `/api/export/preview` |
+| `web/static/` | Alpine.js + Tailwind CSS SPA（`app.js` + `plots.js` + Plotly.js） |
+
+---
 
 ### バッチ処理の仕組み
 
 ```
-100 ファイル
+N ファイル
      ↓
 ThreadPoolExecutor (max_workers=N)
 ├── Thread 1 → subprocess(_ingest_worker) → Parquet
@@ -57,13 +103,16 @@ ThreadPoolExecutor (max_workers=N)
 
 - 各 subprocess はメモリ分離（クラッシュしても他のワーカーに影響しない）
 - 成功済みファイルを `data/ingest_history.json` に記録 → 中断後の再実行で自動スキップ
+- タイムアウト超過時は SIGKILL → 次ファイルへ継続
+
+---
 
 ### Web API の DuckDB シングルトン
 
 FastAPI 起動時に DuckDB `:memory:` 接続を1つ作成し、`threading.Lock` で並列リクエストを直列化。  
 glob ビュー (`read_parquet('data/**/*.parquet', hive_partitioning=true)`) はクエリのたびにファイルシステムをスキャンするため、**ingest 後にサーバーを再起動せずとも新データが即座に見える。**
 
-> **Note — `threading.Lock` を使う理由:** FastAPI の同期ルートハンドラは `asyncio` の `ThreadPoolExecutor` 上で動作するため、`asyncio.Lock` はスレッドから取得できない。将来 `async def` ハンドラに移行する場合は `asyncio.Lock` + `asyncio.to_thread()` パターンへの変更が必要。
+> **`threading.Lock` を使う理由:** FastAPI の同期ルートハンドラは `asyncio` の `ThreadPoolExecutor` 上で動作するため、`asyncio.Lock` はスレッドから取得できない。将来 `async def` ハンドラに移行する場合は `asyncio.Lock` + `asyncio.to_thread()` パターンへの変更が必要。
 
 **起動ログ例:**
 ```
