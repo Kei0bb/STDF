@@ -5,8 +5,13 @@
 # Python Interactive Window (Jupyter 拡張) が必要です。
 #
 # **参考:** `docs/sample_queries.md` にクエリ集あり
+#
+# ## 主な関数
+# - `q(sql, limit=100)` — プレビュー用 DataFrame 返却（limit=0 で全件）
+# - `to_csv(sql, output, chunk_size)` — メモリ効率的な CSV 書き出し
 
 # %% Setup — DuckDB（デフォルト）または ClickHouse（config.yaml に host 設定時）
+import csv
 import duckdb
 import pandas as pd
 from pathlib import Path
@@ -62,16 +67,84 @@ if _ch_host:
     except Exception as e:
         print(f"ClickHouse unavailable ({e}), using DuckDB")
 
+
 def q(sql: str, limit: int = 100, parameters: dict | None = None) -> pd.DataFrame:
-    """SQL を実行して DataFrame を返す。limit=0 で全件取得。"""
+    """SQL を実行して DataFrame を返す（プレビュー用）。limit=0 で全件取得。
+
+    大量データの場合は to_csv() を使用してください。
+    """
     if limit > 0 and "LIMIT" not in sql.upper():
         sql = sql.rstrip("; \n") + f"\nLIMIT {limit}"
     if USE_CH:
         return ch.query_df(sql, parameters=parameters or {})
     return con.execute(sql).fetchdf()
 
+
+def to_csv(
+    sql: str,
+    output: str | Path = "output.csv",
+    chunk_size: int = 100_000,
+) -> None:
+    """SQL 結果を CSV ファイルに書き出す（メモリ効率版）。
+
+    DuckDB:
+        COPY TO 文でエンジンが直接ファイルに書く。
+        Python 側のメモリ消費はゼロ。大規模データに最適。
+
+    ClickHouse:
+        chunk_size 行ずつ LIMIT/OFFSET で分割取得し逐次追記。
+        Python メモリは常に chunk_size 行分のみ保持。
+
+    Args:
+        sql:        実行する SELECT 文
+        output:     出力先 CSV パス（デフォルト: output.csv）
+        chunk_size: ClickHouse 使用時の1チャンクあたりの行数
+    """
+    output = Path(output)
+    clean_sql = sql.rstrip("; \n")
+
+    if not USE_CH:
+        # DuckDB: COPY TO でゼロコピー書き出し
+        # COPY は完了時に書き出し行数を返す
+        result = con.execute(
+            f"COPY ({clean_sql}) TO '{output.as_posix()}' (HEADER, DELIMITER ',')"
+        )
+        rows = result.fetchone()[0]
+        print(f"Exported {rows:,} rows → {output}")
+        return
+
+    # ClickHouse: LIMIT/OFFSET チャンク分割で逐次追記
+    total = 0
+    first_chunk = True
+    offset = 0
+    while True:
+        chunk_sql = (
+            f"SELECT * FROM ({clean_sql}) AS _q "
+            f"LIMIT {chunk_size} OFFSET {offset}"
+        )
+        df = ch.query_df(chunk_sql)
+        if df.empty:
+            break
+
+        df.to_csv(
+            output,
+            mode="w" if first_chunk else "a",
+            header=first_chunk,
+            index=False,
+        )
+        total += len(df)
+        print(f"  writing... {total:,} rows", end="\r")
+
+        first_chunk = False
+        offset += chunk_size
+        if len(df) < chunk_size:
+            break  # 最終チャンク
+
+    print(f"Exported {total:,} rows → {output}        ")
+
+
 backend = "ClickHouse" if USE_CH else "DuckDB"
-print(f"\nReady ({backend}).  q(sql) で実行。")
+print(f"\nReady ({backend}).  q(sql) でプレビュー、to_csv(sql) で CSV 書き出し。")
 
 
 # %% ロット一覧
@@ -241,31 +314,38 @@ ORDER BY fail_count DESC
 """)
 
 
-# %% CSV 書き出し
-OUTPUT_PATH = Path("output.csv")
+# %% CSV 書き出し — メモリ効率版（to_csv を使用）
+# DuckDB: COPY TO で Python メモリ消費ゼロ
+# ClickHouse: 100,000 行チャンクで逐次書き出し
 
-df = q(f"""
-SELECT
-    p.lot_id, p.wafer_id, p.part_id,
-    p.x_coord, p.y_coord,
-    p.hard_bin, p.soft_bin, p.passed AS die_passed,
-    td.test_num, td.test_name,
-    td.result, td.lo_limit, td.hi_limit, td.units, td.passed AS test_passed
-FROM parts p
-JOIN test_data td
-    ON  p.lot_id   = td.lot_id
-    AND p.wafer_id = td.wafer_id
-    AND p.part_id  = td.part_id
-WHERE p.lot_id = '{LOT_ID}'
-ORDER BY p.wafer_id, p.part_id, td.test_num
-""", limit=0)  # limit=0 で全件取得
+to_csv(
+    f"""
+    SELECT
+        p.lot_id, p.wafer_id, p.part_id,
+        p.x_coord, p.y_coord,
+        p.hard_bin, p.soft_bin, p.passed AS die_passed,
+        td.test_num, td.test_name,
+        td.result, td.lo_limit, td.hi_limit, td.units, td.passed AS test_passed
+    FROM parts p
+    JOIN test_data td
+        ON  p.lot_id   = td.lot_id
+        AND p.wafer_id = td.wafer_id
+        AND p.part_id  = td.part_id
+    WHERE p.lot_id = '{LOT_ID}'
+    ORDER BY p.wafer_id, p.part_id, td.test_num
+    """,
+    output="output.csv",
+)
 
-df.to_csv(OUTPUT_PATH, index=False)
-print(f"Exported {len(df):,} rows → {OUTPUT_PATH}")
-df.head()
 
+# %% 任意 SQL → CSV（ここを書き換えて使用）
+# 例: 複数ロットの全テストデータを出力
+# to_csv("""
+#     SELECT * FROM test_data
+#     WHERE lot_id IN ('LOT001', 'LOT002')
+# """, output="test_data_export.csv")
 
-# %% 自由クエリ（ここに SQL を書いて実行）
+# 例: プレビューのみ（メモリに全件ロード — 小規模クエリ向け）
 q("""
 SELECT 1 AS hello
 """)
