@@ -13,3 +13,4 @@ test_data/
 *.jpg
 .DS_Store
 logs/
+*.csv
