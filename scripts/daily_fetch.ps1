@@ -13,7 +13,10 @@
 #>
 
 Set-StrictMode -Version Latest
-$ErrorActionPreference = "Stop"
+# NOTE: Keep "Continue" here — "Stop" would promote Python's stderr lines into
+# terminating PowerShell exceptions, cutting off the traceback after line 1.
+# External-process failures are detected via $LASTEXITCODE instead.
+$ErrorActionPreference = "Continue"
 
 # Resolve project root from this script's location (scripts/../)
 $ProjectRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
