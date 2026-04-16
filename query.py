@@ -10,8 +10,7 @@
 # - `q(sql, limit=100)` — プレビュー用 DataFrame 返却（limit=0 で全件）
 # - `to_csv(sql, output, chunk_size)` — メモリ効率的な CSV 書き出し
 
-# %% Setup — DuckDB（デフォルト）または ClickHouse（config.yaml に host 設定時）
-import csv
+# %% Setup — DuckDB
 import duckdb
 import pandas as pd
 from pathlib import Path
@@ -27,8 +26,6 @@ def _load_config() -> dict:
     return {}
 
 _cfg = _load_config()
-
-# ── DuckDB (primary) ──────────────────────────────────────────────────────────
 _storage = _cfg.get("storage", {})
 DATA_DIR = Path(_storage.get("data_dir", "./data"))
 print(f"Data dir: {DATA_DIR}")
@@ -44,107 +41,37 @@ for table in ["lots", "wafers", "parts", "test_data"]:
         print(f"  ✓ {table}")
     else:
         print(f"  - {table}  (not found)")
-USE_CH = False
-ch = None
 
-# ── ClickHouse (optional — set clickhouse.host in config.yaml to enable) ───────
-_ch_cfg = _cfg.get("clickhouse", {})
-_ch_host = _ch_cfg.get("host", "")
-if _ch_host:
-    try:
-        import clickhouse_connect
-        ch = clickhouse_connect.get_client(
-            host=_ch_host,
-            port=_ch_cfg.get("http_port", 8123),
-            database=_ch_cfg.get("database", "stdf"),
-            username=_ch_cfg.get("username", "default"),
-            password=_ch_cfg.get("password", ""),
-            connect_timeout=5,
-        )
-        ch.ping()
-        print(f"✓ ClickHouse connected: {_ch_host}")
-        USE_CH = True
-    except Exception as e:
-        print(f"ClickHouse unavailable ({e}), using DuckDB")
+print("\nReady (DuckDB).  q(sql) でプレビュー、to_csv(sql) で CSV 書き出し。")
 
 
-def q(sql: str, limit: int = 100, parameters: dict | None = None) -> pd.DataFrame:
+def q(sql: str, limit: int = 100) -> pd.DataFrame:
     """SQL を実行して DataFrame を返す（プレビュー用）。limit=0 で全件取得。
 
     大量データの場合は to_csv() を使用してください。
     """
     if limit > 0 and "LIMIT" not in sql.upper():
         sql = sql.rstrip("; \n") + f"\nLIMIT {limit}"
-    if USE_CH:
-        return ch.query_df(sql, parameters=parameters or {})
     return con.execute(sql).fetchdf()
 
 
-def to_csv(
-    sql: str,
-    output: str | Path = "output.csv",
-    chunk_size: int = 100_000,
-) -> None:
+def to_csv(sql: str, output: str | Path = "output.csv") -> None:
     """SQL 結果を CSV ファイルに書き出す（メモリ効率版）。
 
-    DuckDB:
-        COPY TO 文でエンジンが直接ファイルに書く。
-        Python 側のメモリ消費はゼロ。大規模データに最適。
-
-    ClickHouse:
-        chunk_size 行ずつ LIMIT/OFFSET で分割取得し逐次追記。
-        Python メモリは常に chunk_size 行分のみ保持。
+    DuckDB COPY TO 文でエンジンが直接ファイルに書く。
+    Python 側のメモリ消費はゼロ。大規模データに最適。
 
     Args:
-        sql:        実行する SELECT 文
-        output:     出力先 CSV パス（デフォルト: output.csv）
-        chunk_size: ClickHouse 使用時の1チャンクあたりの行数
+        sql:    実行する SELECT 文
+        output: 出力先 CSV パス（デフォルト: output.csv）
     """
     output = Path(output)
     clean_sql = sql.rstrip("; \n")
-
-    if not USE_CH:
-        # DuckDB: COPY TO でゼロコピー書き出し
-        # COPY は完了時に書き出し行数を返す
-        result = con.execute(
-            f"COPY ({clean_sql}) TO '{output.as_posix()}' (HEADER, DELIMITER ',')"
-        )
-        rows = result.fetchone()[0]
-        print(f"Exported {rows:,} rows → {output}")
-        return
-
-    # ClickHouse: LIMIT/OFFSET チャンク分割で逐次追記
-    total = 0
-    first_chunk = True
-    offset = 0
-    while True:
-        chunk_sql = (
-            f"SELECT * FROM ({clean_sql}) AS _q "
-            f"LIMIT {chunk_size} OFFSET {offset}"
-        )
-        df = ch.query_df(chunk_sql)
-        if df.empty:
-            break
-
-        df.to_csv(
-            output,
-            mode="w" if first_chunk else "a",
-            header=first_chunk,
-            index=False,
-        )
-        total += len(df)
-        print(f"  writing... {total:,} rows", end="\r")
-
-        first_chunk = False
-        offset += chunk_size
-        if len(df) < chunk_size:
-            break  # 最終チャンク
-
-    print(f"Exported {total:,} rows → {output}        ")
-
-
-backend = "ClickHouse" if USE_CH else "DuckDB"
-print(f"\nReady ({backend}).  q(sql) でプレビュー、to_csv(sql) で CSV 書き出し。")
+    result = con.execute(
+        f"COPY ({clean_sql}) TO '{output.as_posix()}' (HEADER, DELIMITER ',')"
+    )
+    rows = result.fetchone()[0]
+    print(f"Exported {rows:,} rows → {output}")
 
 
 # %% ロット一覧
@@ -315,8 +242,7 @@ ORDER BY fail_count DESC
 
 
 # %% CSV 書き出し — メモリ効率版（to_csv を使用）
-# DuckDB: COPY TO で Python メモリ消費ゼロ
-# ClickHouse: 100,000 行チャンクで逐次書き出し
+# DuckDB COPY TO で Python メモリ消費ゼロ
 
 to_csv(
     f"""

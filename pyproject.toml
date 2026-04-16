@@ -19,9 +19,6 @@ dependencies = [
 postgres = [
     "psycopg2-binary>=2.9.0",
 ]
-clickhouse = [
-    "clickhouse-connect>=0.7.0",
-]
 
 [project.scripts]
 stdf2pq = "stdf_platform.cli:main"

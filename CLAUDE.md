@@ -16,9 +16,9 @@ uv pip install "psycopg2-binary>=2.9.0"   # Optional: PostgreSQL sync
 
 ### Running
 ```bash
-docker compose up -d                       # Start ClickHouse (port 8123) + PostgreSQL
+docker compose up -d                       # Start PostgreSQL
 
-stdf2pq ingest <file> --product PROD       # Ingest single STDF file (Parquet + ClickHouse)
+stdf2pq ingest <file> --product PROD       # Ingest single STDF file (Parquet)
 stdf2pq ingest-all ./downloads -p PROD     # Batch ingest directory (parallel workers)
 stdf2pq fetch                              # FTP differential sync
 stdf2pq web                                # Web UI at http://localhost:8000
@@ -68,8 +68,8 @@ The `retest_num` is derived from partition depth, not stored in STDF — duplica
     - `api/deps.py` — per-request `:memory:` DuckDB connection
     - `static/` — Alpine.js SPA (index.html, app.js, plots.js)
 
-### Web UI ClickHouse Connection Pattern
-FastAPI server creates one shared `clickhouse_connect` client at startup (via `lifespan`), stored in `app.state.ch`. All API requests reuse this single client — thread-safe for concurrent reads. DuckDB `:memory:` is still available as a fallback for CLI tools (`stdf2pq db`) and `query.py`.
+### Web UI DuckDB Connection Pattern
+FastAPI server creates one shared DuckDB `:memory:` connection at startup (via `lifespan`). All API requests reuse this single connection — Parquet is the source of truth. CLI tools (`stdf2pq db`) and `query.py` also use DuckDB `:memory:`.
 
 ### Configuration
 `config.yaml` (not tracked; copy from `config.yaml.example`). Supports `${ENV_VAR}` expansion. The `--env dev` flag isolates data to `data-dev/` and skips sync history tracking.

@@ -74,8 +74,7 @@ DuckDB glob ビュー（起動時1回登録、クエリごとに fs スキャン
 |---|---|
 | `storage.py` | Parquet Hive パーティション書き込み（4テーブル） |
 | `database.py` | CLI・`query.py` 用 DuckDB コンテキストマネージャー（`query()` / `query_df()` 等ヘルパー付き） |
-| `config.py` | `config.yaml` 読み込み（FTP / Storage / ClickHouse 設定、`${ENV_VAR}` 展開対応） |
-| `ch_writer.py` | ClickHouse 書き込み（オプション、Linux サーバー移行用に保持） |
+| `config.py` | `config.yaml` 読み込み（FTP / Storage 設定、`${ENV_VAR}` 展開対応） |
 
 #### Web API 層
 
@@ -135,12 +134,6 @@ PostgreSQL を使う場合（オプション）:
 uv pip install "psycopg2-binary>=2.9.0"
 ```
 
-ClickHouse を使う場合（Linux サーバー移行時・オプション）:
-
-```bash
-uv pip install "stdf2pq[clickhouse]"
-```
-
 ---
 
 ## 使用方法
@@ -176,8 +169,7 @@ stdf2pq web   # http://localhost:8000
 ### SQL クエリ（VS Code）
 
 ```bash
-# VS Code で query.py を開いて Shift+Enter でセルを実行
-# DuckDB をデフォルト使用。config.yaml の clickhouse.host が非空の場合のみ CH を使用
+# VS Code で query.py を開いて Shift+Enter でセルを実行（DuckDB）
 ```
 
 ### CLI クエリ
@@ -293,33 +285,6 @@ docker compose up -d postgres
 | Database | `stdf` |
 | User | `stdf_reader` |
 | Password | `stdf_read_only` |
-
----
-
-## ClickHouse（将来のサーバー移行用・オプション）
-
-Linux サーバー環境で大規模運用する場合に使用。**POC では不要。**
-
-```bash
-# ClickHouse を有効化（Linux サーバー移行時）
-docker compose up -d --profile clickhouse
-uv pip install "stdf2pq[clickhouse]"
-
-# config.yaml の clickhouse.host を設定
-# clickhouse:
-#   host: localhost
-```
-
-デフォルト接続情報:
-
-| 項目 | 値 |
-|---|---|
-| Host | `localhost` |
-| HTTP Port | `8123` |
-| TCP Port | `9000` |
-| Database | `stdf` |
-| User | `default` |
-| Password | （空） |
 
 ---
 

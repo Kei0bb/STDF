@@ -29,11 +29,3 @@ storage:
 processing:
   batch_size: 1000
   compression: "gzip"  # snappy より遅いが互換性が高い
-
-# ClickHouse (オプション。Linuxサーバー運用時: host: "localhost" に変更し docker compose up -d clickhouse)
-clickhouse:
-  host: ""        # 空 = 無効（Parquet + DuckDB のみで動作）
-  http_port: 8123
-  database: "stdf"
-  username: "default"
-  password: ""
