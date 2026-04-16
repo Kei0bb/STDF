@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-`stdf2pq` is a high-speed ETL pipeline for semiconductor test data (STDF format) → Parquet + DuckDB + PostgreSQL. It supports CLI usage and a FastAPI + Alpine.js web UI. Python-only parser with ProcessPoolExecutor for parallel batch ingestion.
+`stdf` is a high-speed ETL pipeline for semiconductor test data (STDF format) → Parquet + DuckDB + PostgreSQL. It supports CLI usage and a FastAPI + Alpine.js web UI. Python-only parser with ProcessPoolExecutor for parallel batch ingestion.
 
 ## Commands
 
@@ -18,10 +18,10 @@ uv pip install "psycopg2-binary>=2.9.0"   # Optional: PostgreSQL sync
 ```bash
 docker compose up -d                       # Start PostgreSQL
 
-stdf2pq ingest <file> --product PROD       # Ingest single STDF file (Parquet)
-stdf2pq ingest-all ./downloads -p PROD     # Batch ingest directory (parallel workers)
-stdf2pq fetch                              # FTP differential sync
-stdf2pq web                                # Web UI at http://localhost:8000
+stdf ingest <file> --product PROD       # Ingest single STDF file (Parquet)
+stdf ingest-all ./downloads -p PROD     # Batch ingest directory (parallel workers)
+stdf fetch                              # FTP differential sync
+stdf web                                # Web UI at http://localhost:8000
 ```
 
 ### Generate test data
@@ -69,7 +69,7 @@ The `retest_num` is derived from partition depth, not stored in STDF — duplica
     - `static/` — Alpine.js SPA (index.html, app.js, plots.js)
 
 ### Web UI DuckDB Connection Pattern
-FastAPI server creates one shared DuckDB `:memory:` connection at startup (via `lifespan`). All API requests reuse this single connection — Parquet is the source of truth. CLI tools (`stdf2pq db`) and `query.py` also use DuckDB `:memory:`.
+FastAPI server creates one shared DuckDB `:memory:` connection at startup (via `lifespan`). All API requests reuse this single connection — Parquet is the source of truth. CLI tools (`stdf db`) and `query.py` also use DuckDB `:memory:`.
 
 ### Configuration
 `config.yaml` (not tracked; copy from `config.yaml.example`). Supports `${ENV_VAR}` expansion. The `--env dev` flag isolates data to `data-dev/` and skips sync history tracking.

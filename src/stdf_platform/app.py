@@ -1,4 +1,4 @@
-"""Streamlit Web UI for stdf2pq DB."""
+"""Streamlit Web UI for stdf DB."""
 
 import streamlit as st
 import pandas as pd
@@ -14,13 +14,13 @@ from stdf_platform.database import Database
 
 # Page configuration
 st.set_page_config(
-    page_title="stdf2pq DB",
+    page_title="stdf DB",
     page_icon="📊",
     layout="wide",
 )
 
 # Title
-st.title("📊 stdf2pq DB")
+st.title("📊 stdf DB")
 
 # Load config
 @st.cache_resource
@@ -96,7 +96,7 @@ test_categories = get_test_categories()
 
 if not products and not test_categories:
     st.warning("No data found. Please ingest STDF files first.")
-    st.code("stdf2pq ingest <file.stdf> --product ABC -s CP11")
+    st.code("stdf ingest <file.stdf> --product ABC -s CP11")
     st.stop()
 
 
@@ -482,4 +482,4 @@ if generate_btn:
 # Footer
 st.divider()
 from stdf_platform import __version__
-st.caption(f"stdf2pq DB v{__version__} | Product → Lot → Wafer (CP only) → Parameters → Export")
+st.caption(f"stdf DB v{__version__} | Product → Lot → Wafer (CP only) → Parameters → Export")

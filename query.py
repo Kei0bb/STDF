@@ -1,5 +1,5 @@
 # %% [markdown]
-# # stdf2pq — SQL Query Playground
+# # stdf — SQL Query Playground
 #
 # VS Code で開いて「Run Cell」または Shift+Enter で各セルを実行。
 # Python Interactive Window (Jupyter 拡張) が必要です。

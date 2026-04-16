@@ -19,10 +19,10 @@ LOT_ID = "E6A773.00"
 
 ```bash
 # DuckDB シェル（対話モード）
-stdf2pq db shell
+stdf db shell
 
 # 1 クエリを実行して表示
-stdf2pq db query "SELECT lot_id, product FROM lots ORDER BY start_time DESC LIMIT 10"
+stdf db query "SELECT lot_id, product FROM lots ORDER BY start_time DESC LIMIT 10"
 ```
 
 ### Python スクリプトから

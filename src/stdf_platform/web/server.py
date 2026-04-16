@@ -1,4 +1,4 @@
-"""FastAPI web server for stdf2pq."""
+"""FastAPI web server for stdf."""
 
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -38,7 +38,7 @@ async def lifespan(app: FastAPI):
     con.close()
 
 
-app = FastAPI(title="stdf2pq", version="2.0", docs_url="/api/docs", lifespan=lifespan)
+app = FastAPI(title="stdf", version="2.0", docs_url="/api/docs", lifespan=lifespan)
 
 app.include_router(filters_router, prefix="/api")
 app.include_router(data_router, prefix="/api")

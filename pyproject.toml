@@ -1,7 +1,7 @@
 [project]
 name = "stdf2pq"
 version = "0.2.0"
-description = "stdf2pq - STDF to Parquet converter and analysis DB"
+description = "stdf - STDF to Parquet converter and analysis DB"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
@@ -21,7 +21,7 @@ postgres = [
 ]
 
 [project.scripts]
-stdf2pq = "stdf_platform.cli:main"
+stdf = "stdf_platform.cli:main"
 
 [build-system]
 requires = ["hatchling"]

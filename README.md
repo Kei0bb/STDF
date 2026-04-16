@@ -1,4 +1,4 @@
-# stdf2pq
+# stdf
 
 半導体テストデータ（STDF V4）を **Parquet + DuckDB** に変換する高速 ETL パイプライン。  
 Pure Python パーサー × ThreadPoolExecutor による並列処理で、1000 ファイル以上のバッチ取り込みに対応。  
@@ -17,10 +17,10 @@ uv sync
 cp config.yaml.example config.yaml
 
 # 3. データ取り込み
-stdf2pq ingest-all ./downloads -p YOUR_PRODUCT
+stdf ingest-all ./downloads -p YOUR_PRODUCT
 
 # 4. Web UI 起動
-stdf2pq web   # → http://localhost:8000
+stdf web   # → http://localhost:8000
 ```
 
 ---
@@ -142,21 +142,21 @@ uv pip install "psycopg2-binary>=2.9.0"
 
 ```bash
 # 単ファイル
-stdf2pq ingest sample.stdf --product SCT101A
+stdf ingest sample.stdf --product SCT101A
 
 # パスから product 自動推定（.../SCT101A/CP/... 構造）
-stdf2pq ingest ./downloads/SCT101A/CP/lot001.stdf --from-path
+stdf ingest ./downloads/SCT101A/CP/lot001.stdf --from-path
 
 # ディレクトリ一括（推奨）— 中断後の再実行は自動で続きから
-stdf2pq ingest-all ./downloads -p SCT101A
-stdf2pq ingest-all ./downloads -p SCT101A --workers 8 --timeout 600
-stdf2pq ingest-all ./downloads -p SCT101A --force   # 全ファイル強制再取り込み
+stdf ingest-all ./downloads -p SCT101A
+stdf ingest-all ./downloads -p SCT101A --workers 8 --timeout 600
+stdf ingest-all ./downloads -p SCT101A --force   # 全ファイル強制再取り込み
 ```
 
 ### Web UI
 
 ```bash
-stdf2pq web   # http://localhost:8000
+stdf web   # http://localhost:8000
 ```
 
 | タブ | 機能 |
@@ -175,32 +175,32 @@ stdf2pq web   # http://localhost:8000
 ### CLI クエリ
 
 ```bash
-stdf2pq db lots                          # ロット一覧
-stdf2pq db query "SELECT * FROM wafers"  # SQL 直接実行
-stdf2pq db shell                         # DuckDB シェル
+stdf db lots                          # ロット一覧
+stdf db query "SELECT * FROM wafers"  # SQL 直接実行
+stdf db shell                         # DuckDB シェル
 ```
 
 ### 分析コマンド
 
 ```bash
-stdf2pq analyze yield LOT001       # Wafer 歩留まり
-stdf2pq analyze test-fail LOT001   # フェールテスト上位
-stdf2pq analyze bins LOT001        # Bin 分布
+stdf analyze yield LOT001       # Wafer 歩留まり
+stdf analyze test-fail LOT001   # フェールテスト上位
+stdf analyze bins LOT001        # Bin 分布
 ```
 
 ### FTP 差分同期
 
 ```bash
-stdf2pq fetch                   # config.yaml に従って差分取得
-stdf2pq fetch -p SCT101A        # 製品指定
-stdf2pq fetch --force           # 強制再ダウンロード
-stdf2pq fetch --no-ingest       # ダウンロードのみ
-stdf2pq fetch --reingest        # DL済み未 ingest を再試行（FTP接続なし）
+stdf fetch                   # config.yaml に従って差分取得
+stdf fetch -p SCT101A        # 製品指定
+stdf fetch --force           # 強制再ダウンロード
+stdf fetch --no-ingest       # ダウンロードのみ
+stdf fetch --reingest        # DL済み未 ingest を再試行（FTP接続なし）
 ```
 
 ### 定期実行（Windows 11 — Task Scheduler）
 
-毎日朝 6:00 に `stdf2pq fetch` を自動実行するスクリプトを同梱しています。
+毎日朝 6:00 に `stdf fetch` を自動実行するスクリプトを同梱しています。
 
 ```cmd
 REM セットアップ（管理者権限で1回だけ実行）
@@ -218,7 +218,7 @@ scripts\unregister_task.bat
 
 | ファイル | 役割 |
 |---------|------|
-| `scripts/daily_fetch.ps1` | メインスクリプト — `uv run stdf2pq fetch --verbose` 実行、`logs/fetch_YYYYMMDD_HHMMSS.log` に記録、30日超のログを自動削除 |
+| `scripts/daily_fetch.ps1` | メインスクリプト — `uv run stdf fetch --verbose` 実行、`logs/fetch_YYYYMMDD_HHMMSS.log` に記録、30日超のログを自動削除 |
 | `scripts/register_task.bat` | Task Scheduler にタスク登録（毎日 06:00 トリガー） |
 | `scripts/unregister_task.bat` | タスク登録解除 |
 
@@ -263,8 +263,8 @@ data/
 ## 開発環境分離 (`--env`)
 
 ```bash
-stdf2pq --env dev ingest-all ./test_data -p SCT101A  # data-dev/ に保存
-stdf2pq --env dev db lots
+stdf --env dev ingest-all ./test_data -p SCT101A  # data-dev/ に保存
+stdf --env dev db lots
 rm -rf data-dev/   # リセット
 ```
 

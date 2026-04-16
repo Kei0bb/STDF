@@ -3,7 +3,7 @@
     Daily STDF fetch and ingest script for Windows Task Scheduler.
 
 .DESCRIPTION
-    Runs `uv run stdf2pq fetch` from the project root.
+    Runs `uv run stdf fetch` from the project root.
     Logs output to logs/fetch_YYYYMMDD_HHMMSS.log.
     Automatically deletes log files older than 30 days.
 
@@ -36,7 +36,7 @@ function Write-Log {
     Write-Host $Line
 }
 
-Write-Log "=== stdf2pq daily fetch started ==="
+Write-Log "=== stdf daily fetch started ==="
 Write-Log "Project root : $ProjectRoot"
 Write-Log "Log file     : $LogFile"
 
@@ -45,9 +45,9 @@ Set-Location $ProjectRoot
 # Run fetch + ingest
 $ExitCode = 0
 try {
-    Write-Log "Running: uv run stdf2pq fetch --verbose"
+    Write-Log "Running: uv run stdf fetch --verbose"
     # Redirect both stdout and stderr into the log
-    $Output = & uv run stdf2pq fetch --verbose 2>&1
+    $Output = & uv run stdf fetch --verbose 2>&1
     $ExitCode = $LASTEXITCODE
     foreach ($Line in $Output) {
         Add-Content -Path $LogFile -Value $Line

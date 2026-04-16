@@ -1,4 +1,4 @@
-/** Plotly chart helpers for stdf2pq */
+/** Plotly chart helpers for stdf */
 
 const PLOTLY_LAYOUT_BASE = {
   paper_bgcolor: 'transparent',

@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>stdf2pq</title>
+  <title>stdf</title>
   <script src="https://cdn.tailwindcss.com"></script>
   <script>
     tailwind.config = {
@@ -52,7 +52,7 @@
   <!-- Header -->
   <header class="flex items-center justify-between px-5 py-3 border-b border-slate-700 shrink-0" style="background:#1e293b">
     <div class="flex items-center gap-3">
-      <span class="text-indigo-400 text-xl font-bold tracking-tight">stdf2pq</span>
+      <span class="text-indigo-400 text-xl font-bold tracking-tight">stdf</span>
       <span class="text-slate-500 text-sm">Semiconductor Test Data Explorer</span>
     </div>
     <div class="flex items-center gap-3">
@@ -176,7 +176,7 @@
           <div class="text-xl font-semibold text-slate-300 mb-2">No data selected</div>
           <div class="text-slate-500 text-sm">Select lots in the sidebar and click Apply</div>
           <div x-show="lots.length === 0" class="mt-4 text-xs text-slate-600">
-            No ingested data found. Run: <code class="bg-slate-800 px-2 py-0.5 rounded">stdf2pq ingest-all ./data -p PRODUCT</code>
+            No ingested data found. Run: <code class="bg-slate-800 px-2 py-0.5 rounded">stdf ingest-all ./data -p PRODUCT</code>
           </div>
         </div>
 

@@ -21,12 +21,12 @@ console = Console()
 
 
 @click.group()
-@click.version_option(version=__version__, prog_name="stdf2pq")
+@click.version_option(version=__version__, prog_name="stdf")
 @click.option("--config", "-c", type=click.Path(path_type=Path), help="Config file path")
 @click.option("--env", "-e", default=None, help="Environment name (e.g. dev). Isolates data to data-{env}/")
 @click.pass_context
 def main(ctx, config: Path | None, env: str | None):
-    """stdf2pq - STDF to Parquet converter and analysis DB."""
+    """stdf - STDF to Parquet converter and analysis DB."""
     ctx.ensure_object(dict)
     cfg = Config.load(config)
     if env:
@@ -66,7 +66,7 @@ def ingest(ctx, stdf_file: Path, product: str | None, sub_process: str | None, f
 
     product = product or "UNKNOWN"
 
-    console.print(f"\n[bold]stdf2pq - Ingest[/bold]")
+    console.print(f"\n[bold]stdf - Ingest[/bold]")
     if ctx.obj.get("env"):
         console.print(f"  [yellow]Environment: {ctx.obj['env']}[/yellow]  (data → data-{ctx.obj['env']}/)")
     console.print(f"  File: {stdf_file}")
@@ -124,7 +124,7 @@ def ingest_all(ctx, directory: Path, product: str, glob: str, workers: int, time
 
     DIRECTORY: Path to directory containing STDF files.
 
-    Example: stdf2pq ingest-all ./downloads -p SCT101A --workers 8
+    Example: stdf ingest-all ./downloads -p SCT101A --workers 8
     """
     from .worker import run_ingest_pool
     from .ingest_history import IngestHistory
@@ -146,7 +146,7 @@ def ingest_all(ctx, directory: Path, product: str, glob: str, workers: int, time
         stdf_files = [f for f in all_files if not history.is_done(f)]
         skipped_count = len(all_files) - len(stdf_files)
 
-    console.print(f"\n[bold]stdf2pq - Ingest All[/bold]")
+    console.print(f"\n[bold]stdf - Ingest All[/bold]")
     console.print(f"  Directory : {directory}")
     console.print(f"  Files     : {len(all_files)} found")
     if skipped_count:
@@ -469,7 +469,7 @@ def fetch(ctx, product: tuple, test_type: tuple, limit: int | None, ingest: bool
 
     # --reingest mode: skip FTP, just re-ingest pending files
     if reingest:
-        console.print(f"\n[bold]stdf2pq - Re-ingest pending files[/bold]")
+        console.print(f"\n[bold]stdf - Re-ingest pending files[/bold]")
         console.print(f"  Sync History: {sync_manager.get_downloaded_count()} files tracked")
         console.print()
 
@@ -636,11 +636,11 @@ def export_csv(ctx, sql: str, output: Path, format: str):
     OUTPUT: Output file path
 
     Example:
-        stdf2pq export csv "SELECT * FROM test_data" results.csv
+        stdf export csv "SELECT * FROM test_data" results.csv
     """
     config: Config = ctx.obj["config"]
 
-    console.print(f"\n[bold]stdf2pq - Export[/bold]")
+    console.print(f"\n[bold]stdf - Export[/bold]")
     console.print(f"  Query: {sql[:50]}..." if len(sql) > 50 else f"  Query: {sql}")
     console.print(f"  Output: {output}")
     console.print()
@@ -678,11 +678,11 @@ def export_lot(ctx, lot_ids: tuple, output: Path, pivot: bool):
     OUTPUT: Output CSV file path
 
     Example:
-        stdf2pq export lot E6A773.00 E6A774.00 results.csv
+        stdf export lot E6A773.00 E6A774.00 results.csv
     """
     config: Config = ctx.obj["config"]
 
-    console.print(f"\n[bold]stdf2pq - Export Lot[/bold]")
+    console.print(f"\n[bold]stdf - Export Lot[/bold]")
     console.print(f"  Lots: {', '.join(lot_ids)}")
     console.print(f"  Output: {output}")
     console.print(f"  Pivot: {'Yes' if pivot else 'No'}")
@@ -768,7 +768,7 @@ def web(ctx, port: int, host: str):
     os.environ["STDF_DATA_DIR"] = str(config.storage.data_dir)
     os.environ["STDF_DB_PATH"] = str(config.storage.database)
 
-    console.print(f"\n[bold]stdf2pq - Web UI[/bold]")
+    console.print(f"\n[bold]stdf - Web UI[/bold]")
     console.print(f"  URL:  [link]http://{host}:{port}[/link]")
     console.print(f"  Data: {config.storage.data_dir}")
     if ctx.obj.get("env"):

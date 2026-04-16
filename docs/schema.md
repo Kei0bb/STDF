@@ -1,4 +1,4 @@
-# stdf2pq テーブルスキーマ
+# stdf テーブルスキーマ
 
 STDFファイルをParquet形式に変換した際のテーブル定義。  
 DuckDBビュー経由でSQLクエリ可能。
