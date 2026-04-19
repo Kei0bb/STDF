@@ -175,7 +175,7 @@ class Database:
             COUNT(*) as total,
             SUM(CASE WHEN passed = 'F' THEN 1 ELSE 0 END) as fails,
             ROUND(100.0 * SUM(CASE WHEN passed = 'F' THEN 1 ELSE 0 END) / COUNT(*), 2) as fail_rate
-        FROM test_data
+        FROM test_data_final
         WHERE lot_id = $1
         GROUP BY test_num, test_name
         HAVING SUM(CASE WHEN passed = 'F' THEN 1 ELSE 0 END) > 0
