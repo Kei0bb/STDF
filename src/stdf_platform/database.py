@@ -47,6 +47,7 @@ class Database:
     def _create_views(self) -> None:
         """Create views for Parquet datasets."""
         tables = ["lots", "wafers", "parts", "test_data"]
+        registered = []
 
         for table in tables:
             table_path = self.data_dir / table
@@ -55,6 +56,29 @@ class Database:
                     CREATE OR REPLACE VIEW {table} AS
                     SELECT * FROM read_parquet('{table_path}/**/*.parquet', hive_partitioning=true)
                 """)
+                registered.append(table)
+
+        if "parts" in registered:
+            self.conn.execute("""
+                CREATE OR REPLACE VIEW parts_final AS
+                SELECT * EXCLUDE (rn) FROM (
+                    SELECT *, ROW_NUMBER() OVER (
+                        PARTITION BY lot_id, wafer_id, x_coord, y_coord
+                        ORDER BY retest_num DESC
+                    ) AS rn FROM parts
+                ) WHERE rn = 1
+            """)
+
+        if "test_data" in registered:
+            self.conn.execute("""
+                CREATE OR REPLACE VIEW test_data_final AS
+                SELECT * EXCLUDE (rn) FROM (
+                    SELECT *, ROW_NUMBER() OVER (
+                        PARTITION BY lot_id, wafer_id, x_coord, y_coord, test_num
+                        ORDER BY retest_num DESC
+                    ) AS rn FROM test_data
+                ) WHERE rn = 1
+            """)
 
     def refresh_views(self) -> None:
         """Refresh views after new data is added."""
