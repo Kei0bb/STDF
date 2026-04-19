@@ -191,7 +191,7 @@ class Database:
             soft_bin,
             COUNT(*) as count,
             ROUND(100.0 * COUNT(*) / SUM(COUNT(*)) OVER (), 2) as pct
-        FROM parts
+        FROM parts_final
         WHERE lot_id = $1
         GROUP BY soft_bin
         ORDER BY count DESC
