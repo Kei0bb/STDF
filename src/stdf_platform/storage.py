@@ -69,6 +69,7 @@ PARTS_SCHEMA = pa.schema([
     ("passed", pa.bool_()),
     ("test_count", pa.int64()),
     ("test_time", pa.int64()),
+    ("retest_num", pa.int64()),
 ])
 
 # Unified test data schema (merged tests + test_results)
@@ -90,6 +91,7 @@ TEST_DATA_SCHEMA = pa.schema([
     # Test result
     ("result", pa.float64()),
     ("passed", pa.string()),      # "P" or "F"
+    ("retest_num", pa.int64()),
 ])
 
 
