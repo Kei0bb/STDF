@@ -64,8 +64,8 @@ def export_csv(req: ExportRequest, db_tuple: DB) -> StreamingResponse:
                     p.passed AS part_passed,
                     td.test_name,
                     td.result
-                FROM test_data td
-                JOIN parts p ON td.part_id = p.part_id AND td.lot_id = p.lot_id
+                FROM test_data_final td
+                JOIN parts_final p ON td.part_id = p.part_id AND td.lot_id = p.lot_id
                 WHERE {where}
                 ORDER BY td.lot_id, td.wafer_id, td.part_id, td.test_name
             """
@@ -86,8 +86,8 @@ def export_csv(req: ExportRequest, db_tuple: DB) -> StreamingResponse:
                     td.test_num, td.test_name,
                     td.result, td.passed,
                     td.lo_limit, td.hi_limit, td.units
-                FROM test_data td
-                JOIN parts p ON td.part_id = p.part_id AND td.lot_id = p.lot_id
+                FROM test_data_final td
+                JOIN parts_final p ON td.part_id = p.part_id AND td.lot_id = p.lot_id
                 WHERE {where}
                 ORDER BY td.lot_id, td.wafer_id, td.part_id, td.test_num
             """
@@ -123,7 +123,7 @@ def export_preview(req: ExportRequest, db_tuple: DB) -> dict:
                     COUNT(DISTINCT td.part_id) AS parts,
                     COUNT(DISTINCT td.test_num) AS tests,
                     COUNT(*) AS total_rows
-                FROM test_data td
+                FROM test_data_final td
                 WHERE {where}
             """, params).fetchone()
         parts, tests, total = row or (0, 0, 0)
