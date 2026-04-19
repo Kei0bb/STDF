@@ -18,6 +18,14 @@ Set-StrictMode -Version Latest
 # External-process failures are detected via $LASTEXITCODE instead.
 $ErrorActionPreference = "Continue"
 
+# Force Python to use UTF-8 for stdout/stderr. Without this, rich.Console
+# fails with UnicodeEncodeError when writing non-ASCII glyphs (✓, →, etc.)
+# to a redirected stream on Japanese Windows (cp932).
+$env:PYTHONIOENCODING = "utf-8"
+# Match PowerShell's console-decode side so the UTF-8 bytes from Python are
+# not re-decoded as cp932 (which would corrupt multi-byte glyphs in the log).
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+
 # Resolve project root from this script's location (scripts/../)
 $ProjectRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $LogDir      = Join-Path $ProjectRoot "logs"
@@ -32,7 +40,7 @@ if (-not (Test-Path $LogDir)) {
 function Write-Log {
     param([string]$Message)
     $Line = "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] $Message"
-    Add-Content -Path $LogFile -Value $Line
+    Add-Content -Path $LogFile -Value $Line -Encoding UTF8
     Write-Host $Line
 }
 
@@ -50,7 +58,7 @@ try {
     $Output = & uv run stdf fetch --verbose 2>&1
     $ExitCode = $LASTEXITCODE
     foreach ($Line in $Output) {
-        Add-Content -Path $LogFile -Value $Line
+        Add-Content -Path $LogFile -Value $Line -Encoding UTF8
     }
 } catch {
     Write-Log "ERROR: $_"
