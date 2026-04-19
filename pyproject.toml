@@ -36,4 +36,5 @@ include = ["src/stdf_platform"]
 [dependency-groups]
 dev = [
     "httpx>=0.28.1",
+    "pytest>=8.0.0",
 ]
