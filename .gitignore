@@ -14,3 +14,4 @@ test_data/
 .DS_Store
 logs/
 *.csv
+.worktrees/

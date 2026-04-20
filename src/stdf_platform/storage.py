@@ -69,6 +69,7 @@ PARTS_SCHEMA = pa.schema([
     ("passed", pa.bool_()),
     ("test_count", pa.int64()),
     ("test_time", pa.int64()),
+    ("retest_num", pa.int64()),
 ])
 
 # Unified test data schema (merged tests + test_results)
@@ -90,6 +91,7 @@ TEST_DATA_SCHEMA = pa.schema([
     # Test result
     ("result", pa.float64()),
     ("passed", pa.string()),      # "P" or "F"
+    ("retest_num", pa.int64()),
 ])
 
 
@@ -248,6 +250,18 @@ class ParquetStorage:
         self._write_parquet(lot_table, lot_path / "data.parquet", compression)
         counts["lots"] = 1
 
+        # Pre-calculate retest_num for every wafer BEFORE writing any table.
+        # _get_next_retest_num scans the wafers directory; calling it after
+        # wafers are written would return n+1 instead of n.
+        wafer_retest_map: dict[str, int] = {}
+        if data.wafers:
+            for wafer in data.wafers:
+                wafer_id = wafer.get("wafer_id", "")
+                if wafer_id not in wafer_retest_map:
+                    wafer_retest_map[wafer_id] = self._get_next_retest_num(
+                        product, test_category, sub_process, data.lot_id, wafer_id
+                    )
+
         # Save wafers with retest tracking
         if data.wafers:
             wafer_groups: dict[str, list] = {}
@@ -258,12 +272,13 @@ class ParquetStorage:
                 wafer_groups[wafer_id].append(wafer)
 
             for wafer_id, wafers in wafer_groups.items():
-                # Calculate retest_num based on existing files
-                retest_num = self._get_next_retest_num(
-                    product, test_category, sub_process, data.lot_id, wafer_id
+                retest_num = wafer_retest_map[wafer_id]
+                wafer_path = (
+                    self._get_table_path("wafers", product, test_category, sub_process)
+                    / f"lot_id={self._sanitize(data.lot_id)}"
+                    / f"wafer_id={self._sanitize(wafer_id)}"
+                    / f"retest={retest_num}"
                 )
-                
-                wafer_path = self._get_table_path("wafers", product, test_category, sub_process) / f"lot_id={self._sanitize(data.lot_id)}" / f"wafer_id={self._sanitize(wafer_id)}" / f"retest={retest_num}"
                 wafer_path.mkdir(parents=True, exist_ok=True)
 
                 wafer_table = pa.table({
@@ -276,7 +291,6 @@ class ParquetStorage:
                     "good_count": [w.get("good_count", 0) for w in wafers],
                     "rtst_count": [w.get("rtst_count", 0) for w in wafers],
                     "abrt_count": [w.get("abrt_count", 0) for w in wafers],
-                    # Retest tracking fields
                     "test_rev": [test_rev for _ in wafers],
                     "retest_num": [retest_num for _ in wafers],
                     "source_file": [source_file for _ in wafers],
@@ -285,7 +299,7 @@ class ParquetStorage:
 
             counts["wafers"] = len(data.wafers)
 
-        # Save parts (partitioned by lot_id, wafer_id)
+        # Save parts (partitioned by lot_id, wafer_id, retest_num)
         if data.parts:
             part_groups: dict[tuple, list] = {}
             for part in data.parts:
@@ -295,7 +309,13 @@ class ParquetStorage:
                 part_groups[key].append(part)
 
             for (lot_id, wafer_id), parts in part_groups.items():
-                part_path = self._get_table_path("parts", product, test_category, sub_process) / f"lot_id={self._sanitize(lot_id)}" / f"wafer_id={self._sanitize(wafer_id)}"
+                retest_num = wafer_retest_map.get(wafer_id, 0)
+                part_path = (
+                    self._get_table_path("parts", product, test_category, sub_process)
+                    / f"lot_id={self._sanitize(lot_id)}"
+                    / f"wafer_id={self._sanitize(wafer_id)}"
+                    / f"retest={retest_num}"
+                )
                 part_path.mkdir(parents=True, exist_ok=True)
 
                 part_table = pa.table({
@@ -311,6 +331,7 @@ class ParquetStorage:
                     "passed": [p.get("passed", False) for p in parts],
                     "test_count": [p.get("test_count", 0) for p in parts],
                     "test_time": [p.get("test_time", 0) for p in parts],
+                    "retest_num": [retest_num for _ in parts],
                 }, schema=PARTS_SCHEMA)
                 self._write_parquet(part_table, part_path / "data.parquet", compression)
 
@@ -318,7 +339,6 @@ class ParquetStorage:
 
         # Save unified test data (merged tests + test_results)
         if data.test_results:
-            # Build part_id -> (x_coord, y_coord) mapping from parts
             part_coords = {}
             for part in data.parts:
                 part_id = part.get("part_id", "")
@@ -327,7 +347,6 @@ class ParquetStorage:
                     part.get("y_coord", -32768),
                 )
 
-            # Group by lot_id, wafer_id
             result_groups: dict[tuple, list] = {}
             for result in data.test_results:
                 key = (result.get("lot_id", ""), result.get("wafer_id", ""))
@@ -336,17 +355,21 @@ class ParquetStorage:
                 result_groups[key].append(result)
 
             for (lot_id, wafer_id), results in result_groups.items():
-                result_path = self._get_table_path("test_data", product, test_category, sub_process) / f"lot_id={self._sanitize(lot_id)}" / f"wafer_id={self._sanitize(wafer_id)}"
+                retest_num = wafer_retest_map.get(wafer_id, 0)
+                result_path = (
+                    self._get_table_path("test_data", product, test_category, sub_process)
+                    / f"lot_id={self._sanitize(lot_id)}"
+                    / f"wafer_id={self._sanitize(wafer_id)}"
+                    / f"retest={retest_num}"
+                )
                 result_path.mkdir(parents=True, exist_ok=True)
 
-                # Enrich results with test info and coordinates
                 enriched = []
                 for r in results:
                     test_num = r.get("test_num", 0)
                     test_info = data.tests.get(test_num, {})
                     part_id = r.get("part_id", "")
                     x_coord, y_coord = part_coords.get(part_id, (-32768, -32768))
-                    
                     enriched.append({
                         "lot_id": r.get("lot_id", ""),
                         "wafer_id": r.get("wafer_id", ""),
@@ -361,6 +384,7 @@ class ParquetStorage:
                         "units": test_info.get("units", ""),
                         "result": r.get("result"),
                         "passed": "P" if r.get("passed", False) else "F",
+                        "retest_num": retest_num,
                     })
 
                 result_table = pa.table({
@@ -377,6 +401,7 @@ class ParquetStorage:
                     "units": [r["units"] for r in enriched],
                     "result": [r["result"] for r in enriched],
                     "passed": [r["passed"] for r in enriched],
+                    "retest_num": [r["retest_num"] for r in enriched],
                 }, schema=TEST_DATA_SCHEMA)
                 self._write_parquet(result_table, result_path / "data.parquet", compression)
 

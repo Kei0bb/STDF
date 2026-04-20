@@ -84,7 +84,7 @@ def get_wafermap(db_tuple: DB, lot: str = "", wafer: str = "") -> list[dict]:
         with lock:
             rows = db.execute("""
                 SELECT x_coord, y_coord, soft_bin, hard_bin, passed, part_id
-                FROM parts
+                FROM parts_final
                 WHERE lot_id = ? AND wafer_id = ?
                 ORDER BY part_id
             """, [lot, wafer]).fetchdf()
@@ -104,7 +104,7 @@ def get_tests(db_tuple: DB, lot: Annotated[list[str], Query()] = []) -> list[dic
         with lock:
             rows = db.execute(f"""
                 SELECT DISTINCT test_num, test_name, rec_type, units, lo_limit, hi_limit
-                FROM test_data
+                FROM test_data_final
                 WHERE lot_id IN ({placeholders})
                 ORDER BY test_num
             """, list(lot)).fetchdf()
@@ -134,7 +134,7 @@ def get_fails(
                     SUM(CASE WHEN passed = 'F' THEN 1 ELSE 0 END)              AS fail_count,
                     ROUND(100.0 * SUM(CASE WHEN passed = 'F' THEN 1 ELSE 0 END)
                         / COUNT(*), 2)                                          AS fail_rate
-                FROM test_data
+                FROM test_data_final
                 WHERE lot_id IN ({placeholders})
                 GROUP BY test_num, test_name
                 HAVING SUM(CASE WHEN passed = 'F' THEN 1 ELSE 0 END) > 0
@@ -162,7 +162,7 @@ def get_distribution(
         with lock:
             meta = db.execute(f"""
                 SELECT FIRST(test_name), FIRST(units), FIRST(lo_limit), FIRST(hi_limit)
-                FROM test_data
+                FROM test_data_final
                 WHERE lot_id IN ({placeholders}) AND test_num = ?
             """, list(lot) + [test_num]).fetchone()
 
@@ -170,7 +170,7 @@ def get_distribution(
                 return {}
 
             vals = db.execute(f"""
-                SELECT result FROM test_data
+                SELECT result FROM test_data_final
                 WHERE lot_id IN ({placeholders})
                   AND test_num = ?
                   AND result IS NOT NULL
