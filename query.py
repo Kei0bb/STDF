@@ -42,6 +42,30 @@ for table in ["lots", "wafers", "parts", "test_data"]:
     else:
         print(f"  - {table}  (not found)")
 
+if (DATA_DIR / "parts").exists():
+    con.execute("""
+        CREATE OR REPLACE VIEW parts_final AS
+        SELECT * EXCLUDE (rn) FROM (
+            SELECT *, ROW_NUMBER() OVER (
+                PARTITION BY lot_id, wafer_id, x_coord, y_coord
+                ORDER BY retest_num DESC
+            ) AS rn FROM parts
+        ) WHERE rn = 1
+    """)
+    print("  ✓ parts_final")
+
+if (DATA_DIR / "test_data").exists():
+    con.execute("""
+        CREATE OR REPLACE VIEW test_data_final AS
+        SELECT * EXCLUDE (rn) FROM (
+            SELECT *, ROW_NUMBER() OVER (
+                PARTITION BY lot_id, wafer_id, x_coord, y_coord, test_num
+                ORDER BY retest_num DESC
+            ) AS rn FROM test_data
+        ) WHERE rn = 1
+    """)
+    print("  ✓ test_data_final")
+
 print("\nReady (DuckDB).  q(sql) でプレビュー、to_csv(sql) で CSV 書き出し。")
 
 
@@ -148,7 +172,7 @@ SELECT DISTINCT
     units,
     lo_limit,
     hi_limit
-FROM test_data
+FROM test_data_final
 WHERE lot_id = '{LOT_ID}'
 ORDER BY test_num
 """)
@@ -165,7 +189,7 @@ SELECT
         SUM(CASE WHEN passed = 'F' THEN 1 ELSE 0 END)
         * 100.0 / COUNT(*), 2
     )                                                           AS fail_pct
-FROM test_data
+FROM test_data_final
 WHERE lot_id = '{LOT_ID}'
 GROUP BY test_num, test_name
 HAVING SUM(CASE WHEN passed = 'F' THEN 1 ELSE 0 END) > 0
@@ -196,7 +220,7 @@ SELECT
         (hi_limit - AVG(result)) / (3 * STDDEV(result)),
         (AVG(result) - lo_limit) / (3 * STDDEV(result))
     ), 3) AS cpk
-FROM test_data
+FROM test_data_final
 WHERE lot_id    = '{LOT_ID}'
   AND test_name = '{TEST_NAME}'
   AND lo_limit IS NOT NULL
@@ -213,7 +237,7 @@ SELECT
     soft_bin,
     COUNT(*) AS die_count,
     ROUND(COUNT(*) * 100.0 / SUM(COUNT(*)) OVER (), 2) AS pct
-FROM parts
+FROM parts_final
 WHERE lot_id = '{LOT_ID}'
 GROUP BY hard_bin, soft_bin
 ORDER BY die_count DESC
@@ -228,8 +252,8 @@ SELECT
     td.test_num,
     td.test_name,
     COUNT(*) AS fail_count
-FROM parts p
-JOIN test_data td
+FROM parts_final p
+JOIN test_data_final td
     ON  p.lot_id   = td.lot_id
     AND p.wafer_id = td.wafer_id
     AND p.part_id  = td.part_id
@@ -252,8 +276,8 @@ to_csv(
         p.hard_bin, p.soft_bin, p.passed AS die_passed,
         td.test_num, td.test_name,
         td.result, td.lo_limit, td.hi_limit, td.units, td.passed AS test_passed
-    FROM parts p
-    JOIN test_data td
+    FROM parts_final p
+    JOIN test_data_final td
         ON  p.lot_id   = td.lot_id
         AND p.wafer_id = td.wafer_id
         AND p.part_id  = td.part_id
