@@ -1,5 +1,6 @@
 """Configuration management."""
 
+import fnmatch
 import os
 from pathlib import Path
 from dataclasses import dataclass, field
@@ -78,6 +79,17 @@ class Config:
     storage: StorageConfig = field(default_factory=StorageConfig)
     processing: ProcessingConfig = field(default_factory=ProcessingConfig)
     filters: list[ProductFilter] = field(default_factory=list)
+    exclude: list[str] = field(default_factory=list)
+
+    def should_exclude(self, path: str) -> bool:
+        """Return True if the filename matches any exclude pattern (case-insensitive fnmatch)."""
+        if not self.exclude:
+            return False
+        name = Path(path).name
+        for pattern in self.exclude:
+            if fnmatch.fnmatch(name.lower(), pattern.lower()):
+                return True
+        return False
 
     def should_fetch(self, product: str, test_type: str) -> bool:
         """
@@ -131,11 +143,14 @@ class Config:
                     test_types=f.get("test_types", ["CP", "FT"])
                 ))
 
+        exclude = [str(p) for p in (data.get("exclude") or [])]
+
         return cls(
             ftp=FTPConfig(**ftp_data) if ftp_data else FTPConfig(),
             storage=StorageConfig(**storage_data) if storage_data else StorageConfig(),
             processing=ProcessingConfig(**processing_data) if processing_data else ProcessingConfig(),
             filters=filters,
+            exclude=exclude,
         )
 
     def ensure_directories(self):

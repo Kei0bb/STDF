@@ -21,6 +21,16 @@ filters:
   # - product: ABC200B
   #   test_types: [CP, FT]  # Both CP and FT for ABC200B
 
+# Exclude patterns — filenames matching any pattern are skipped (fetch and ingest-all).
+# Uses fnmatch glob syntax, case-insensitive. Matches against filename only (not full path).
+# Examples:
+#   - "*EVAL*"      # skip any file containing "EVAL"
+#   - "*_test_*"    # skip files with "_test_" in the name
+#   - "debug_*"     # skip files starting with "debug_"
+exclude:
+  # - "*EVAL*"
+  # - "*_qual_*"
+
 storage:
   data_dir: "./data"
   database: "./data/stdf.duckdb"

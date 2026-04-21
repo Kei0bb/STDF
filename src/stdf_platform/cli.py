@@ -146,11 +146,19 @@ def ingest_all(ctx, directory: Path, product: str, glob: str, workers: int, time
         stdf_files = [f for f in all_files if not history.is_done(f)]
         skipped_count = len(all_files) - len(stdf_files)
 
+    excluded_count = 0
+    if config.exclude:
+        before = len(stdf_files)
+        stdf_files = [f for f in stdf_files if not config.should_exclude(str(f))]
+        excluded_count = before - len(stdf_files)
+
     console.print(f"\n[bold]stdf - Ingest All[/bold]")
     console.print(f"  Directory : {directory}")
     console.print(f"  Files     : {len(all_files)} found")
     if skipped_count:
         console.print(f"  Skipped   : [dim]{skipped_count} already ingested[/dim]")
+    if excluded_count:
+        console.print(f"  Excluded  : [dim]{excluded_count} matching exclude patterns[/dim]")
     console.print(f"  To ingest : {len(stdf_files)}")
     console.print(f"  Product   : {product}")
     console.print(f"  Workers   : {workers}")
@@ -539,6 +547,14 @@ def fetch(ctx, product: tuple, test_type: tuple, limit: int | None, ingest: bool
             # Apply config filters for fine-grained product/test_type matching
             if config.filters and not cli_products and not cli_test_types:
                 files = [(f, p, t, n) for f, p, t, n in files if config.should_fetch(p, t)]
+
+            # Filter out excluded filenames
+            if config.exclude:
+                before = len(files)
+                files = [(f, p, t, n) for f, p, t, n in files if not config.should_exclude(n)]
+                excluded = before - len(files)
+                if excluded > 0:
+                    console.print(f"  [dim]Excluded {excluded} files matching exclude patterns[/dim]")
 
             # Filter out already downloaded (unless force)
             if not force:
