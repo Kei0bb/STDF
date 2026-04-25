@@ -68,6 +68,7 @@ class STDFParser:
     def __init__(self):
         self.data = STDFData()
         self._part_counter = 0
+        self._cached_part_id = ""  # reused across all test results for current part
         self._set_endian("<")  # Little endian by default
 
     def _set_endian(self, endian: str):
@@ -79,6 +80,9 @@ class STDFParser:
         self._s_i1 = struct.Struct(endian + "b")
         self._s_i2 = struct.Struct(endian + "h")
         self._s_r4 = struct.Struct(endian + "f")
+        # Pre-compiled headers for hot-path record types
+        self._s_ftr_hdr = struct.Struct(endian + "IBBB")   # test_num, head, site, test_flg
+        self._s_ptr_hdr = struct.Struct(endian + "IBBBB")  # test_num, head, site, test_flg, parm_flg
 
     def _read_u1(self, f: BinaryIO) -> int:
         data = f.read(1)
@@ -243,6 +247,8 @@ class STDFParser:
         site_num = self._read_u1(f)
         self._part_counter += 1
         self.data._current_part_index = self._part_counter
+        # Cache part_id once per part so test records don't re-allocate the string 59k times
+        self._cached_part_id = f"{self.data.lot_id}_{self.data._current_wafer}_{self._part_counter}"
 
     def _parse_prr(self, f: BinaryIO, rec_len: int):
         """Parse Part Results Record."""
@@ -281,24 +287,48 @@ class STDFParser:
 
     def _parse_ptr(self, f: BinaryIO, rec_len: int):
         """Parse Parametric Test Record."""
-        start_pos = f.tell()
-        test_num = self._read_u4(f)
-        head_num = self._read_u1(f)
-        site_num = self._read_u1(f)
-        test_flg = self._read_u1(f)
-        parm_flg = self._read_u1(f)
-        result = self._read_r4(f) if f.tell() - start_pos < rec_len else None
-        test_txt = self._read_cn(f) if f.tell() - start_pos < rec_len else ""
-        alarm_id = self._read_cn(f) if f.tell() - start_pos < rec_len else ""
-        
-        # Read optional fields
-        opt_flag = self._read_u1(f) if f.tell() - start_pos < rec_len else 0xFF
-        res_scal = self._read_i1(f) if f.tell() - start_pos < rec_len else 0
-        llm_scal = self._read_i1(f) if f.tell() - start_pos < rec_len else 0
-        hlm_scal = self._read_i1(f) if f.tell() - start_pos < rec_len else 0
-        lo_limit = self._read_r4(f) if f.tell() - start_pos < rec_len else None
-        hi_limit = self._read_r4(f) if f.tell() - start_pos < rec_len else None
-        units = self._read_cn(f) if f.tell() - start_pos < rec_len else ""
+        body = f.read(rec_len)
+        if len(body) < 8:
+            return
+        test_num, head_num, site_num, test_flg, parm_flg = self._s_ptr_hdr.unpack_from(body, 0)
+        offset = 8
+
+        result = None
+        if offset + 4 <= rec_len:
+            result = self._s_r4.unpack_from(body, offset)[0]
+            offset += 4
+
+        # test_txt (Cn: 1 byte length prefix)
+        test_txt = ""
+        if offset < rec_len:
+            n = body[offset]; offset += 1
+            if n > 0 and offset + n <= rec_len:
+                test_txt = body[offset:offset + n].decode("ascii", errors="replace").replace("\x00", "").strip()
+                offset += n
+
+        # alarm_id — skip bytes but don't store (almost always empty, not queried)
+        if offset < rec_len:
+            n = body[offset]; offset += 1
+            offset += n
+
+        # opt_flag(1) + res_scal(1) + llm_scal(1) + hlm_scal(1) = 4 bytes
+        offset += 4
+
+        lo_limit = None
+        if offset + 4 <= rec_len:
+            lo_limit = self._s_r4.unpack_from(body, offset)[0]
+            offset += 4
+
+        hi_limit = None
+        if offset + 4 <= rec_len:
+            hi_limit = self._s_r4.unpack_from(body, offset)[0]
+            offset += 4
+
+        units = ""
+        if offset < rec_len:
+            n = body[offset]; offset += 1
+            if n > 0 and offset + n <= rec_len:
+                units = body[offset:offset + n].decode("ascii", errors="replace").replace("\x00", "").strip()
 
         passed = (test_flg & 0x80) == 0
 
@@ -316,27 +346,21 @@ class STDFParser:
         self.data.test_results.append({
             "lot_id": self.data.lot_id,
             "wafer_id": self.data._current_wafer,
-            "part_id": f"{self.data.lot_id}_{self.data._current_wafer}_{self._part_counter}",
+            "part_id": self._cached_part_id,
             "test_num": test_num,
             "head_num": head_num,
             "site_num": site_num,
             "result": result,
             "passed": passed,
-            "alarm_id": alarm_id,
+            "alarm_id": "",
         })
-
-        remaining = rec_len - (f.tell() - start_pos)
-        if remaining > 0:
-            f.read(remaining)
 
     def _parse_ftr(self, f: BinaryIO, rec_len: int):
         """Parse Functional Test Record."""
-        start_pos = f.tell()
-        test_num = self._read_u4(f)
-        head_num = self._read_u1(f)
-        site_num = self._read_u1(f)
-        test_flg = self._read_u1(f)
-
+        body = f.read(rec_len)
+        if len(body) < 7:
+            return
+        test_num, head_num, site_num, test_flg = self._s_ftr_hdr.unpack_from(body, 0)
         passed = (test_flg & 0x80) == 0
 
         if test_num not in self.data.tests:
@@ -350,7 +374,7 @@ class STDFParser:
         self.data.test_results.append({
             "lot_id": self.data.lot_id,
             "wafer_id": self.data._current_wafer,
-            "part_id": f"{self.data.lot_id}_{self.data._current_wafer}_{self._part_counter}",
+            "part_id": self._cached_part_id,
             "test_num": test_num,
             "head_num": head_num,
             "site_num": site_num,
@@ -358,10 +382,6 @@ class STDFParser:
             "passed": passed,
             "alarm_id": "",
         })
-
-        remaining = rec_len - (f.tell() - start_pos)
-        if remaining > 0:
-            f.read(remaining)
 
     def _parse_mpr(self, f: BinaryIO, rec_len: int):
         """Parse Multiple-Result Parametric Record (STDF V4)."""
@@ -437,7 +457,7 @@ class STDFParser:
         self.data.test_results.append({
             "lot_id": self.data.lot_id,
             "wafer_id": self.data._current_wafer,
-            "part_id": f"{self.data.lot_id}_{self.data._current_wafer}_{self._part_counter}",
+            "part_id": self._cached_part_id,
             "test_num": test_num,
             "head_num": head_num,
             "site_num": site_num,
