@@ -56,24 +56,30 @@ def export_csv(req: ExportRequest, db_tuple: DB) -> StreamingResponse:
     where, params = _build_where(req.lots, req.wafers, req.test_nums)
     try:
         if req.format == "pivot":
+            # For MPR tests, use "test_name[pin_name]" as the column key to avoid
+            # collapsing multiple per-pin results into a single ambiguous column.
             sql = f"""
                 SELECT
                     td.lot_id, td.wafer_id, td.part_id,
                     td.x_coord, td.y_coord,
                     p.hard_bin, p.soft_bin,
                     p.passed AS part_passed,
-                    td.test_name,
+                    CASE
+                        WHEN td.pin_name IS NOT NULL AND td.pin_name != ''
+                        THEN td.test_name || '[' || td.pin_name || ']'
+                        ELSE td.test_name
+                    END AS col_key,
                     td.result
                 FROM test_data_final td
                 JOIN parts_final p ON td.part_id = p.part_id AND td.lot_id = p.lot_id
                 WHERE {where}
-                ORDER BY td.lot_id, td.wafer_id, td.part_id, td.test_name
+                ORDER BY td.lot_id, td.wafer_id, td.part_id, col_key
             """
             with lock:
                 df = db.execute(sql, params).fetchdf()
             index_cols = ["lot_id", "wafer_id", "part_id", "x_coord", "y_coord",
                           "hard_bin", "soft_bin", "part_passed"]
-            df = df.pivot_table(index=index_cols, columns="test_name",
+            df = df.pivot_table(index=index_cols, columns="col_key",
                                 values="result", aggfunc="first")
             df.columns.name = None
             df = df.reset_index()
@@ -84,12 +90,13 @@ def export_csv(req: ExportRequest, db_tuple: DB) -> StreamingResponse:
                     td.x_coord, td.y_coord,
                     p.hard_bin, p.soft_bin,
                     td.test_num, td.test_name,
+                    td.pin_num, td.pin_name,
                     td.result, td.passed,
                     td.lo_limit, td.hi_limit, td.units
                 FROM test_data_final td
                 JOIN parts_final p ON td.part_id = p.part_id AND td.lot_id = p.lot_id
                 WHERE {where}
-                ORDER BY td.lot_id, td.wafer_id, td.part_id, td.test_num
+                ORDER BY td.lot_id, td.wafer_id, td.part_id, td.test_num, td.pin_num
             """
             with lock:
                 df = db.execute(sql, params).fetchdf()

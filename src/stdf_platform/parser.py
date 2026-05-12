@@ -36,6 +36,8 @@ class STDFData:
     bins_hard: dict[int, dict] = field(default_factory=dict)
     bins_soft: dict[int, dict] = field(default_factory=dict)
     sites: list[dict] = field(default_factory=list)
+    # PMR pin map: pmr_index -> pin_name (LOG_NAM > PHY_NAM > CHAN_NAM)
+    pin_map: dict[int, str] = field(default_factory=dict)
 
     # Internal state
     _current_wafer: str = ""
@@ -146,6 +148,21 @@ class STDFParser:
         cpu_type = self._read_u1(f)
         _stdf_ver = self._read_u1(f)
         self._set_endian(">" if cpu_type == 1 else "<")
+
+    def _parse_pmr(self, f: BinaryIO, rec_len: int):
+        """Parse Pin Map Record — builds pin_map index → name for MPR resolution."""
+        start_pos = f.tell()
+        pmr_indx = self._read_u2(f)
+        _chan_typ = self._read_u2(f) if f.tell() - start_pos < rec_len else 0
+        chan_nam = self._read_cn(f) if f.tell() - start_pos < rec_len else ""
+        phy_nam = self._read_cn(f) if f.tell() - start_pos < rec_len else ""
+        log_nam = self._read_cn(f) if f.tell() - start_pos < rec_len else ""
+        # Prefer LOG_NAM → PHY_NAM → CHAN_NAM as the human-readable pin name
+        pin_name = log_nam or phy_nam or chan_nam
+        self.data.pin_map[pmr_indx] = pin_name
+        remaining = rec_len - (f.tell() - start_pos)
+        if remaining > 0:
+            f.read(remaining)
 
     def _parse_mir(self, f: BinaryIO, rec_len: int):
         """Parse Master Information Record."""
@@ -451,20 +468,45 @@ class STDFParser:
                 "rec_type": "MPR",
             }
 
-        # Store single result (use first result)
-        result_val = results[0] if results else None
-        
-        self.data.test_results.append({
-            "lot_id": self.data.lot_id,
-            "wafer_id": self.data._current_wafer,
-            "part_id": self._cached_part_id,
-            "test_num": test_num,
-            "head_num": head_num,
-            "site_num": site_num,
-            "result": result_val,
-            "passed": passed,
-            "alarm_id": alarm_id,
-        })
+        # Expand per-pin results: each pin becomes a separate row.
+        # When both arrays are empty (pass/fail-only MPR with no measurements), emit
+        # one summary row rather than a phantom row from max(..., 1).
+        if not results and not rtn_indx:
+            self.data.test_results.append({
+                "lot_id": self.data.lot_id,
+                "wafer_id": self.data._current_wafer,
+                "part_id": self._cached_part_id,
+                "test_num": test_num,
+                "head_num": head_num,
+                "site_num": site_num,
+                "result": None,
+                "passed": passed,
+                "alarm_id": alarm_id,
+                "pin_num": None,
+                "pin_name": None,
+            })
+        else:
+            if rtn_icnt != rslt_cnt:
+                logger.debug(
+                    "MPR rtn_icnt/rslt_cnt mismatch: icnt=%d rslt=%d test_num=%d",
+                    rtn_icnt, rslt_cnt, test_num,
+                )
+            n = max(len(results), len(rtn_indx))
+            for i in range(n):
+                pin_idx = rtn_indx[i] if i < len(rtn_indx) else None
+                self.data.test_results.append({
+                    "lot_id": self.data.lot_id,
+                    "wafer_id": self.data._current_wafer,
+                    "part_id": self._cached_part_id,
+                    "test_num": test_num,
+                    "head_num": head_num,
+                    "site_num": site_num,
+                    "result": results[i] if i < len(results) else None,
+                    "passed": passed,
+                    "alarm_id": alarm_id,
+                    "pin_num": pin_idx,
+                    "pin_name": self.data.pin_map.get(pin_idx) if pin_idx is not None else None,
+                })
 
         remaining = rec_len - (f.tell() - start_pos)
         if remaining > 0:
@@ -531,6 +573,8 @@ class STDFParser:
 
                     if rec_key == REC_FAR:
                         self._parse_far(f, rec_len)
+                    elif rec_key == REC_PMR:
+                        self._parse_pmr(f, rec_len)
                     elif rec_key == REC_MIR:
                         self._parse_mir(f, rec_len)
                     elif rec_key == REC_MRR:

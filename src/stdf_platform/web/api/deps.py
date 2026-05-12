@@ -47,7 +47,7 @@ def setup_views(conn: duckdb.DuckDBPyConnection, data_dir: Path) -> list[str]:
             CREATE OR REPLACE VIEW test_data_final AS
             SELECT * EXCLUDE (rn) FROM (
                 SELECT *, ROW_NUMBER() OVER (
-                    PARTITION BY lot_id, wafer_id, x_coord, y_coord, test_num
+                    PARTITION BY lot_id, wafer_id, x_coord, y_coord, test_num, pin_num
                     ORDER BY retest_num DESC
                 ) AS rn FROM test_data
             ) WHERE rn = 1

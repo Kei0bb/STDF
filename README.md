@@ -60,7 +60,7 @@ DuckDB glob ビュー（起動時1回登録、クエリごとに fs スキャン
 | `cli.py` | Click CLI — `ingest` / `ingest-all` / `fetch` / `db` / `analyze` / `web` コマンド |
 | `worker.py` | `ThreadPoolExecutor` でファイルごとに subprocess を起動・タイムアウト管理 |
 | `_ingest_worker.py` | 独立 subprocess — 1ファイルを parse → Parquet 書き込みして JSON を stdout に出力 |
-| `parser.py` | Pure Python STDF V4 パーサー（`struct.Struct` 最適化、FAR/MIR/WIR/PIR/PRR/PTR/MPR/FTR対応） |
+| `parser.py` | Pure Python STDF V4 パーサー（`struct.Struct` 最適化、FAR/MIR/WIR/PIR/PRR/PTR/MPR/FTR/PMR対応） |
 | `storage.py` | PyArrow で Hive パーティション Parquet に書き込み、リテスト番号の自動採番 |
 | `ftp_client.py` | `ftplib` FTP 差分ダウンロード（`.stdf.gz` 自動展開） |
 | `sync_manager.py` | `sync_history.json` で FTP 取得済み・ingest 済みを追跡 |
@@ -233,7 +233,7 @@ scripts\unregister_task.bat
 | `lots` | ロット情報（product, test_category, sub_process） |
 | `wafers` | ウェハー歩留まり（リテスト追跡含む） |
 | `parts` | 個片結果（Bin, X/Y 座標） |
-| `test_data` | テスト測定値（PTR/MPR/FTR 統合） |
+| `test_data` | テスト測定値（PTR/MPR/FTR 統合）。MPR は 1 レコードをピン数分の行に展開し `pin_num` / `pin_name` 列に PMR のピン情報を格納。PTR/FTR 行ではこれらは NULL。 |
 
 ### Parquet パーティション構造
 

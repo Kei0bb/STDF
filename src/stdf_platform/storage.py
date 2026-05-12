@@ -92,6 +92,9 @@ TEST_DATA_SCHEMA = pa.schema([
     ("result", pa.float64()),
     ("passed", pa.string()),      # "P" or "F"
     ("retest_num", pa.int64()),
+    # MPR per-pin fields (NULL for PTR/FTR)
+    ("pin_num", pa.int64()),
+    ("pin_name", pa.string()),
 ])
 
 
@@ -385,6 +388,8 @@ class ParquetStorage:
                         "result": r.get("result"),
                         "passed": "P" if r.get("passed", False) else "F",
                         "retest_num": retest_num,
+                        "pin_num": r.get("pin_num"),
+                        "pin_name": r.get("pin_name"),
                     })
 
                 result_table = pa.table({
@@ -402,6 +407,8 @@ class ParquetStorage:
                     "result": [r["result"] for r in enriched],
                     "passed": [r["passed"] for r in enriched],
                     "retest_num": [r["retest_num"] for r in enriched],
+                    "pin_num": [r["pin_num"] for r in enriched],
+                    "pin_name": [r["pin_name"] for r in enriched],
                 }, schema=TEST_DATA_SCHEMA)
                 self._write_parquet(result_table, result_path / "data.parquet", compression)
 
