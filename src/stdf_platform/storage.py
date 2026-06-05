@@ -9,6 +9,7 @@ import pyarrow.parquet as pq
 
 from .parser import STDFData
 from .config import StorageConfig
+from .chipid import decode_chipid
 
 
 # Default timestamp for invalid values (compatible with Parquet viewers)
@@ -58,6 +59,7 @@ WAFERS_SCHEMA = pa.schema([
 
 PARTS_SCHEMA = pa.schema([
     ("part_id", pa.string()),
+    ("part_txt", pa.string()),   # PRR.PART_TXT (2D barcode) — unique FT package key
     ("lot_id", pa.string()),
     ("wafer_id", pa.string()),
     ("head_num", pa.int64()),
@@ -78,6 +80,7 @@ TEST_DATA_SCHEMA = pa.schema([
     ("lot_id", pa.string()),
     ("wafer_id", pa.string()),
     ("part_id", pa.string()),
+    ("part_txt", pa.string()),   # PRR.PART_TXT (2D barcode) — unique FT package key
     ("x_coord", pa.int64()),
     ("y_coord", pa.int64()),
     # Test identification
@@ -95,6 +98,24 @@ TEST_DATA_SCHEMA = pa.schema([
     # MPR per-pin fields (NULL for PTR/FTR)
     ("pin_num", pa.int64()),
     ("pin_name", pa.string()),
+])
+
+# Decoded EN-SO-CHIPID_R ChipID schema (one row per die occurrence)
+CHIPID_SCHEMA = pa.schema([
+    ("lot_id", pa.string()),
+    ("part_id", pa.string()),          # synthesized FT part id (stream order)
+    ("part_txt", pa.string()),         # 2D barcode — unique package key
+    ("chip_occurrence_index", pa.int64()),  # 0,1,... per DUT (2-die chiplet -> 0/1)
+    ("efuse_raw", pa.string()),        # normalized 64-bit binary string (or original if invalid)
+    ("valid", pa.bool_()),
+    ("origin_fab_code", pa.int64()),
+    ("origin_fab", pa.string()),       # TSMC1 / TSMC2 / UNSUPPORTED
+    ("origin_lot", pa.string()),
+    ("origin_wafer", pa.int64()),
+    ("origin_x", pa.int64()),
+    ("origin_y", pa.int64()),
+    ("reserved_bits", pa.string()),
+    ("retest_num", pa.int64()),
 ])
 
 
@@ -188,18 +209,20 @@ class ParquetStorage:
         self, product: str, test_category: str, sub_process: str, lot_id: str, wafer_id: str
     ) -> int:
         """
-        Get the next retest number for a wafer.
-        
-        Scans existing retest directories and returns max + 1.
-        Returns 0 if no existing data.
+        Get the next retest number for a wafer (or, for FT, the empty wafer_id).
+
+        Scans existing retest directories under the *parts* table and returns
+        max + 1. parts is written for both CP and FT, whereas wafers is empty
+        for FT — scanning parts is what makes FT re-ingests increment instead of
+        silently overwriting retest=0. Returns 0 if no existing data.
         """
         # re is imported at module level
         wafer_base = (
-            self._get_table_path("wafers", product, test_category, sub_process)
+            self._get_table_path("parts", product, test_category, sub_process)
             / f"lot_id={self._sanitize(lot_id)}"
             / f"wafer_id={self._sanitize(wafer_id)}"
         )
-        
+
         if not wafer_base.exists():
             return 0
         
@@ -253,17 +276,26 @@ class ParquetStorage:
         self._write_parquet(lot_table, lot_path / "data.parquet", compression)
         counts["lots"] = 1
 
-        # Pre-calculate retest_num for every wafer BEFORE writing any table.
-        # _get_next_retest_num scans the wafers directory; calling it after
-        # wafers are written would return n+1 instead of n.
-        wafer_retest_map: dict[str, int] = {}
-        if data.wafers:
-            for wafer in data.wafers:
-                wafer_id = wafer.get("wafer_id", "")
-                if wafer_id not in wafer_retest_map:
-                    wafer_retest_map[wafer_id] = self._get_next_retest_num(
-                        product, test_category, sub_process, data.lot_id, wafer_id
-                    )
+        # Pre-calculate retest_num for every identity (wafer_id) BEFORE writing
+        # any table. _get_next_retest_num scans the parts directory; calling it
+        # after parts are written would return n+1 instead of n.
+        #
+        # FT files have no WIR (data.wafers is empty) and all parts share an
+        # empty wafer_id, so we derive the identity set from BOTH wafers and
+        # parts. That empty-wafer_id entry is what gives FT a real retest number
+        # on re-ingest instead of overwriting retest=0.
+        identity_wafer_ids: set[str] = set()
+        for wafer in data.wafers:
+            identity_wafer_ids.add(wafer.get("wafer_id", ""))
+        for part in data.parts:
+            identity_wafer_ids.add(part.get("wafer_id", ""))
+
+        wafer_retest_map: dict[str, int] = {
+            wid: self._get_next_retest_num(
+                product, test_category, sub_process, data.lot_id, wid
+            )
+            for wid in identity_wafer_ids
+        }
 
         # Save wafers with retest tracking
         if data.wafers:
@@ -323,6 +355,7 @@ class ParquetStorage:
 
                 part_table = pa.table({
                     "part_id": [p.get("part_id", "") for p in parts],
+                    "part_txt": [p.get("part_txt", "") for p in parts],
                     "lot_id": [p.get("lot_id", "") for p in parts],
                     "wafer_id": [p.get("wafer_id", "") for p in parts],
                     "head_num": [p.get("head_num", 0) for p in parts],
@@ -343,12 +376,14 @@ class ParquetStorage:
         # Save unified test data (merged tests + test_results)
         if data.test_results:
             part_coords = {}
+            part_txt_map = {}
             for part in data.parts:
                 part_id = part.get("part_id", "")
                 part_coords[part_id] = (
                     part.get("x_coord", -32768),
                     part.get("y_coord", -32768),
                 )
+                part_txt_map[part_id] = part.get("part_txt", "")
 
             result_groups: dict[tuple, list] = {}
             for result in data.test_results:
@@ -377,6 +412,7 @@ class ParquetStorage:
                         "lot_id": r.get("lot_id", ""),
                         "wafer_id": r.get("wafer_id", ""),
                         "part_id": part_id,
+                        "part_txt": part_txt_map.get(part_id, ""),
                         "x_coord": x_coord,
                         "y_coord": y_coord,
                         "test_num": test_num,
@@ -396,6 +432,7 @@ class ParquetStorage:
                     "lot_id": [r["lot_id"] for r in enriched],
                     "wafer_id": [r["wafer_id"] for r in enriched],
                     "part_id": [r["part_id"] for r in enriched],
+                    "part_txt": [r["part_txt"] for r in enriched],
                     "x_coord": [r["x_coord"] for r in enriched],
                     "y_coord": [r["y_coord"] for r in enriched],
                     "test_num": [r["test_num"] for r in enriched],
@@ -413,6 +450,57 @@ class ParquetStorage:
                 self._write_parquet(result_table, result_path / "data.parquet", compression)
 
             counts["test_data"] = len(data.test_results)
+
+        # Save decoded ChipID occurrences (EN-SO-CHIPID_R), partitioned like
+        # test_data (lot_id / wafer_id / retest). The decoded origin wafer/x/y
+        # are columns, not partitions.
+        if data.chip_ids:
+            chip_groups: dict[tuple, list] = {}
+            for chip in data.chip_ids:
+                key = (chip.get("lot_id", ""), chip.get("wafer_id", ""))
+                chip_groups.setdefault(key, []).append(chip)
+
+            for (lot_id, wafer_id), chips in chip_groups.items():
+                retest_num = wafer_retest_map.get(wafer_id, 0)
+                chip_path = (
+                    self._get_table_path("chipid", product, test_category, sub_process)
+                    / f"lot_id={self._sanitize(lot_id)}"
+                    / f"wafer_id={self._sanitize(wafer_id)}"
+                    / f"retest={retest_num}"
+                )
+                chip_path.mkdir(parents=True, exist_ok=True)
+
+                rows = []
+                for chip in chips:
+                    decoded = decode_chipid(chip.get("efuse_raw", ""))
+                    rows.append({
+                        "lot_id": chip.get("lot_id", ""),
+                        "part_id": chip.get("part_id", ""),
+                        "part_txt": chip.get("part_txt", ""),
+                        "chip_occurrence_index": chip.get("chip_occurrence_index", 0),
+                        "retest_num": retest_num,
+                        **decoded,
+                    })
+
+                chip_table = pa.table({
+                    "lot_id": [r["lot_id"] for r in rows],
+                    "part_id": [r["part_id"] for r in rows],
+                    "part_txt": [r["part_txt"] for r in rows],
+                    "chip_occurrence_index": [r["chip_occurrence_index"] for r in rows],
+                    "efuse_raw": [r["efuse_raw"] for r in rows],
+                    "valid": [r["valid"] for r in rows],
+                    "origin_fab_code": [r["origin_fab_code"] for r in rows],
+                    "origin_fab": [r["origin_fab"] for r in rows],
+                    "origin_lot": [r["origin_lot"] for r in rows],
+                    "origin_wafer": [r["origin_wafer"] for r in rows],
+                    "origin_x": [r["origin_x"] for r in rows],
+                    "origin_y": [r["origin_y"] for r in rows],
+                    "reserved_bits": [r["reserved_bits"] for r in rows],
+                    "retest_num": [r["retest_num"] for r in rows],
+                }, schema=CHIPID_SCHEMA)
+                self._write_parquet(chip_table, chip_path / "data.parquet", compression)
+
+            counts["chipid"] = len(data.chip_ids)
 
         return counts
 

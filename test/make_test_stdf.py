@@ -16,6 +16,96 @@ def record(rec_typ: int, rec_sub: int, data: bytes) -> bytes:
     return struct.pack("<HBB", len(data), rec_typ, rec_sub) + data
 
 
+LOTNO_CHAR1 = "ABCDEFGHIJKLMNOPQRSTUVWXYZ_"
+LOTNO_CHAR2 = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+
+
+def encode_chipid(fab_code: int, lot6: str, wafer: int, x: int, y: int) -> str:
+    """Encode an EN-SO-CHIPID_R value string (inverse of chipid.decode_chipid)."""
+    assert len(lot6) == 6
+    bits = (
+        f"{fab_code:04b}"
+        + f"{y:09b}"
+        + f"{x:09b}"
+        + f"{wafer + 3:05b}"
+        + f"{LOTNO_CHAR1.index(lot6[0]):05b}"
+        + "".join(f"{LOTNO_CHAR2.index(c):06b}" for c in lot6[1:])
+        + "00"  # reserved
+    )
+    assert len(bits) == 64, len(bits)
+    return "0b" + bits
+
+
+def gdr_chipid(efuse: str) -> bytes:
+    """Build a GDR record carrying one EN-SO-CHIPID_R key/value pair (Cn, Cn)."""
+    body = struct.pack("<H", 2)                       # FLD_CNT
+    body += struct.pack("B", 10) + cn("EN-SO-CHIPID_R")  # C*n key
+    body += struct.pack("B", 10) + cn(efuse)             # C*n value
+    return record(50, 10, body)
+
+
+def make_ft_stdf(path: Path, lot_id: str, parts: int = 8, fail_part_ids=None):
+    """Generate an FT (Final Test) STDF with 2-die chiplet ChipID GDRs.
+
+    No WIR (FT has no wafer). Each part (package) emits two EN-SO-CHIPID_R GDRs
+    (die0/die1) and a PRR carrying a unique PART_TXT 2D barcode. Returns the list
+    of expected ChipID dicts so tests can assert against the parsed/stored output.
+    """
+    fail_part_ids = set(fail_part_ids or [])
+    buf = bytearray()
+    start_t = 1700000000
+
+    buf += record(0, 10, struct.pack("BB", 2, 4))  # FAR
+
+    mir_data = (
+        struct.pack("<IIB", start_t, start_t, 1)
+        + struct.pack("<BBBHB", ord(" "), ord(" "), ord(" "), 0, ord(" "))
+        + cn(lot_id) + cn("CHIPLET2D") + cn("TESTER01") + cn("J750")
+        + cn("FT_TEST") + cn("Rev01") + cn("") + cn("OPE01") + cn("") + cn("")
+        + cn("FT1")  # TEST_COD -> sub_process FT1
+    )
+    buf += record(1, 10, mir_data)
+
+    expected = []
+    for i in range(parts):
+        buf += record(5, 10, struct.pack("BB", 1, 1))  # PIR
+
+        # One PTR so test_data is populated for the package
+        passed = i not in fail_part_ids
+        test_flg = 0x00 if passed else 0x80
+        ptr = (
+            struct.pack("<IBBBB", 5001, 1, 1, test_flg, 0x00)
+            + struct.pack("<f", 1.0)
+            + cn("FT_FUNC") + cn("") + struct.pack("B", 0x00)
+            + struct.pack("<bbb", 0, 0, 0)
+            + struct.pack("<f", 0.0) + struct.pack("<f", 2.0) + cn("V")
+        )
+        buf += record(15, 10, ptr)
+
+        # Two dies per package, each from a different origin location
+        barcode = f"2D-{lot_id}-{i:04d}"
+        efuse0 = encode_chipid(1, "HKPFJK", wafer=11, x=10 + i, y=20 + i)   # TSMC1
+        efuse1 = encode_chipid(6, "ABCDEF", wafer=7, x=100 + i, y=200 + i)  # TSMC2
+        buf += gdr_chipid(efuse0)
+        buf += gdr_chipid(efuse1)
+        expected.append({"part_txt": barcode, "occ": 0, "efuse": efuse0})
+        expected.append({"part_txt": barcode, "occ": 1, "efuse": efuse1})
+
+        # PRR with PART_ID + PART_TXT (2D barcode), no wafer coords
+        part_flg = 0x00 if passed else 0x08
+        hard_bin = 1 if passed else 2
+        soft_bin = 1 if passed else 3
+        prr = struct.pack("<BBBHHHhhI", 1, 1, part_flg, 1, hard_bin, soft_bin, -32768, -32768, 0)
+        prr += cn(f"UNIT{i:04d}") + cn(barcode)
+        buf += record(5, 20, prr)
+
+    buf += record(1, 20, struct.pack("<I", start_t + 3600))  # MRR
+
+    path.write_bytes(bytes(buf))
+    print(f"Created {path} ({len(buf):,} bytes, FT {parts} packages × 2 dies)")
+    return expected
+
+
 def make_stdf(path: Path, lot_id: str, num_wafers: int = 3, parts_per_wafer: int = 50):
     buf = bytearray()
 
@@ -52,8 +142,8 @@ def make_stdf(path: Path, lot_id: str, num_wafers: int = 3, parts_per_wafer: int
     for wafer_idx in range(num_wafers):
         wafer_id = f"W{wafer_idx + 1:02d}"
 
-        # WIR
-        wir_data = struct.pack("<BBIx", 1, 0, start_t + wafer_idx * 3600) + cn(wafer_id)
+        # WIR — HEAD_NUM U1, SITE_GRP U1, START_T U4, WAFER_ID Cn (no pad)
+        wir_data = struct.pack("<BBI", 1, 0, start_t + wafer_idx * 3600) + cn(wafer_id)
         buf += record(2, 10, wir_data)
 
         good = 0
@@ -140,3 +230,6 @@ if __name__ == "__main__":
     make_stdf(out / "LOT003.stdf", "LOT003", num_wafers=5, parts_per_wafer=200)
     make_stdf(out / "LOT004.stdf", "LOT004", num_wafers=5, parts_per_wafer=200)
     make_stdf(out / "LOT005.stdf", "LOT005", num_wafers=5, parts_per_wafer=200)
+
+    # FT chiplet file with EN-SO-CHIPID_R GDRs
+    make_ft_stdf(out / "FTLOT01.stdf", "FTLOT01", parts=8)

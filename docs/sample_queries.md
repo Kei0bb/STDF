@@ -475,6 +475,44 @@ ORDER BY cpk;
 
 ---
 
+## ChipID トレーサビリティ（EN-SO-CHIPID_R / TSMC）
+
+FT の chiplet 製品は 1 パッケージに 2 die を含み、各 die の出自（fab / lot /
+wafer / x / y）は GDR の `EN-SO-CHIPID_R` をデコードした `chipid` テーブルに
+入ります。パッケージの一意キーは `part_txt`（2D バーコード）、die の区別は
+`chip_occurrence_index`（0 / 1）です。`chipid_final` は最新リテストのみ。
+
+```sql
+-- パッケージ（2D バーコード）→ 2 die の CP 出自を一覧
+SELECT
+    part_txt,
+    chip_occurrence_index,
+    origin_fab,        -- TSMC1 / TSMC2 / UNSUPPORTED
+    origin_lot,        -- CP ロット（6 文字）
+    origin_wafer,
+    origin_x,
+    origin_y
+FROM chipid_final
+WHERE lot_id = 'YOUR_FT_LOT'
+ORDER BY part_txt, chip_occurrence_index;
+```
+
+```sql
+-- FT 不良パッケージを CP 出自ウェハ別に集計（歩留り相関の起点）
+SELECT
+    c.origin_fab, c.origin_lot, c.origin_wafer,
+    COUNT(*) AS dies,
+    SUM(CASE WHEN p.passed THEN 0 ELSE 1 END) AS fail_dies
+FROM chipid_final c
+JOIN parts_final p
+  ON p.lot_id = c.lot_id AND p.part_txt = c.part_txt
+WHERE c.lot_id = 'YOUR_FT_LOT' AND c.valid
+GROUP BY c.origin_fab, c.origin_lot, c.origin_wafer
+ORDER BY fail_dies DESC;
+```
+
+---
+
 ## 注意事項
 
 - プレースホルダ（`YOUR_LOT_ID` 等）は実際の値に置き換えてください。

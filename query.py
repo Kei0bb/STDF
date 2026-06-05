@@ -30,8 +30,14 @@ _storage = _cfg.get("storage", {})
 DATA_DIR = Path(_storage.get("data_dir", "./data"))
 print(f"Data dir: {DATA_DIR}")
 
+# Dedup identity within a (lot, retest) group: CP = die location, FT = 2D barcode.
+_DEDUP_UNIT = (
+    "CASE WHEN test_category = 'FT' THEN part_txt "
+    "ELSE CONCAT(wafer_id, '|', x_coord, '|', y_coord) END"
+)
+
 con = duckdb.connect(":memory:")
-for table in ["lots", "wafers", "parts", "test_data"]:
+for table in ["lots", "wafers", "parts", "test_data", "chipid"]:
     path = DATA_DIR / table
     if path.exists():
         con.execute(f"""
@@ -43,11 +49,11 @@ for table in ["lots", "wafers", "parts", "test_data"]:
         print(f"  - {table}  (not found)")
 
 if (DATA_DIR / "parts").exists():
-    con.execute("""
+    con.execute(f"""
         CREATE OR REPLACE VIEW parts_final AS
         SELECT * EXCLUDE (rn) FROM (
             SELECT *, ROW_NUMBER() OVER (
-                PARTITION BY lot_id, wafer_id, x_coord, y_coord
+                PARTITION BY lot_id, {_DEDUP_UNIT}
                 ORDER BY retest_num DESC
             ) AS rn FROM parts
         ) WHERE rn = 1
@@ -55,16 +61,28 @@ if (DATA_DIR / "parts").exists():
     print("  ✓ parts_final")
 
 if (DATA_DIR / "test_data").exists():
-    con.execute("""
+    con.execute(f"""
         CREATE OR REPLACE VIEW test_data_final AS
         SELECT * EXCLUDE (rn) FROM (
             SELECT *, ROW_NUMBER() OVER (
-                PARTITION BY lot_id, wafer_id, x_coord, y_coord, test_num
+                PARTITION BY lot_id, {_DEDUP_UNIT}, test_num, pin_num
                 ORDER BY retest_num DESC
             ) AS rn FROM test_data
         ) WHERE rn = 1
     """)
     print("  ✓ test_data_final")
+
+if (DATA_DIR / "chipid").exists():
+    con.execute("""
+        CREATE OR REPLACE VIEW chipid_final AS
+        SELECT * EXCLUDE (rn) FROM (
+            SELECT *, ROW_NUMBER() OVER (
+                PARTITION BY lot_id, efuse_raw
+                ORDER BY retest_num DESC
+            ) AS rn FROM chipid
+        ) WHERE rn = 1
+    """)
+    print("  ✓ chipid_final")
 
 print("\nReady (DuckDB).  q(sql) でプレビュー、to_csv(sql) で CSV 書き出し。")
 
