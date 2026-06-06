@@ -623,11 +623,12 @@ class STDFParser:
             else:
                 break  # unknown type — cannot determine length, stop safely
 
-        # Import here to keep the parser import-light; CHIPID_KEY is a small const.
-        from .chipid import CHIPID_KEY
+        # Import here to keep the parser import-light. Accept both the
+        # digit-zero ("EN-S0-") and letter-O ("EN-SO-") spellings of the key.
+        from .chipid import CHIPID_KEYS
         i = 0
         while i < len(strings) - 1:
-            if strings[i] == CHIPID_KEY:
+            if strings[i] in CHIPID_KEYS:
                 self._current_chip_efuses.append(strings[i + 1])
                 i += 2
             else:

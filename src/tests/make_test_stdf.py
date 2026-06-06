@@ -4,6 +4,8 @@ import struct
 import random
 from pathlib import Path
 
+from stdf_platform.chipid import CHIPID_KEY  # canonical digit-zero key
+
 
 def cn(s: str) -> bytes:
     """Encode STDF Cn string (1-byte length prefix + ASCII)."""
@@ -36,11 +38,15 @@ def encode_chipid(fab_code: int, lot6: str, wafer: int, x: int, y: int) -> str:
     return "0b" + bits
 
 
-def gdr_chipid(efuse: str) -> bytes:
-    """Build a GDR record carrying one EN-SO-CHIPID_R key/value pair (Cn, Cn)."""
-    body = struct.pack("<H", 2)                       # FLD_CNT
-    body += struct.pack("B", 10) + cn("EN-SO-CHIPID_R")  # C*n key
-    body += struct.pack("B", 10) + cn(efuse)             # C*n value
+def gdr_chipid(efuse: str, key: str = CHIPID_KEY) -> bytes:
+    """Build a GDR record carrying one ChipID key/value pair (Cn, Cn).
+
+    Defaults to the canonical digit-zero key ("EN-S0-CHIPID_R") that real STDF
+    files use.
+    """
+    body = struct.pack("<H", 2)                  # FLD_CNT
+    body += struct.pack("B", 10) + cn(key)       # C*n key
+    body += struct.pack("B", 10) + cn(efuse)     # C*n value
     return record(50, 10, body)
 
 

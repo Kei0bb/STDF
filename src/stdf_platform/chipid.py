@@ -16,7 +16,12 @@ Bit layout (Python slicing is MSB-based, index 0 = most significant bit)::
 """
 
 # Key string used inside GDR records to mark a ChipID value field.
-CHIPID_KEY = "EN-SO-CHIPID_R"
+# NOTE: the real eFuse key uses a DIGIT ZERO ("EN-S0-..."), not letter O.
+# The spec was transcribed with a letter O ("EN-SO-..."); the two are visually
+# identical in many fonts. We accept both spellings to be safe; the digit-zero
+# form is canonical (it is what actual STDF files contain).
+CHIPID_KEY = "EN-S0-CHIPID_R"
+CHIPID_KEYS = frozenset({"EN-S0-CHIPID_R", "EN-SO-CHIPID_R"})
 
 # Java-compatible TSMC lot-number character tables.
 LOTNO_CHAR1 = "ABCDEFGHIJKLMNOPQRSTUVWXYZ_"          # 27 chars (5-bit index)

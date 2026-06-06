@@ -1,4 +1,4 @@
-from stdf_platform.chipid import decode_chipid, normalize_efuse, CHIPID_KEY
+from stdf_platform.chipid import decode_chipid, normalize_efuse, CHIPID_KEY, CHIPID_KEYS
 
 
 EXAMPLE = "0b0001001110011001100011011100011101010001100100111101001101010000"
@@ -52,4 +52,13 @@ def test_decode_invalid_marks_not_valid():
 
 
 def test_chipid_key_constant():
-    assert CHIPID_KEY == "EN-SO-CHIPID_R"
+    # canonical key uses a DIGIT ZERO ("EN-S0-..."), matching real STDF files
+    assert CHIPID_KEY == "EN-S0-CHIPID_R"
+    assert CHIPID_KEY[4] == "0"  # guard against the letter-O regression
+
+
+def test_chipid_keys_accepts_both_spellings():
+    # both the digit-zero (real) and letter-O (spec) spellings are accepted
+    assert "EN-S0-CHIPID_R" in CHIPID_KEYS
+    assert "EN-SO-CHIPID_R" in CHIPID_KEYS
+    assert CHIPID_KEY in CHIPID_KEYS
