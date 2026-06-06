@@ -74,7 +74,7 @@ class Database:
                 CREATE OR REPLACE VIEW test_data_final AS
                 SELECT * EXCLUDE (rn) FROM (
                     SELECT *, ROW_NUMBER() OVER (
-                        PARTITION BY lot_id, wafer_id, x_coord, y_coord, test_num, pin_num
+                        PARTITION BY lot_id, wafer_id, part_id, test_num, test_name, rec_type, pin_num, pin_name
                         ORDER BY retest_num DESC
                     ) AS rn FROM test_data
                 ) WHERE rn = 1
@@ -162,7 +162,7 @@ class Database:
             WHERE lot_id = $1
         )
         WHERE rn = 1
-        ORDER BY yield_pct DESC
+        ORDER BY wafer_id ASC
         """
         return self.query(sql, [lot_id])
 

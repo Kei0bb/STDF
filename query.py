@@ -59,7 +59,7 @@ if (DATA_DIR / "test_data").exists():
         CREATE OR REPLACE VIEW test_data_final AS
         SELECT * EXCLUDE (rn) FROM (
             SELECT *, ROW_NUMBER() OVER (
-                PARTITION BY lot_id, wafer_id, x_coord, y_coord, test_num
+                PARTITION BY lot_id, wafer_id, part_id, test_num, test_name, rec_type, pin_num, pin_name
                 ORDER BY retest_num DESC
             ) AS rn FROM test_data
         ) WHERE rn = 1
@@ -97,50 +97,126 @@ def to_csv(sql: str, output: str | Path = "output.csv") -> None:
     rows = result.fetchone()[0]
     print(f"Exported {rows:,} rows → {output}")
 
+# %%
+LOT_ID = "E6B292.00"
 
-# %% ロット一覧
-q("""
+# %% [CP]Test_failrate
+q(f"""
+    SELECT
+        test_num,
+        test_name,
+        wafer_id,
+        sub_process,
+        COUNT(*) as total,
+        SUM(CASE WHEN passed = 'F' THEN 1 ELSE 0 END) as fails,
+        ROUND(100.0 * SUM(CASE WHEN passed = 'F' THEN 1 ELSE 0 END) / COUNT(*), 2) as fail_rate
+    FROM test_data_final
+    WHERE lot_id = '{LOT_ID}'
+    GROUP BY test_num, test_name, wafer_id, sub_process
+    HAVING SUM(CASE WHEN passed = 'F' THEN 1 ELSE 0 END) > 0
+    ORDER BY fail_rate DESC
+""")
+
+# %%
+to_csv(f"""
+    SELECT
+        test_num,
+        test_name,
+        wafer_id,
+        sub_process,
+        COUNT(*) as total,
+        SUM(CASE WHEN passed = 'F' THEN 1 ELSE 0 END) as fails,
+        ROUND(100.0 * SUM(CASE WHEN passed = 'F' THEN 1 ELSE 0 END) / COUNT(*), 2) as fail_rate
+    FROM test_data_final
+    WHERE lot_id = '{LOT_ID}'
+    GROUP BY test_num, test_name, wafer_id, sub_process
+    HAVING SUM(CASE WHEN passed = 'F' THEN 1 ELSE 0 END) > 0
+    ORDER BY fail_rate DESC
+"""
+,"./Query/TestFail.csv")
+
+# %%
+q(f"""
+    SELECT
+        lot_id,
+        wafer_id,
+        test_name,
+        pin_num,
+        pin_name,
+        x_coord,
+        y_coord,
+        result,
+    FROM test_data_final
+    WHERE lot_id = 'E6B155.00'
+    AND test_name = 'VDF_OBS:ALL_FIXL::'
+""")
+
+# %%
+to_csv(f"""
+    SELECT
+        lot_id,
+        wafer_id,
+        part_id,
+        sub_process,
+        test_name,
+        x_coord,
+        y_coord,
+        result
+    FROM test_data
+    WHERE lot_id = 'E6B155.00'
+       AND wafer_id = 'E6B155-04A4'
+    AND (test_name LIKE '%DTS2ACC1VL%' or test_name LIKE '%DTS2ACC1VT%' or test_name LIKE '%DTS2ACC1VH%')
+    ORDER BY
+        wafer_id,
+        part_id,
+        sub_process
+    """
+,"./Query/CP_DTS2.csv")
+
+# %%
+to_csv(f"""
+    SELECT
+        lot_id,
+        part_id,
+        sub_process,
+        test_name,
+        pin_num,
+        pin_name,
+        x_coord,
+        y_coord,
+        result
+    FROM test_data_final
+    WHERE lot_id IN ('2618-X00','2618-X01','2618-X02')
+    AND test_name LIKE '%DTS2ACC1V%' 
+    ORDER BY
+        part_id,
+    """
+,"./Query/FT_DTS2.csv")
+
+
+# %%
+q(f"""
 SELECT
     lot_id,
-    product,
-    test_category,
-    sub_process,
-    start_time,
-    job_name,
-    job_rev
-FROM lots
-ORDER BY start_time DESC
+    wafer_id,
+    part_id,
+    x_coord,
+    y_coord,
+    test_num,
+    test_name,
+    pin_num,
+    pin_name,
+    result,
+    retest_num
+FROM test_data_final
+WHERE lot_id = 'E6B155.00'
+  AND wafer_id = 'E6B155-02B6'
+  AND part_id = 'E6B155.00_E6B155-02B6_1'
+  AND test_name = 'VDF_OBS:ALL_FIXL::'
+ORDER BY pin_num;
 """)
 
-
-# %% ロット別歩留まりサマリ
-q("""
-WITH latest_wafers AS (
-    SELECT *,
-           ROW_NUMBER() OVER (
-               PARTITION BY lot_id, wafer_id
-               ORDER BY retest_num DESC
-           ) AS rn
-    FROM wafers
-)
-SELECT
-    l.lot_id,
-    l.product,
-    l.sub_process,
-    COUNT(DISTINCT w.wafer_id)                              AS wafer_count,
-    SUM(w.part_count)                                       AS total_parts,
-    SUM(w.good_count)                                       AS good_parts,
-    ROUND(SUM(w.good_count) * 100.0 / SUM(w.part_count), 2) AS yield_pct
-FROM lots l
-JOIN latest_wafers w ON l.lot_id = w.lot_id AND w.rn = 1
-GROUP BY l.lot_id, l.product, l.sub_process
-ORDER BY l.lot_id
-""")
-
-
-# %% ウェーハ別歩留まり（ロットIDを変更して使用）
-LOT_ID = "LOT001"   # ← 変更してください
-
+# %%
 q(f"""
 WITH latest AS (
     SELECT *,
@@ -177,24 +253,6 @@ WHERE lot_id = '{LOT_ID}'
 ORDER BY test_num
 """)
 
-
-# %% Fail テストランキング（ワースト上位）
-q(f"""
-SELECT
-    test_num,
-    test_name,
-    COUNT(*)                                                    AS total,
-    SUM(CASE WHEN passed = 'F' THEN 1 ELSE 0 END)              AS fail_cnt,
-    ROUND(
-        SUM(CASE WHEN passed = 'F' THEN 1 ELSE 0 END)
-        * 100.0 / COUNT(*), 2
-    )                                                           AS fail_pct
-FROM test_data_final
-WHERE lot_id = '{LOT_ID}'
-GROUP BY test_num, test_name
-HAVING SUM(CASE WHEN passed = 'F' THEN 1 ELSE 0 END) > 0
-ORDER BY fail_pct DESC
-""")
 
 
 # %% 特定テストの統計 + Cp / Cpk
@@ -264,38 +322,32 @@ GROUP BY p.hard_bin, p.soft_bin, td.test_num, td.test_name
 ORDER BY fail_count DESC
 """)
 
+# %%
+to_csv(f"""
+SELECT
+    *
+FROM test_data_final
+WHERE wafer_id = 'E6B355-01D1'
+  AND test_name like '%PDFREQ%'
+ORDER BY part_id , test_num ASC
+"""
 
-# %% CSV 書き出し — メモリ効率版（to_csv を使用）
-# DuckDB COPY TO で Python メモリ消費ゼロ
+,"./Query/PDFREQ.csv")
 
-to_csv(
-    f"""
+# %%
+to_csv(f"""
     SELECT
-        p.lot_id, p.wafer_id, p.part_id,
-        p.x_coord, p.y_coord,
-        p.hard_bin, p.soft_bin, p.passed AS die_passed,
-        td.test_num, td.test_name,
-        td.result, td.lo_limit, td.hi_limit, td.units, td.passed AS test_passed
-    FROM parts_final p
-    JOIN test_data_final td
-        ON  p.lot_id   = td.lot_id
-        AND p.wafer_id = td.wafer_id
-        AND p.part_id  = td.part_id
-    WHERE p.lot_id = '{LOT_ID}'
-    ORDER BY p.wafer_id, p.part_id, td.test_num
-    """,
-    output="output.csv",
-)
-
-
-# %% 任意 SQL → CSV（ここを書き換えて使用）
-# 例: 複数ロットの全テストデータを出力
-# to_csv("""
-#     SELECT * FROM test_data
-#     WHERE lot_id IN ('LOT001', 'LOT002')
-# """, output="test_data_export.csv")
-
-# 例: プレビューのみ（メモリに全件ロード — 小規模クエリ向け）
-q("""
-SELECT 1 AS hello
-""")
+        lot_id,
+        part_id,
+        sub_process,
+        test_num,
+        test_name,
+        result
+    FROM test_data_final
+    WHERE part_id LIKE ('2618-X00%')
+    AND test_name LIKE '%DTS2%' 
+    ORDER BY
+        part_id, test_num
+    """
+,"./Query/FT_2618.csv")
+# %%
