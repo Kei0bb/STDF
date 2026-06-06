@@ -33,6 +33,8 @@ class STDFData:
     parts: list[dict] = field(default_factory=list)
     tests: dict[int, dict] = field(default_factory=dict)
     test_results: list[dict] = field(default_factory=list)
+    # EN-SO-CHIPID_R occurrences decoded from GDR (one row per die occurrence)
+    chip_ids: list[dict] = field(default_factory=list)
     bins_hard: dict[int, dict] = field(default_factory=dict)
     bins_soft: dict[int, dict] = field(default_factory=dict)
     sites: list[dict] = field(default_factory=list)
@@ -62,6 +64,7 @@ REC_PTR = (15, 10)
 REC_MPR = (15, 15)
 REC_FTR = (15, 20)
 REC_SDR = (1, 80)
+REC_GDR = (50, 10)
 
 
 class STDFParser:
@@ -71,6 +74,7 @@ class STDFParser:
         self.data = STDFData()
         self._part_counter = 0
         self._cached_part_id = ""  # reused across all test results for current part
+        self._current_chip_efuses = []  # EN-SO-CHIPID_R values for the current DUT
         self._set_endian("<")  # Little endian by default
 
     def _set_endian(self, endian: str):
@@ -266,6 +270,8 @@ class STDFParser:
         self.data._current_part_index = self._part_counter
         # Cache part_id once per part so test records don't re-allocate the string 59k times
         self._cached_part_id = f"{self.data.lot_id}_{self.data._current_wafer}_{self._part_counter}"
+        # Reset ChipID accumulator for this DUT (GDRs arrive between PIR and PRR)
+        self._current_chip_efuses = []
 
     def _parse_prr(self, f: BinaryIO, rec_len: int):
         """Parse Part Results Record."""
@@ -279,11 +285,16 @@ class STDFParser:
         x_coord = self._read_i2(f) if f.tell() - start_pos < rec_len else -32768
         y_coord = self._read_i2(f) if f.tell() - start_pos < rec_len else -32768
         test_t = self._read_u4(f) if f.tell() - start_pos < rec_len else 0
+        # PART_ID then PART_TXT (2D barcode) — the barcode is the unique FT key
+        part_id_serial = self._read_cn(f) if f.tell() - start_pos < rec_len else ""
+        part_txt = self._read_cn(f) if f.tell() - start_pos < rec_len else ""
 
         passed = (part_flg & 0x08) == 0
 
+        synth_part_id = f"{self.data.lot_id}_{self.data._current_wafer}_{self._part_counter}"
         part = {
-            "part_id": f"{self.data.lot_id}_{self.data._current_wafer}_{self._part_counter}",
+            "part_id": synth_part_id,
+            "part_txt": part_txt,
             "lot_id": self.data.lot_id,
             "wafer_id": self.data._current_wafer,
             "head_num": head_num,
@@ -297,6 +308,18 @@ class STDFParser:
             "test_time": test_t,
         }
         self.data.parts.append(part)
+
+        # Finalize ChipID occurrences accumulated since PIR, binding them to this DUT.
+        for occ_idx, efuse in enumerate(self._current_chip_efuses):
+            self.data.chip_ids.append({
+                "lot_id": self.data.lot_id,
+                "wafer_id": self.data._current_wafer,
+                "part_id": synth_part_id,
+                "part_txt": part_txt,
+                "chip_occurrence_index": occ_idx,
+                "efuse_raw": efuse,
+            })
+        self._current_chip_efuses = []
 
         remaining = rec_len - (f.tell() - start_pos)
         if remaining > 0:
@@ -554,10 +577,67 @@ class STDFParser:
         if remaining > 0:
             f.read(remaining)
 
+    def _parse_gdr(self, f: BinaryIO, rec_len: int):
+        """Parse Generic Data Record, extracting EN-SO-CHIPID_R value strings.
+
+        GDR holds FLD_CNT variable-type generic data fields. We walk the fields
+        (bounded by rec_len for robustness against pad-byte counting) collecting
+        Cn strings in order, then pair each ``EN-SO-CHIPID_R`` key with the next
+        string as its eFuse value. Multiple occurrences per DUT are preserved.
+        """
+        start_pos = f.tell()
+        end = start_pos + rec_len
+        self._read_u2(f)  # FLD_CNT (advisory; we bound by rec_len instead)
+
+        strings: list[str] = []
+        while f.tell() < end:
+            type_code = self._read_u1(f)
+            if type_code == 0:          # B*0 pad byte
+                continue
+            elif type_code == 1:        # U*1
+                f.read(1)
+            elif type_code == 2:        # U*2
+                f.read(2)
+            elif type_code == 3:        # U*4
+                f.read(4)
+            elif type_code == 4:        # I*1
+                f.read(1)
+            elif type_code == 5:        # I*2
+                f.read(2)
+            elif type_code == 6:        # I*4
+                f.read(4)
+            elif type_code == 7:        # R*4
+                f.read(4)
+            elif type_code == 8:        # R*8
+                f.read(8)
+            elif type_code == 10:       # C*n
+                strings.append(self._read_cn(f))
+            elif type_code == 11:       # B*n
+                blen = self._read_u1(f)
+                f.read(blen)
+            elif type_code == 12:       # D*n (bit field)
+                nbits = self._read_u2(f)
+                f.read((nbits + 7) // 8)
+            elif type_code == 13:       # N*1 (nibble)
+                f.read(1)
+            else:
+                break  # unknown type — cannot determine length, stop safely
+
+        # Import here to keep the parser import-light; CHIPID_KEY is a small const.
+        from .chipid import CHIPID_KEY
+        i = 0
+        while i < len(strings) - 1:
+            if strings[i] == CHIPID_KEY:
+                self._current_chip_efuses.append(strings[i + 1])
+                i += 2
+            else:
+                i += 1
+
     def parse(self, file_path: Path) -> STDFData:
         """Parse an STDF file."""
         self.data = STDFData()
         self._part_counter = 0
+        self._current_chip_efuses = []
 
         with open(file_path, "rb") as f:
             while True:
@@ -597,6 +677,8 @@ class STDFParser:
                         self._parse_hbr(f, rec_len)
                     elif rec_key == REC_SBR:
                         self._parse_sbr(f, rec_len)
+                    elif rec_key == REC_GDR:
+                        self._parse_gdr(f, rec_len)
                     else:
                         # Skip unknown record
                         f.read(rec_len)
