@@ -8,6 +8,17 @@ import duckdb
 from .config import StorageConfig
 
 
+# Dedup identity within a (lot, retest) group:
+#   CP  -> physical die location (wafer_id + x/y coords)
+#   FT  -> package 2D barcode (PART_TXT); FT has no wafer/coords, so the old
+#          wafer+coord key collapsed every FT part into one row.
+# test_category is available as a Hive partition column on every table.
+_DEDUP_UNIT = (
+    "CASE WHEN test_category = 'FT' THEN part_txt "
+    "ELSE CONCAT(wafer_id, '|', x_coord, '|', y_coord) END"
+)
+
+
 class Database:
     """DuckDB database for STDF analytics."""
 
@@ -46,7 +57,7 @@ class Database:
 
     def _create_views(self) -> None:
         """Create views for Parquet datasets."""
-        tables = ["lots", "wafers", "parts", "test_data"]
+        tables = ["lots", "wafers", "parts", "test_data", "chipid"]
         registered = []
 
         for table in tables:
@@ -59,24 +70,37 @@ class Database:
                 registered.append(table)
 
         if "parts" in registered:
-            self.conn.execute("""
+            self.conn.execute(f"""
                 CREATE OR REPLACE VIEW parts_final AS
                 SELECT * EXCLUDE (rn) FROM (
                     SELECT *, ROW_NUMBER() OVER (
-                        PARTITION BY lot_id, wafer_id, x_coord, y_coord
+                        PARTITION BY lot_id, {_DEDUP_UNIT}
                         ORDER BY retest_num DESC
                     ) AS rn FROM parts
                 ) WHERE rn = 1
             """)
 
         if "test_data" in registered:
-            self.conn.execute("""
+            self.conn.execute(f"""
                 CREATE OR REPLACE VIEW test_data_final AS
                 SELECT * EXCLUDE (rn) FROM (
                     SELECT *, ROW_NUMBER() OVER (
-                        PARTITION BY lot_id, wafer_id, part_id, test_num, test_name, rec_type, pin_num, pin_name
+                        PARTITION BY lot_id, {_DEDUP_UNIT}, test_num, pin_num
                         ORDER BY retest_num DESC
                     ) AS rn FROM test_data
+                ) WHERE rn = 1
+            """)
+
+        if "chipid" in registered:
+            # die identity = decoded ChipID (efuse_raw), NOT positional
+            # chip_occurrence_index (which can swap die0/die1 across retests).
+            self.conn.execute("""
+                CREATE OR REPLACE VIEW chipid_final AS
+                SELECT * EXCLUDE (rn) FROM (
+                    SELECT *, ROW_NUMBER() OVER (
+                        PARTITION BY lot_id, efuse_raw
+                        ORDER BY retest_num DESC
+                    ) AS rn FROM chipid
                 ) WHERE rn = 1
             """)
 
@@ -162,7 +186,7 @@ class Database:
             WHERE lot_id = $1
         )
         WHERE rn = 1
-        ORDER BY wafer_id ASC
+        ORDER BY yield_pct DESC
         """
         return self.query(sql, [lot_id])
 
