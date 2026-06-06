@@ -24,8 +24,17 @@ CHIPID_KEY = "EN-S0-CHIPID_R"
 CHIPID_KEYS = frozenset({"EN-S0-CHIPID_R", "EN-SO-CHIPID_R"})
 
 # Java-compatible TSMC lot-number character tables.
-LOTNO_CHAR1 = "ABCDEFGHIJKLMNOPQRSTUVWXYZ_"          # 27 chars (5-bit index)
-LOTNO_CHAR2 = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"  # 36 chars (6-bit index)
+#
+# The encoded bit value indexes DIRECTLY into these strings, and valid
+# characters do NOT start at index 0 — leading "_" placeholders set the offset.
+# Do NOT use compact tables (e.g. "ABC...Z_"): index 7 must give "E" (not "H"),
+# and index 20 must give "6" (not "K"). Verified against TSMC test vectors:
+#   0x13998DC75193D350 -> lot E6B156 / wafer 11 / x 99 / y 115
+#   0x134191A75193D34C -> lot E6B155 / wafer 10 / x 100 / y 104
+# CHAR1 'A' sits at index 3 (5-bit index, padded to len 32);
+# CHAR2 '0' sits at index 14 (6-bit index, padded to len 64).
+LOTNO_CHAR1 = "___" + "ABCDEFGHIJKLMNOPQRSTUVWXYZ" + "___"                  # len 32
+LOTNO_CHAR2 = "_" * 14 + "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ" + "_" * 14  # len 64
 
 # fab_code -> fab name (TSMC only).
 _FAB_NAMES = {1: "TSMC1", 6: "TSMC2"}

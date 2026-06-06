@@ -18,8 +18,8 @@ def record(rec_typ: int, rec_sub: int, data: bytes) -> bytes:
     return struct.pack("<HBB", len(data), rec_typ, rec_sub) + data
 
 
-LOTNO_CHAR1 = "ABCDEFGHIJKLMNOPQRSTUVWXYZ_"
-LOTNO_CHAR2 = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+# Share the SAME (offset) tables as the decoder so encode/decode round-trips.
+from stdf_platform.chipid import LOTNO_CHAR1, LOTNO_CHAR2
 
 
 def encode_chipid(fab_code: int, lot6: str, wafer: int, x: int, y: int) -> str:
