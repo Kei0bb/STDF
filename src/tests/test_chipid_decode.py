@@ -20,11 +20,27 @@ def test_decode_example():
     assert d["valid"] is True
     assert d["origin_fab_code"] == 1
     assert d["origin_fab"] == "TSMC1"
-    assert d["origin_lot"] == "HKPFJK"
+    assert d["origin_lot"] == "E6B156"
     assert d["origin_wafer"] == 11
     assert d["origin_x"] == 99
     assert d["origin_y"] == 115
     assert d["reserved_bits"] == "00"
+
+
+def test_decode_official_tsmc_vectors():
+    # Authoritative TSMC vectors (offset lookup tables required).
+    vectors = [
+        ("0x13998DC75193D350", "E6B156", 11, 99, 115),
+        ("0x139189C75193D350", "E6B156", 11, 98, 114),
+        ("0x134191A75193D34C", "E6B155", 10, 100, 104),
+    ]
+    for hexval, lot, wafer, x, y in vectors:
+        bits = "0b" + format(int(hexval, 16), "064b")
+        d = decode_chipid(bits)
+        assert d["origin_lot"] == lot, hexval
+        assert d["origin_wafer"] == wafer, hexval
+        assert d["origin_x"] == x, hexval
+        assert d["origin_y"] == y, hexval
 
 
 def test_decode_fab6_is_tsmc2():
