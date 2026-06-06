@@ -6,8 +6,8 @@ from pathlib import Path
 import duckdb
 import pytest
 
-# make_ft_stdf lives in the (non-package) test/ directory
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "test"))
+# make_ft_stdf lives alongside this test in src/tests/
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 from make_test_stdf import make_ft_stdf  # noqa: E402
 
 from stdf_platform.parser import parse_stdf  # noqa: E402
@@ -170,3 +170,32 @@ def test_chipid_final_dedups_by_decoded_efuse_not_occurrence(tmp_path):
     assert conn.execute(
         "SELECT MIN(retest_num) FROM chipid_final"
     ).fetchone()[0] == 1
+
+
+def test_real_digit_zero_key_is_parsed(tmp_path):
+    """Regression for the O-vs-0 bug: real files use 'EN-S0-CHIPID_R' (zero)."""
+    from make_test_stdf import gdr_chipid
+    from stdf_platform.chipid import CHIPID_KEY
+    # the generator now defaults to the canonical digit-zero key
+    assert CHIPID_KEY == "EN-S0-CHIPID_R"
+    assert b"EN-S0-CHIPID_R" in gdr_chipid("0b" + "0" * 64)
+
+    ft_file = tmp_path / "FT.stdf"
+    make_ft_stdf(ft_file, "FTZERO", parts=3)  # emits digit-zero key GDRs
+    data = parse_stdf(ft_file)
+    assert len(data.chip_ids) == 6  # 3 packages x 2 dies, key matched
+
+
+def test_letter_o_spelling_also_accepted(tmp_path):
+    """The letter-O spelling from the spec must still parse (accept-set)."""
+    # force the generator to emit the letter-O key, then confirm it still binds
+    import make_test_stdf as gen
+    orig = gen.gdr_chipid
+    gen.gdr_chipid = lambda efuse, key="EN-SO-CHIPID_R": orig(efuse, key)
+    try:
+        ft_file = tmp_path / "FTO.stdf"
+        gen.make_ft_stdf(ft_file, "FTO", parts=2)
+        data = parse_stdf(ft_file)
+        assert len(data.chip_ids) == 4
+    finally:
+        gen.gdr_chipid = orig
