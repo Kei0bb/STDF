@@ -454,7 +454,13 @@ class ParquetStorage:
         # Save decoded ChipID occurrences (EN-SO-CHIPID_R), partitioned like
         # test_data (lot_id / wafer_id / retest). The decoded origin wafer/x/y
         # are columns, not partitions.
-        if data.chip_ids:
+        #
+        # FT-only: at CP the decoded origin (wafer/x/y) just duplicates the
+        # native probe coordinates already in `parts`, so the ChipID table adds
+        # no information there. The value of ChipID is FT chiplet traceability
+        # (recovering each die's CP origin after packaging). We therefore skip
+        # writing the table for non-FT categories even if GDRs are present.
+        if data.chip_ids and test_category == "FT":
             chip_groups: dict[tuple, list] = {}
             for chip in data.chip_ids:
                 key = (chip.get("lot_id", ""), chip.get("wafer_id", ""))

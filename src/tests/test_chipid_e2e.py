@@ -199,3 +199,28 @@ def test_letter_o_spelling_also_accepted(tmp_path):
         assert len(data.chip_ids) == 4
     finally:
         gen.gdr_chipid = orig
+
+
+def test_cp_does_not_write_chipid_table(tmp_path):
+    """ChipID is FT-only: CP ingestion must not create a chipid table even if
+    the GDRs (and thus parsed chip_ids) are present."""
+    ft_file = tmp_path / "src.stdf"
+    make_ft_stdf(ft_file, "CPLOT", parts=3)
+    data = parse_stdf(ft_file)
+    assert len(data.chip_ids) == 6  # parser still captures them
+
+    storage = _storage(tmp_path)
+    counts = storage.save_stdf_data(
+        data, product="P", test_category="CP", sub_process="CP1",
+        source_file=ft_file.name,
+    )
+    assert not (tmp_path / "chipid").exists()
+    assert "chipid" not in counts
+
+
+def test_ft_still_writes_chipid_table(tmp_path):
+    ft_file = tmp_path / "ft.stdf"
+    make_ft_stdf(ft_file, "FTLOT", parts=3)
+    storage = _storage(tmp_path)
+    _ingest_ft(storage, ft_file)  # test_category="FT"
+    assert (tmp_path / "chipid").exists()
