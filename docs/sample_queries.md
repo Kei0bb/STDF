@@ -1,7 +1,8 @@
 # サンプル SQL クエリ集
 
-`schema.md` で定義された 4 テーブル（`lots` / `wafers` / `parts` / `test_data`）を  
-DuckDB ビュー経由で検索する際のリファレンスです。
+`schema.md` で定義された 5 テーブル（`lots` / `wafers` / `parts` / `test_data` /
+`chipid`）を DuckDB ビュー経由で検索する際のリファレンスです。  
+リテスト重複排除済みの `parts_final` / `test_data_final` / `chipid_final` も利用可能。
 
 ## 実行方法
 
@@ -475,20 +476,24 @@ ORDER BY cpk;
 
 ---
 
-## ChipID トレーサビリティ（EN-SO-CHIPID_R / TSMC）
+## ChipID トレーサビリティ（EN-S0-CHIPID_R / TSMC）
 
 FT の chiplet 製品は 1 パッケージに 2 die を含み、各 die の出自（fab / lot /
-wafer / x / y）は GDR の `EN-SO-CHIPID_R` をデコードした `chipid` テーブルに
-入ります。パッケージの一意キーは `part_txt`（2D バーコード）、die の区別は
-`chip_occurrence_index`（0 / 1）です。`chipid_final` は最新リテストのみ。
+wafer / x / y）は GDR の `EN-S0-CHIPID_R`（**5 文字目は数字ゼロ**）をデコードした
+`chipid` テーブルに入ります（**FT のみ生成**）。
+
+- パッケージの一意キー = `part_txt`（2D バーコード）
+- DUT 内の die 区別 = `chip_occurrence_index`（0 / 1）
+- die の恒久 ID = `efuse_raw`（`chipid_final` はこれで最新リテストのみに重複排除）
+
+### 1. パッケージ → 2 die の CP 出自を一覧
 
 ```sql
--- パッケージ（2D バーコード）→ 2 die の CP 出自を一覧
 SELECT
-    part_txt,
-    chip_occurrence_index,
-    origin_fab,        -- TSMC1 / TSMC2 / UNSUPPORTED
-    origin_lot,        -- CP ロット（6 文字）
+    part_txt,                 -- パッケージ 2D バーコード
+    chip_occurrence_index,    -- 0 / 1（die0 / die1）
+    origin_fab,               -- TSMC1 / TSMC2 / UNSUPPORTED
+    origin_lot,               -- CP ロット（6 文字, 例 E6B156）
     origin_wafer,
     origin_x,
     origin_y
@@ -497,19 +502,74 @@ WHERE lot_id = 'YOUR_FT_LOT'
 ORDER BY part_txt, chip_occurrence_index;
 ```
 
+### 2. 単一バーコードから全 die をたどる（現品トレース）
+
 ```sql
--- FT 不良パッケージを CP 出自ウェハ別に集計（歩留り相関の起点）
+SELECT chip_occurrence_index, origin_fab, origin_lot,
+       origin_wafer, origin_x, origin_y, efuse_raw
+FROM chipid_final
+WHERE part_txt = 'YOUR_2D_BARCODE'
+ORDER BY chip_occurrence_index;
+```
+
+### 3. CP 出自（ロット/ウェハ）から FT パッケージを逆引き
+
+```sql
+SELECT origin_wafer, origin_x, origin_y, part_txt, chip_occurrence_index
+FROM chipid_final
+WHERE origin_lot = 'E6B156' AND origin_wafer = 11
+ORDER BY origin_x, origin_y;
+```
+
+### 4. FT 不良を CP 出自ウェハ別に集計（CP↔FT 歩留り相関の起点）
+
+```sql
 SELECT
     c.origin_fab, c.origin_lot, c.origin_wafer,
-    COUNT(*) AS dies,
-    SUM(CASE WHEN p.passed THEN 0 ELSE 1 END) AS fail_dies
+    COUNT(*)                              AS dies,
+    SUM(CASE WHEN p.passed THEN 0 ELSE 1 END) AS fail_dies,
+    ROUND(100.0 * SUM(CASE WHEN p.passed THEN 0 ELSE 1 END) / COUNT(*), 2) AS fail_pct
 FROM chipid_final c
 JOIN parts_final p
   ON p.lot_id = c.lot_id AND p.part_txt = c.part_txt
 WHERE c.lot_id = 'YOUR_FT_LOT' AND c.valid
 GROUP BY c.origin_fab, c.origin_lot, c.origin_wafer
-ORDER BY fail_dies DESC;
+ORDER BY fail_pct DESC;
 ```
+
+### 5. 不良パッケージの 2 die が「どの CP ウェハの組み合わせ」か
+
+```sql
+-- die0 と die1 の出自ウェハをペアで並べ、不良パッケージのみ抽出
+WITH d AS (
+    SELECT c.part_txt, c.chip_occurrence_index,
+           c.origin_lot || ':W' || c.origin_wafer AS origin, p.passed
+    FROM chipid_final c
+    JOIN parts_final p ON p.lot_id = c.lot_id AND p.part_txt = c.part_txt
+    WHERE c.lot_id = 'YOUR_FT_LOT' AND c.valid
+)
+SELECT
+    MAX(CASE WHEN chip_occurrence_index = 0 THEN origin END) AS die0_origin,
+    MAX(CASE WHEN chip_occurrence_index = 1 THEN origin END) AS die1_origin,
+    COUNT(*) FILTER (WHERE NOT passed) AS fail_count
+FROM d
+GROUP BY part_txt
+HAVING fail_count > 0;
+```
+
+### 6. デコード健全性チェック（取りこぼし / 非対応 fab）
+
+```sql
+SELECT
+    COUNT(*)                                   AS total_chipids,
+    SUM(CASE WHEN valid THEN 0 ELSE 1 END)     AS invalid_efuse,
+    SUM(CASE WHEN origin_fab = 'UNSUPPORTED' THEN 1 ELSE 0 END) AS unsupported_fab
+FROM chipid
+WHERE lot_id = 'YOUR_FT_LOT';
+```
+
+> **注**: `chipid` は FT のみ。CP では die 出自＝プローブ座標（`parts` の
+> `wafer_id` / `x_coord` / `y_coord`）で取得できるため生成されません。
 
 ---
 
@@ -519,3 +579,6 @@ ORDER BY fail_dies DESC;
 - `wafers` テーブルにリテスト履歴がある場合、最新リテストのみ取得する  
   `ROW_NUMBER() ... ORDER BY retest_num DESC` パターンを使用してください。
 - `parts.passed` は **BOOL** 型、`test_data.passed` は **STRING** 型（`'P'` / `'F'`）です。
+- FT は `wafer_id` / 座標が無いため、`*_final` の重複排除は `part_txt`（2D バーコード）
+  を identity に使います。`chipid_final` は `efuse_raw`（die 恒久 ID）で排除。
+- `chipid` は **FT のみ**生成。CP には行がありません（出自はプローブ座標で代替）。
