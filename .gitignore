@@ -15,9 +15,6 @@ downloads/
 *.jpg
 *.pyc
 
-query.py
 config.yaml
 .DS_Store
 .env
-
-query.py
