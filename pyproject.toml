@@ -15,11 +15,6 @@ dependencies = [
     "pandas>=2.0.0",
 ]
 
-[project.optional-dependencies]
-postgres = [
-    "psycopg2-binary>=2.9.0",
-]
-
 [project.scripts]
 stdf = "stdf_platform.cli:main"
 

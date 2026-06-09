@@ -4,20 +4,17 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-`stdf` is a high-speed ETL pipeline for semiconductor test data (STDF format) → Parquet + DuckDB + PostgreSQL. It supports CLI usage and a FastAPI + Alpine.js web UI. Python-only parser with ProcessPoolExecutor for parallel batch ingestion.
+`stdf` is a high-speed ETL pipeline for semiconductor test data (STDF format) → Parquet + DuckDB. It supports CLI usage and a FastAPI + Alpine.js web UI. Python-only parser with ProcessPoolExecutor for parallel batch ingestion.
 
 ## Commands
 
 ### Setup
 ```bash
 uv sync                                    # Install dependencies
-uv pip install "psycopg2-binary>=2.9.0"   # Optional: PostgreSQL sync
 ```
 
 ### Running
 ```bash
-docker compose up -d                       # Start PostgreSQL
-
 stdf ingest <file> --product PROD       # Ingest single STDF file (Parquet)
 stdf ingest-all ./downloads -p PROD     # Batch ingest directory (parallel workers)
 stdf fetch                              # FTP differential sync
@@ -33,7 +30,7 @@ uv run python make_test_stdf.py            # Generate synthetic STDF files in te
 
 ### Data Flow
 ```
-STDF file → Python parser (struct.Struct optimized) → Parquet (Hive-partitioned) → DuckDB views → Web UI / PostgreSQL
+STDF file → Python parser (struct.Struct optimized) → Parquet (Hive-partitioned) → DuckDB views → Web UI / CLI
 ```
 
 The ingest worker runs in an **isolated subprocess** (`_ingest_worker.py`) for memory safety — parser crashes don't affect the main process. Batch ingestion uses `ThreadPoolExecutor` with configurable worker count.
@@ -73,12 +70,6 @@ FastAPI server creates one shared DuckDB `:memory:` connection at startup (via `
 
 ### Configuration
 `config.yaml` (not tracked; copy from `config.yaml.example`). Supports `${ENV_VAR}` expansion. The `--env dev` flag isolates data to `data-dev/` and skips sync history tracking.
-
-### PostgreSQL Multi-User Access (optional)
-- `stdf` user: read/write
-- `stdf_reader` user: read-only (JMP, Excel, BI tools)
-- Schema initialized from `docker/postgres/init.sql`
-- Indexes optimized for JMP query patterns on `test_data`
 
 ## Key Design Decisions
 

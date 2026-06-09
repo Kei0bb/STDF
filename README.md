@@ -128,12 +128,6 @@ glob ビュー (`read_parquet('data/**/*.parquet', hive_partitioning=true)`) は
 uv sync
 ```
 
-PostgreSQL を使う場合（オプション）:
-
-```bash
-uv pip install "psycopg2-binary>=2.9.0"
-```
-
 ---
 
 ## 使用方法
@@ -267,24 +261,6 @@ stdf --env dev ingest-all ./test_data -p SCT101A  # data-dev/ に保存
 stdf --env dev db lots
 rm -rf data-dev/   # リセット
 ```
-
----
-
-## PostgreSQL（オプション）
-
-JMP / Excel / BI ツールから ODBC/JDBC で直接接続する場合に使用。
-
-```bash
-docker compose up -d postgres
-```
-
-| 項目 | 値 |
-|---|---|
-| Host | サーバーの IP アドレス |
-| Port | `5432` |
-| Database | `stdf` |
-| User | `stdf_reader` |
-| Password | `stdf_read_only` |
 
 ---
 
