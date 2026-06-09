@@ -138,7 +138,13 @@ class Database:
         return self.conn.execute(sql, params or []).fetchdf()
 
     def get_lot_summary(self, lot_id: str | None = None) -> list[dict]:
-        """Get lot summary with yield information (latest retest only)."""
+        """Get lot summary with yield information (retest-aware).
+
+        Yield is derived from parts_final (each die/package's latest retest),
+        not from the WRR summary in `wafers`. The WRR of a retest run covers
+        only the re-measured subset, and FT has no WRR at all — parts_final is
+        correct for both CP and FT regardless of partial vs full retests.
+        """
         where_clause = "WHERE l.lot_id = $1" if lot_id else ""
         params = [lot_id] if lot_id else []
 
@@ -151,17 +157,22 @@ class Database:
             l.part_type,
             l.job_name,
             l.job_rev,
-            COUNT(DISTINCT w.wafer_id) as wafer_count,
-            SUM(w.part_count) as total_parts,
-            SUM(w.good_count) as good_parts,
-            ROUND(100.0 * SUM(w.good_count) / NULLIF(SUM(w.part_count), 0), 2) as yield_pct
+            MAX(p.wafer_count) as wafer_count,
+            MAX(p.total_parts) as total_parts,
+            MAX(p.good_parts) as good_parts,
+            MAX(p.yield_pct) as yield_pct
         FROM lots l
         LEFT JOIN (
-            SELECT *, ROW_NUMBER() OVER(
-                PARTITION BY lot_id, wafer_id ORDER BY retest_num DESC
-            ) as rn
-            FROM wafers
-        ) w ON l.lot_id = w.lot_id AND w.rn = 1
+            SELECT
+                lot_id,
+                COUNT(DISTINCT NULLIF(wafer_id, '')) as wafer_count,
+                COUNT(*) as total_parts,
+                SUM(CASE WHEN passed THEN 1 ELSE 0 END) as good_parts,
+                ROUND(100.0 * SUM(CASE WHEN passed THEN 1 ELSE 0 END)
+                      / NULLIF(COUNT(*), 0), 2) as yield_pct
+            FROM parts_final
+            GROUP BY lot_id
+        ) p ON l.lot_id = p.lot_id
         {where_clause}
         GROUP BY l.lot_id, l.product, l.test_category, l.sub_process, l.part_type, l.job_name, l.job_rev
         ORDER BY l.product, l.test_category, l.sub_process, l.lot_id
@@ -169,23 +180,22 @@ class Database:
         return self.query(sql, params)
 
     def get_wafer_yield(self, lot_id: str) -> list[dict]:
-        """Get yield by wafer for a lot (latest retest only)."""
+        """Get yield by wafer for a lot (retest-aware, die-level).
+
+        Computed from parts_final so each die's final disposition is its latest
+        retest. For FT (no wafer concept) wafer_id is empty, yielding a single
+        package-level group instead of an empty result.
+        """
         sql = """
         SELECT
             wafer_id,
-            part_count as total,
-            good_count as good,
-            ROUND(100.0 * good_count / NULLIF(part_count, 0), 2) as yield_pct,
-            test_rev,
-            retest_num
-        FROM (
-            SELECT *, ROW_NUMBER() OVER(
-                PARTITION BY lot_id, wafer_id ORDER BY retest_num DESC
-            ) as rn
-            FROM wafers
-            WHERE lot_id = $1
-        )
-        WHERE rn = 1
+            COUNT(*) as total,
+            SUM(CASE WHEN passed THEN 1 ELSE 0 END) as good,
+            ROUND(100.0 * SUM(CASE WHEN passed THEN 1 ELSE 0 END)
+                  / NULLIF(COUNT(*), 0), 2) as yield_pct
+        FROM parts_final
+        WHERE lot_id = $1
+        GROUP BY wafer_id
         ORDER BY yield_pct DESC
         """
         return self.query(sql, [lot_id])
@@ -223,24 +233,29 @@ class Database:
         return self.query(sql, [lot_id])
 
     def compare_lots(self, lot_ids: list[str]) -> list[dict]:
-        """Compare yield across multiple lots (latest retest only)."""
+        """Compare yield across multiple lots (retest-aware, die-level)."""
         placeholders = ", ".join(f"${i+1}" for i in range(len(lot_ids)))
         sql = f"""
         SELECT
             l.lot_id,
             l.job_name,
             l.job_rev,
-            COUNT(DISTINCT w.wafer_id) as wafers,
-            SUM(w.part_count) as total,
-            SUM(w.good_count) as good,
-            ROUND(100.0 * SUM(w.good_count) / NULLIF(SUM(w.part_count), 0), 2) as yield_pct
+            MAX(p.wafers) as wafers,
+            MAX(p.total) as total,
+            MAX(p.good) as good,
+            MAX(p.yield_pct) as yield_pct
         FROM lots l
         LEFT JOIN (
-            SELECT *, ROW_NUMBER() OVER(
-                PARTITION BY lot_id, wafer_id ORDER BY retest_num DESC
-            ) as rn
-            FROM wafers
-        ) w ON l.lot_id = w.lot_id AND w.rn = 1
+            SELECT
+                lot_id,
+                COUNT(DISTINCT NULLIF(wafer_id, '')) as wafers,
+                COUNT(*) as total,
+                SUM(CASE WHEN passed THEN 1 ELSE 0 END) as good,
+                ROUND(100.0 * SUM(CASE WHEN passed THEN 1 ELSE 0 END)
+                      / NULLIF(COUNT(*), 0), 2) as yield_pct
+            FROM parts_final
+            GROUP BY lot_id
+        ) p ON l.lot_id = p.lot_id
         WHERE l.lot_id IN ({placeholders})
         GROUP BY l.lot_id, l.job_name, l.job_rev
         ORDER BY yield_pct DESC

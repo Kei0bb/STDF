@@ -27,17 +27,24 @@ def get_summary(db_tuple: DB, lot: Annotated[list[str], Query()] = []) -> list[d
                 SELECT
                     l.lot_id, l.product, l.test_category, l.sub_process,
                     l.part_type, l.job_name, l.job_rev,
-                    COUNT(DISTINCT w.wafer_id)                              AS wafer_count,
-                    SUM(w.part_count)                                       AS total_parts,
-                    SUM(w.good_count)                                       AS good_parts,
-                    ROUND(100.0 * SUM(w.good_count)
-                        / NULLIF(SUM(w.part_count), 0), 2)                 AS yield_pct
+                    MAX(p.wafer_count)                                      AS wafer_count,
+                    MAX(p.total_parts)                                      AS total_parts,
+                    MAX(p.good_parts)                                       AS good_parts,
+                    MAX(p.yield_pct)                                        AS yield_pct
                 FROM lots l
                 LEFT JOIN (
-                    SELECT *, ROW_NUMBER() OVER (
-                        PARTITION BY lot_id, wafer_id ORDER BY retest_num DESC
-                    ) AS rn FROM wafers
-                ) w ON l.lot_id = w.lot_id AND w.rn = 1
+                    -- Retest-aware, die/package-level yield from parts_final
+                    -- (WRR counts are partial on a retest and absent for FT).
+                    SELECT
+                        lot_id,
+                        COUNT(DISTINCT NULLIF(wafer_id, ''))               AS wafer_count,
+                        COUNT(*)                                          AS total_parts,
+                        SUM(CASE WHEN passed THEN 1 ELSE 0 END)           AS good_parts,
+                        ROUND(100.0 * SUM(CASE WHEN passed THEN 1 ELSE 0 END)
+                            / NULLIF(COUNT(*), 0), 2)                     AS yield_pct
+                    FROM parts_final
+                    GROUP BY lot_id
+                ) p ON l.lot_id = p.lot_id
                 WHERE l.lot_id IN ({placeholders})
                 GROUP BY l.lot_id, l.product, l.test_category, l.sub_process,
                          l.part_type, l.job_name, l.job_rev
@@ -58,15 +65,13 @@ def get_wafer_yield(db_tuple: DB, lot: str = "") -> list[dict]:
         with lock:
             rows = db.execute("""
                 SELECT wafer_id,
-                       part_count AS total,
-                       good_count AS good,
-                       ROUND(100.0 * good_count / NULLIF(part_count, 0), 2) AS yield_pct,
-                       retest_num
-                FROM (
-                    SELECT *, ROW_NUMBER() OVER (
-                        PARTITION BY lot_id, wafer_id ORDER BY retest_num DESC
-                    ) AS rn FROM wafers WHERE lot_id = ?
-                ) WHERE rn = 1
+                       COUNT(*)                                            AS total,
+                       SUM(CASE WHEN passed THEN 1 ELSE 0 END)             AS good,
+                       ROUND(100.0 * SUM(CASE WHEN passed THEN 1 ELSE 0 END)
+                           / NULLIF(COUNT(*), 0), 2)                       AS yield_pct
+                FROM parts_final
+                WHERE lot_id = ?
+                GROUP BY wafer_id
                 ORDER BY wafer_id
             """, [lot]).fetchdf()
         return rows.to_dict(orient="records")
