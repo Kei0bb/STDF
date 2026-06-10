@@ -188,17 +188,18 @@ class ParquetStorage:
             return path
         return base
 
-    def _write_parquet(self, table: pa.Table, path: Path, compression: str = "gzip"):
+    def _write_parquet(self, table: pa.Table, path: Path, compression: str = "zstd"):
         """
-        Write Parquet file with maximum compatibility settings.
-        
-        Uses Parquet 1.0 format and conservative options for JMP/Excel/viewer compatibility.
+        Write Parquet file.
+
+        Keeps Parquet 1.0 format for maximum reader compatibility; zstd codec is
+        read by DuckDB and is smaller + faster to decompress than gzip/snappy.
         """
         pq.write_table(
             table,
             path,
             compression=compression,
-            version="1.0",  # Maximum compatibility
+            version="1.0",  # Maximum compatibility (zstd codec works at v1.0)
             use_dictionary=True,
             write_statistics=True,
             coerce_timestamps="ms",  # Millisecond precision
@@ -244,7 +245,7 @@ class ParquetStorage:
         test_category: str = "UNKNOWN",
         sub_process: str = "",
         source_file: str = "",
-        compression: str = "snappy",
+        compression: str = "zstd",
     ) -> dict[str, int]:
         """
         Save STDF data to Parquet files.

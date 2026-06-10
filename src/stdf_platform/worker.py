@@ -123,7 +123,7 @@ def run_ingest_pool(
     Args:
         files: List of (remote_path, local_path, product, ttype) tuples.
         data_dir: Root data directory for Parquet output.
-        compression: Parquet compression (gzip, snappy, etc.).
+        compression: Parquet compression (zstd, gzip, snappy, etc.).
         max_workers: Max concurrent subprocesses (default 4).
         timeout: Per-file timeout in seconds (default 300).
 
