@@ -38,4 +38,4 @@ storage:
 
 processing:
   batch_size: 1000
-  compression: "zstd"  # snappy/gzip より高圧縮・高速展開。DuckDB 推奨
+  compression: "gzip"  # snappy より遅いが互換性が高い

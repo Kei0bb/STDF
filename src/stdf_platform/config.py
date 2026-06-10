@@ -62,7 +62,7 @@ class StorageConfig:
 class ProcessingConfig:
     """Processing configuration."""
     batch_size: int = 1000
-    compression: str = "zstd"
+    compression: str = "snappy"
 
 
 @dataclass
