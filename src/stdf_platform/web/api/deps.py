@@ -14,12 +14,11 @@ def get_data_dir() -> Path:
     return Path(os.environ.get("STDF_DATA_DIR", "./data"))
 
 
-# Dedup identity within a (lot, retest) group: CP uses die location, FT uses the
-# package 2D barcode (PART_TXT). Mirrors stdf_platform.database._DEDUP_UNIT.
-_DEDUP_UNIT = (
-    "CASE WHEN test_category = 'FT' THEN part_txt "
-    "ELSE CONCAT(wafer_id, '|', x_coord, '|', y_coord) END"
-)
+# Dedup identity within a (lot, retest) group, as native partition columns.
+# Equivalent to the old CASE/CONCAT key (CP groups by wafer_id+x/y since
+# part_txt='', FT groups by part_txt since wafer_id/x/y are constant) but skips
+# per-row string concat. Mirrors stdf_platform.database._DEDUP_UNIT.
+_DEDUP_UNIT = "wafer_id, x_coord, y_coord, part_txt"
 
 
 # ── DuckDB view setup (called once at lifespan) ───────────────────────────────

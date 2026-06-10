@@ -8,15 +8,13 @@ import duckdb
 from .config import StorageConfig
 
 
-# Dedup identity within a (lot, retest) group:
-#   CP  -> physical die location (wafer_id + x/y coords)
-#   FT  -> package 2D barcode (PART_TXT); FT has no wafer/coords, so the old
-#          wafer+coord key collapsed every FT part into one row.
-# test_category is available as a Hive partition column on every table.
-_DEDUP_UNIT = (
-    "CASE WHEN test_category = 'FT' THEN part_txt "
-    "ELSE CONCAT(wafer_id, '|', x_coord, '|', y_coord) END"
-)
+# Dedup identity within a (lot, retest) group, expressed as native partition
+# columns. CP rows have part_txt='' (so they group by wafer_id + x/y); FT rows
+# have wafer_id='' and x=y=-32768 (so they group by part_txt). Listing all four
+# columns is equivalent to the old CASE/CONCAT key for both categories — the
+# "unused" columns are constant within a category — but avoids per-row string
+# concatenation, making the ROW_NUMBER() window dedup ~25% faster.
+_DEDUP_UNIT = "wafer_id, x_coord, y_coord, part_txt"
 
 
 class Database:

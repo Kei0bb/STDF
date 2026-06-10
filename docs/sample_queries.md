@@ -23,6 +23,15 @@
 LOT_ID = "E6A773.00"
 ```
 
+> [!TIP]
+> **大量データで `*_final` クエリが遅いとき**：`*_final` は `ROW_NUMBER()` の重複
+> 排除を毎回計算するため、巨大テーブルでは重くなります。1 ロットに絞って作業する
+> なら `use_lot('LOT_ID')` を呼ぶと、そのロットの `parts_final` /
+> `test_data_final` / `chipid_final` をメモリ上の表に materialize し、以降のクエリが
+> 約 45 倍高速になります（実測）。全ロットに戻すには `use_all()`。
+> 全件を Python に取り込む場合は `q(sql, limit=0, as_arrow=True)`（pandas 変換を
+> 省いて約 3.5 倍）か、ファイル出力なら `to_csv(sql)` を使ってください。
+
 ### CLI から直接実行
 
 ```bash

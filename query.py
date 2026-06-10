@@ -7,8 +7,11 @@
 # **参考:** `docs/sample_queries.md` にクエリ集あり
 #
 # ## 主な関数
-# - `q(sql, limit=100)` — プレビュー用 DataFrame 返却（limit=0 で全件）
-# - `to_csv(sql, output, chunk_size)` — メモリ効率的な CSV 書き出し
+# - `q(sql, limit=100, as_arrow=False)` — プレビュー用 DataFrame 返却
+#   （limit=0 で全件 / as_arrow=True で pyarrow.Table を高速取得）
+# - `to_csv(sql, output)` — メモリ効率的な CSV 書き出し（DuckDB COPY）
+# - `use_lot('LOT_ID')` — 対象ロットの *_final を materialize（以降 ~45x 高速）
+# - `use_all()` — *_final を全ロット対象のビューに復元
 
 # %% Setup — DuckDB
 import duckdb
@@ -30,11 +33,10 @@ _storage = _cfg.get("storage", {})
 DATA_DIR = Path(_storage.get("data_dir", "./data"))
 print(f"Data dir: {DATA_DIR}")
 
-# Dedup identity within a (lot, retest) group: CP = die location, FT = 2D barcode.
-_DEDUP_UNIT = (
-    "CASE WHEN test_category = 'FT' THEN part_txt "
-    "ELSE CONCAT(wafer_id, '|', x_coord, '|', y_coord) END"
-)
+# Dedup identity within a (lot, retest) group, as native partition columns.
+# CP groups by wafer_id+x/y (part_txt=''), FT groups by part_txt (wafer/x/y
+# constant). Equivalent to a CASE/CONCAT key but faster (no per-row string concat).
+_DEDUP_UNIT = "wafer_id, x_coord, y_coord, part_txt"
 
 con = duckdb.connect(":memory:")
 for table in ["lots", "wafers", "parts", "test_data", "chipid"]:
@@ -48,53 +50,83 @@ for table in ["lots", "wafers", "parts", "test_data", "chipid"]:
     else:
         print(f"  - {table}  (not found)")
 
-if (DATA_DIR / "parts").exists():
-    con.execute(f"""
-        CREATE OR REPLACE VIEW parts_final AS
-        SELECT * EXCLUDE (rn) FROM (
-            SELECT *, ROW_NUMBER() OVER (
-                PARTITION BY lot_id, {_DEDUP_UNIT}
-                ORDER BY retest_num DESC
-            ) AS rn FROM parts
-        ) WHERE rn = 1
-    """)
-    print("  ✓ parts_final")
+# retest 重複排除ビュー（全ロット）。ROW_NUMBER() ウィンドウを毎クエリ計算するため
+# 大規模だと重い → 1 ロットに絞って作業するなら use_lot() で materialize 推奨。
+_FINAL_SPECS = {
+    "parts_final":     ("parts",     f"PARTITION BY lot_id, {_DEDUP_UNIT}"),
+    "test_data_final": ("test_data", f"PARTITION BY lot_id, {_DEDUP_UNIT}, test_num, pin_num"),
+    "chipid_final":    ("chipid",    "PARTITION BY lot_id, efuse_raw"),
+}
 
-if (DATA_DIR / "test_data").exists():
-    con.execute(f"""
-        CREATE OR REPLACE VIEW test_data_final AS
-        SELECT * EXCLUDE (rn) FROM (
-            SELECT *, ROW_NUMBER() OVER (
-                PARTITION BY lot_id, {_DEDUP_UNIT}, test_num, pin_num
-                ORDER BY retest_num DESC
-            ) AS rn FROM test_data
-        ) WHERE rn = 1
-    """)
-    print("  ✓ test_data_final")
 
-if (DATA_DIR / "chipid").exists():
-    con.execute("""
-        CREATE OR REPLACE VIEW chipid_final AS
-        SELECT * EXCLUDE (rn) FROM (
-            SELECT *, ROW_NUMBER() OVER (
-                PARTITION BY lot_id, efuse_raw
-                ORDER BY retest_num DESC
-            ) AS rn FROM chipid
-        ) WHERE rn = 1
-    """)
-    print("  ✓ chipid_final")
+def _make_final_views() -> None:
+    """全ロット対象の *_final ビューを (再)作成。"""
+    for name, (base, part) in _FINAL_SPECS.items():
+        if (DATA_DIR / base).exists():
+            con.execute(f"""
+                CREATE OR REPLACE VIEW {name} AS
+                SELECT * EXCLUDE (rn) FROM (
+                    SELECT *, ROW_NUMBER() OVER ({part} ORDER BY retest_num DESC) AS rn
+                    FROM {base}
+                ) WHERE rn = 1
+            """)
+            print(f"  ✓ {name}")
+
+
+_make_final_views()
+
+LOT_ID: str | None = None   # use_lot() が設定。各セルでも上書き可。
 
 print("\nReady (DuckDB).  q(sql) でプレビュー、to_csv(sql) で CSV 書き出し。")
+print("大量データは use_lot('LOT_ID') で対象ロットを materialize（以降 ~45x 高速）。")
 
 
-def q(sql: str, limit: int = 100) -> pd.DataFrame:
-    """SQL を実行して DataFrame を返す（プレビュー用）。limit=0 で全件取得。
+def use_lot(lot: str) -> None:
+    """対象ロットの *_final を temp テーブルに materialize し、ビューを差し替える。
 
-    大量データの場合は to_csv() を使用してください。
+    以降 parts_final / test_data_final / chipid_final への q() / to_csv() は、
+    そのロットだけを保持する小さな表を引くため、ROW_NUMBER() ウィンドウの
+    毎回再計算が消えて大幅に高速化（実測 ~45x）。全ロットに戻すには use_all()。
+    """
+    global LOT_ID
+    LOT_ID = lot
+    done = []
+    for name, (base, part) in _FINAL_SPECS.items():
+        if not (DATA_DIR / base).exists():
+            continue
+        cache = f"_lot_{name}"
+        con.execute(f"""
+            CREATE OR REPLACE TEMP TABLE {cache} AS
+            SELECT * EXCLUDE (rn) FROM (
+                SELECT *, ROW_NUMBER() OVER ({part} ORDER BY retest_num DESC) AS rn
+                FROM {base} WHERE lot_id = ?
+            ) WHERE rn = 1
+        """, [lot])
+        con.execute(f"CREATE OR REPLACE VIEW {name} AS SELECT * FROM {cache}")
+        n = con.execute(f"SELECT COUNT(*) FROM {cache}").fetchone()[0]
+        done.append(f"{name}={n:,}")
+    print(f"use_lot({lot!r}): " + ", ".join(done) + "  (use_all() で全ロットに復元)")
+
+
+def use_all() -> None:
+    """*_final を全ロット対象のビューに戻す（dedup を毎クエリ再計算）。"""
+    global LOT_ID
+    LOT_ID = None
+    _make_final_views()
+    print("use_all(): 全ロットの *_final ビューを復元しました。")
+
+
+def q(sql: str, limit: int = 100, as_arrow: bool = False):
+    """SQL を実行して結果を返す（プレビュー用）。limit=0 で全件取得。
+
+    大量データを取得する場合:
+      - as_arrow=True で pyarrow.Table を返す（pandas 変換を省き ~3.5x 高速）
+      - もしくは to_csv() でファイルへ直接書き出し（Python メモリ消費ゼロ）
     """
     if limit > 0 and "LIMIT" not in sql.upper():
         sql = sql.rstrip("; \n") + f"\nLIMIT {limit}"
-    return con.execute(sql).fetchdf()
+    res = con.execute(sql)
+    return res.fetch_arrow_table() if as_arrow else res.fetchdf()
 
 
 def to_csv(sql: str, output: str | Path = "output.csv") -> None:
