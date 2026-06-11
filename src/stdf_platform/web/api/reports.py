@@ -2,6 +2,7 @@
 
 import logging
 from datetime import datetime, timezone
+from urllib.parse import quote
 
 from fastapi import APIRouter
 
@@ -35,7 +36,7 @@ def list_reports() -> list[dict]:
                 "test_category": parts.get("test_category", ""),
                 "lot_id": parts.get("lot_id", ""),
                 "modified": mtime,
-                "url": f"/reports/{rel}",
+                "url": "/reports/" + quote(rel),
             })
         except Exception as e:  # noqa: BLE001
             logger.warning("skipping report %s: %s", report, e)
