@@ -416,6 +416,7 @@ def _run_ingest_batch(
         (successes, failures) lists of IngestResult.
     """
     from .worker import run_ingest_pool
+    from .atomic import atomic_write_json
 
     successes, failures = run_ingest_pool(
         files=to_ingest,
@@ -427,6 +428,17 @@ def _run_ingest_batch(
 
     for result in successes:
         sync_manager.mark_ingested(result.remote_path)
+
+    # Structured failure record for automation (always written, even if empty).
+    atomic_write_json(
+        config.storage.data_dir / "ingest_failures.json",
+        {
+            "failures": [
+                {"path": str(r.local_path), "remote_path": r.remote_path, "error": r.error}
+                for r in failures
+            ]
+        },
+    )
 
     console.print(f"\n[green]✓[/green] Ingested {len(successes)} files")
     if failures:
