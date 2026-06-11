@@ -19,6 +19,8 @@ stdf ingest <file> --product PROD       # Ingest single STDF file (Parquet)
 stdf ingest-all ./downloads -p PROD     # Batch ingest directory (parallel workers)
 stdf fetch                              # FTP differential sync
 stdf web                                # Web UI at http://localhost:8000
+stdf report --lot X -p PROD [-c CP|FT]   # Generate one lot's HTML report
+stdf report --pending                    # Regenerate missing/stale reports
 ```
 
 ### Generate test data
@@ -64,6 +66,11 @@ The `retest_num` is derived from partition depth, not stored in STDF — duplica
     - `api/export.py` — CSV export (pivot & long format)
     - `api/deps.py` — per-request `:memory:` DuckDB connection
     - `static/` — Alpine.js SPA (index.html, app.js, plots.js)
+  - `reporting/` — HTML report engine (Parquet → self-contained HTML)
+    - `queries.py` — analysis SQL on the Phase-1 views (`views.py`)
+    - `sections.py` — section builders → Plotly figures + tables (graph_objects)
+    - `render.py` — Jinja2 (`templates/report.html.j2`) + embedded plotly.js
+    - `generator.py` — `generate_lot_report` / `pending_lots`; writes `data/reports/...`
 
 ### Web UI DuckDB Connection Pattern
 FastAPI server creates one shared DuckDB `:memory:` connection at startup (via `lifespan`). All API requests reuse this single connection — Parquet is the source of truth. CLI tools (`stdf db`) and `query.py` also use DuckDB `:memory:`.
@@ -81,3 +88,7 @@ FastAPI server creates one shared DuckDB `:memory:` connection at startup (via `
 - **Gzip auto-detection**: Files matching `*.stdf.gz`, `*.std.gz` are decompressed to a temp path before parsing.
 - **Windows path safety**: Partition values are sanitized to remove characters invalid on Windows filesystems.
 - **Product detection**: Use `--from-path` to infer product/test_type from FTP path structure `{...}/{PRODUCT}/{CP|FT}/...`.
+- **Reports are a disposable cache**: `data/reports/.../report.html` is always
+  overwritten and regenerated from Parquet (the source of truth). plotly.js is
+  embedded inline (~4MB) for offline viewing. Post-ingest regeneration is
+  failure-isolated — a report error never fails an ingest.

@@ -39,3 +39,8 @@ storage:
 processing:
   batch_size: 1000
   compression: "zstd"  # gzip より高圧縮・高速展開。DuckDB が読める（Parquet v2.6 / 既定エンコーディング）
+
+# Report engine (stdf report / auto-regenerated after ingest)
+reporting:
+  histogram_top_n: 20          # parametric histograms: top-N by fail rate
+  always_include_tests: {}     # e.g. {PRODUCT_A: [1234, 5678]} — always plotted
