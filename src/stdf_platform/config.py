@@ -57,11 +57,23 @@ class StorageConfig:
             download_dir=self.download_dir,
         )
 
+    @property
+    def reports_dir(self) -> Path:
+        return self.data_dir / "reports"
+
 
 @dataclass
 class ProcessingConfig:
     """Processing configuration."""
     compression: str = "zstd"
+
+
+@dataclass
+class ReportingConfig:
+    """Report engine configuration."""
+    histogram_top_n: int = 20
+    # product -> list of test_num always rendered as a histogram regardless of fail rate
+    always_include_tests: dict[str, list[int]] = field(default_factory=dict)
 
 
 @dataclass
@@ -77,6 +89,7 @@ class Config:
     ftp: FTPConfig = field(default_factory=FTPConfig)
     storage: StorageConfig = field(default_factory=StorageConfig)
     processing: ProcessingConfig = field(default_factory=ProcessingConfig)
+    reporting: ReportingConfig = field(default_factory=ReportingConfig)
     filters: list[ProductFilter] = field(default_factory=list)
     exclude: list[str] = field(default_factory=list)
 
@@ -132,6 +145,7 @@ class Config:
         ftp_data = data.get("ftp", {})
         storage_data = data.get("storage", {})
         processing_data = data.get("processing", {})
+        reporting_data = data.get("reporting", {}) or {}
 
         # Parse filters format
         filters_data = data.get("filters", []) or []
@@ -149,12 +163,23 @@ class Config:
 
         exclude = [str(p) for p in (data.get("exclude") or [])]
 
+        raw_always = reporting_data.get("always_include_tests", {}) or {}
+        always_include = {
+            str(prod): [int(t) for t in (tests or [])]
+            for prod, tests in raw_always.items()
+        }
+        reporting = ReportingConfig(
+            histogram_top_n=int(reporting_data.get("histogram_top_n", 20)),
+            always_include_tests=always_include,
+        )
+
         return cls(
             ftp=FTPConfig(**ftp_data) if ftp_data else FTPConfig(),
             storage=StorageConfig(**storage_data) if storage_data else StorageConfig(),
             processing=ProcessingConfig(
                 **{k: v for k, v in processing_data.items() if k == "compression"}
             ) if processing_data else ProcessingConfig(),
+            reporting=reporting,
             filters=filters,
             exclude=exclude,
         )
