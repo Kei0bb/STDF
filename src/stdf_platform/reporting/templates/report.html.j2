@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>{{ product }} / {{ test_category }} / {{ lot_id }} — stdf report</title>
+  {# plotly.js is embedded inline so the file opens offline (~4MB). #}
+  <script type="text/javascript">{{ plotly_js }}</script>
+  <style>
+    body { background:#0f172a; color:#e2e8f0; font-family:system-ui,sans-serif; margin:0; padding:0 24px 64px; }
+    header { padding:20px 0; border-bottom:1px solid #334155; margin-bottom:16px; }
+    h1 { font-size:20px; color:#818cf8; margin:0; }
+    h2 { font-size:16px; color:#cbd5e1; border-bottom:1px solid #334155; padding-bottom:6px; margin-top:32px; }
+    .sub { color:#64748b; font-size:13px; }
+    table { border-collapse:collapse; margin:12px 0; font-size:13px; }
+    th, td { border:1px solid #334155; padding:4px 10px; text-align:left; }
+    th { background:#1e293b; color:#94a3b8; }
+    .caption { color:#94a3b8; font-size:12px; margin-top:12px; }
+    .note { color:#fbbf24; font-size:12px; margin:6px 0; }
+    .grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(420px,1fr)); gap:16px; }
+    .fig { background:#1e293b; border:1px solid #334155; border-radius:8px; padding:6px; }
+    nav a { color:#818cf8; font-size:12px; margin-right:12px; text-decoration:none; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>{{ product }} · {{ test_category }} · {{ lot_id }}</h1>
+    <div class="sub">Generated {{ generated_at }} · stdf report engine</div>
+    <nav>
+      {% for s in sections %}<a href="#sec-{{ loop.index }}">{{ s.title }}</a>{% endfor %}
+    </nav>
+  </header>
+
+  {% for s in sections %}
+  <section id="sec-{{ loop.index }}">
+    <h2>{{ s.title }}</h2>
+    {% for note in s.notes %}<div class="note">{{ note }}</div>{% endfor %}
+    {% for t in s.tables %}
+      <div class="caption">{{ t.caption }}</div>
+      <table>
+        <thead><tr>{% for c in t.columns %}<th>{{ c }}</th>{% endfor %}</tr></thead>
+        <tbody>
+          {% for row in t.rows %}<tr>{% for cell in row %}<td>{{ cell }}</td>{% endfor %}</tr>{% endfor %}
+        </tbody>
+      </table>
+    {% endfor %}
+    {% if s.figures %}
+    <div class="grid">
+      {% for fig in s.figures %}
+        <div class="fig" id="fig-{{ loop.index0 }}-{{ s.title|replace(' ','_') }}"></div>
+      {% endfor %}
+    </div>
+    <script type="application/json" class="figdata" data-section="{{ loop.index }}">
+      {{ figures_json[loop.index0] | safe }}
+    </script>
+    {% endif %}
+  </section>
+  {% endfor %}
+
+  <script type="text/javascript">
+    // Each section's figures are stored as a JSON array of Plotly fig specs in
+    // a <script class="figdata"> tag; plot them into the .fig divs in order.
+    document.querySelectorAll('section').forEach(function (sec) {
+      var holder = sec.querySelector('script.figdata');
+      if (!holder) return;
+      var figs = JSON.parse(holder.textContent);
+      var divs = sec.querySelectorAll('.fig');
+      figs.forEach(function (spec, i) {
+        if (divs[i]) Plotly.newPlot(divs[i], spec.data, spec.layout, {responsive: true});
+      });
+    });
+  </script>
+</body>
+</html>
