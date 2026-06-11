@@ -457,6 +457,21 @@ def _run_ingest_batch(
                     console.print(f"  [yellow]![/yellow] Could not delete {result.local_path.name}: {e}")
         console.print(f"[green]✓[/green] Deleted {cleaned} source files")
 
+    # Post-ingest report regeneration. Disposable cache; a failure here must
+    # never fail the ingest — warn and continue.
+    if successes:
+        try:
+            from .reporting.generator import pending_lots, generate_reports_for_lots
+            lots = pending_lots(config)
+            if lots:
+                written = generate_reports_for_lots(
+                    config, lots,
+                    warn=lambda m: console.print(f"[yellow]![/yellow] {m}"),
+                )
+                console.print(f"[green]✓[/green] Regenerated {len(written)} report(s)")
+        except Exception as e:  # noqa: BLE001 — never fail ingest on report error
+            console.print(f"[yellow]![/yellow] report regeneration skipped: {e}")
+
     return successes, failures
 
 
