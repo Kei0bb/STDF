@@ -41,3 +41,14 @@ def test_missing_everything_returns_defaults(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)  # no config.yaml here
     cfg = Config.load()
     assert cfg.storage.data_dir == Path("./data")
+
+
+def test_load_tolerates_legacy_batch_size(tmp_path, monkeypatch):
+    monkeypatch.delenv("STDF_CONFIG", raising=False)
+    cfg_file = tmp_path / "config.yaml"
+    cfg_file.write_text(
+        "processing:\n  batch_size: 500\n  compression: gzip\n", encoding="utf-8"
+    )
+    cfg = Config.load(cfg_file)
+    assert cfg.processing.compression == "gzip"
+    assert not hasattr(cfg.processing, "batch_size")

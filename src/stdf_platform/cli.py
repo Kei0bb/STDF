@@ -807,7 +807,6 @@ def web(ctx, port: int, host: str):
 
     config: Config = ctx.obj["config"]
     os.environ["STDF_DATA_DIR"] = str(config.storage.data_dir)
-    os.environ["STDF_DB_PATH"] = str(config.storage.database)
 
     console.print(f"\n[bold]stdf - Web UI[/bold]")
     console.print(f"  URL:  [link]http://{host}:{port}[/link]")

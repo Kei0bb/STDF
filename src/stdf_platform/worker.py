@@ -6,6 +6,7 @@ for memory safety while gaining true parallelism across files.
 """
 
 import json
+import os
 import sys
 import subprocess
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -24,6 +25,9 @@ from rich.progress import (
 )
 
 console = Console()
+
+# Cap on data/ingest_worker.log before it is rotated to .1 (single backup).
+LOG_MAX_BYTES = 5 * 1024 * 1024
 
 
 @dataclass
@@ -82,9 +86,16 @@ def _run_single(
             success=False, error=f"timed out after {timeout}s (last: {last_line})",
         )
 
-    # Append stderr to log file after process exits (avoids pipe race condition)
+    # Append stderr to log file after process exits (avoids pipe race condition).
+    # Rotate to a single .1 backup once the log exceeds LOG_MAX_BYTES.
     if log_path and stderr:
         try:
+            if log_path.exists() and log_path.stat().st_size >= LOG_MAX_BYTES:
+                backup = log_path.with_suffix(log_path.suffix + ".1")
+                try:
+                    os.replace(log_path, backup)
+                except OSError:
+                    pass
             with open(log_path, "a", encoding="utf-8") as f:
                 f.write(stderr)
         except OSError:

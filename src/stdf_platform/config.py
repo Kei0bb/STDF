@@ -61,7 +61,6 @@ class StorageConfig:
 @dataclass
 class ProcessingConfig:
     """Processing configuration."""
-    batch_size: int = 1000
     compression: str = "zstd"
 
 
@@ -153,7 +152,9 @@ class Config:
         return cls(
             ftp=FTPConfig(**ftp_data) if ftp_data else FTPConfig(),
             storage=StorageConfig(**storage_data) if storage_data else StorageConfig(),
-            processing=ProcessingConfig(**processing_data) if processing_data else ProcessingConfig(),
+            processing=ProcessingConfig(
+                **{k: v for k, v in processing_data.items() if k == "compression"}
+            ) if processing_data else ProcessingConfig(),
             filters=filters,
             exclude=exclude,
         )

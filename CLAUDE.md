@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-`stdf` is a high-speed ETL pipeline for semiconductor test data (STDF format) → Parquet + DuckDB. It supports CLI usage and a FastAPI + Alpine.js web UI. Python-only parser with ProcessPoolExecutor for parallel batch ingestion.
+`stdf` is a high-speed ETL pipeline for semiconductor test data (STDF format) → Parquet + DuckDB. It supports CLI usage and a FastAPI + Alpine.js web UI. Python-only parser; parallel batch ingestion uses a ThreadPoolExecutor of isolated subprocesses (one subprocess per file).
 
 ## Commands
 
