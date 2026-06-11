@@ -5,6 +5,8 @@ State is persisted to {data_dir}/ingest_history.json.
 """
 
 import json
+import os
+import tempfile
 from datetime import datetime
 from pathlib import Path
 
@@ -28,10 +30,19 @@ class IngestHistory:
 
     def _save(self) -> None:
         self.history_file.parent.mkdir(parents=True, exist_ok=True)
-        self.history_file.write_text(
-            json.dumps({"ingested": self._done}, indent=2, ensure_ascii=False),
-            encoding="utf-8",
+        fd, tmp = tempfile.mkstemp(
+            dir=self.history_file.parent, prefix=".ingest_history.", suffix=".tmp"
         )
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump({"ingested": self._done}, f, indent=2, ensure_ascii=False)
+            os.replace(tmp, self.history_file)
+        except BaseException:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
 
     def is_done(self, path: Path) -> bool:
         return str(path.resolve()) in self._done

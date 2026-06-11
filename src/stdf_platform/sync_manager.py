@@ -1,6 +1,8 @@
 """Sync manager for tracking downloaded and ingested STDF files."""
 
 import json
+import os
+import tempfile
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -30,10 +32,21 @@ class SyncManager:
                 self._history = {"files": {}}
 
     def _save(self) -> None:
-        """Save history to file."""
+        """Save history atomically (temp file in same dir + os.replace)."""
         self.history_file.parent.mkdir(parents=True, exist_ok=True)
-        with open(self.history_file, "w", encoding="utf-8") as f:
-            json.dump(self._history, f, indent=2, ensure_ascii=False)
+        fd, tmp = tempfile.mkstemp(
+            dir=self.history_file.parent, prefix=".sync_history.", suffix=".tmp"
+        )
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(self._history, f, indent=2, ensure_ascii=False)
+            os.replace(tmp, self.history_file)
+        except BaseException:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
 
     def is_downloaded(self, remote_path: str) -> bool:
         """
