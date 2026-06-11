@@ -1,29 +1,108 @@
-"""Cross-lot comparison functions: yield, bin pareto, test stats, distributions.
-
-Full implementations land in Task 2. These stubs expose the correct signatures
-so the package imports cleanly in Task 1.
-"""
+"""Lot-to-lot comparison. All yields from parts_final (retest-aware)."""
 
 from __future__ import annotations
 
 import pandas as pd
+import plotly.graph_objects as go
+
+from ..config import Config
+from ..reporting import queries as rq
+from ..reporting.sections import _cpk  # reuse the one Cpk definition
 
 
-def yield_by_lot(s, product, lot_ids, test_category) -> pd.DataFrame:
-    """Return per-lot yield summary (pass rate, wafer count, part count)."""
-    raise NotImplementedError
+def _in_clause(lot_ids):
+    return ",".join("?" for _ in lot_ids)
 
 
-def bin_pareto_by_lot(s, product, lot_ids, test_category) -> pd.DataFrame:
-    """Return soft-bin failure pareto grouped by lot."""
-    raise NotImplementedError
+def yield_by_lot(s, product, lot_ids, test_category):
+    ph = _in_clause(lot_ids)
+    return s.conn.execute(
+        f"""
+        SELECT lot_id, wafer_id,
+               COUNT(*)                                        AS total,
+               SUM(CASE WHEN passed THEN 1 ELSE 0 END)         AS good,
+               ROUND(100.0 * SUM(CASE WHEN passed THEN 1 ELSE 0 END)
+                     / NULLIF(COUNT(*), 0), 2)                 AS yield_pct
+        FROM parts_final
+        WHERE lot_id IN ({ph})
+        GROUP BY lot_id, wafer_id
+        ORDER BY lot_id, wafer_id
+        """,
+        list(lot_ids),
+    ).fetchdf()
 
 
-def test_stats_by_lot(s, product, lot_ids, test_category, test_nums=None) -> pd.DataFrame:
-    """Return per-lot × per-test statistics (mean, σ, Cpk, fail rate)."""
-    raise NotImplementedError
+def bin_pareto_by_lot(s, product, lot_ids, test_category):
+    ph = _in_clause(lot_ids)
+    return s.conn.execute(
+        f"""
+        SELECT lot_id, soft_bin, COUNT(*) AS count,
+               ROUND(100.0 * COUNT(*)
+                   / SUM(COUNT(*)) OVER (PARTITION BY lot_id), 2) AS pct
+        FROM parts_final
+        WHERE lot_id IN ({ph})
+        GROUP BY lot_id, soft_bin
+        ORDER BY lot_id, count DESC
+        """,
+        list(lot_ids),
+    ).fetchdf()
+
+
+def test_stats_by_lot(s, product, lot_ids, test_category, test_nums=None):
+    if test_nums is None:
+        top_n = Config.load().reporting.histogram_top_n
+        nums = set()
+        for lot in lot_ids:
+            for f in rq.top_fail_tests(s.conn, product, test_category, lot, top_n):
+                nums.add(int(f["test_num"]))
+        test_nums = sorted(nums)
+    if not test_nums:
+        # no failing tests anywhere → empty frame with the right columns
+        return pd.DataFrame(
+            columns=["lot_id", "test_num", "n", "mean", "std",
+                     "cpk", "lo_limit", "hi_limit"])
+    lp = _in_clause(lot_ids)
+    tp = _in_clause(test_nums)
+    return s.conn.execute(
+        f"""
+        SELECT lot_id, test_num,
+               COUNT(*)                              AS n,
+               ROUND(AVG(result), 6)                 AS mean,
+               ROUND(stddev_pop(result), 6)          AS std,
+               ROUND(LEAST(
+                   (FIRST(hi_limit) - AVG(result)) / NULLIF(3*stddev_pop(result),0),
+                   (AVG(result) - FIRST(lo_limit)) / NULLIF(3*stddev_pop(result),0)
+               ), 3)                                 AS cpk,
+               FIRST(lo_limit)                       AS lo_limit,
+               FIRST(hi_limit)                       AS hi_limit
+        FROM test_data_final
+        WHERE lot_id IN ({lp}) AND test_num IN ({tp})
+          AND result IS NOT NULL AND rec_type IN ('PTR','MPR')
+          AND lo_limit IS NOT NULL AND hi_limit IS NOT NULL
+        GROUP BY lot_id, test_num
+        ORDER BY lot_id, test_num
+        """,
+        list(lot_ids) + list(test_nums),
+    ).fetchdf()
 
 
 def test_distribution_fig(s, product, lot_ids, test_category, test_num):
-    """Return a plotly Figure of the test-value distribution overlaid by lot."""
-    raise NotImplementedError
+    fig = go.Figure()
+    lo = hi = name = units = None
+    for lot in lot_ids:
+        v = rq.test_values(s.conn, product, test_category, lot, test_num)
+        if not v or not v.get("values"):
+            continue
+        lo, hi = v["lo_limit"], v["hi_limit"]
+        name, units = v["test_name"], v["units"]
+        fig.add_histogram(x=v["values"], name=lot, opacity=0.6, nbinsx=40)
+    for lim, lbl in ((lo, "LSL"), (hi, "USL")):
+        if lim is not None:
+            fig.add_vline(x=lim, line_color="#ef4444", line_dash="dash",
+                          annotation_text=lbl)
+    fig.update_layout(
+        barmode="overlay",
+        title=f"{name or ''} (#{test_num}) [{units or ''}] by lot",
+        template="plotly_dark", margin=dict(l=40, r=20, t=40, b=40),
+    )
+    return fig
