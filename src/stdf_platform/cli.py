@@ -825,5 +825,48 @@ def web(ctx, port: int, host: str):
     )
 
 
+@main.command()
+@click.option("--lot", "-l", "lot_id", help="Lot ID to report on")
+@click.option("--product", "-p", help="Product (required with --lot)")
+@click.option("--test-category", "-c", "test_category",
+              type=click.Choice(["CP", "FT"]), help="Limit to one category")
+@click.option("--pending", is_flag=True, help="Regenerate missing/stale reports")
+@click.pass_context
+def report(ctx, lot_id, product, test_category, pending, verbose=False):
+    """Generate self-contained HTML lot reports under data/reports/."""
+    from .reporting.generator import (
+        generate_reports_for_lots, pending_lots, resolve_lot_categories,
+    )
+
+    config: Config = ctx.obj["config"]
+    config.ensure_directories()
+
+    if pending:
+        lots = pending_lots(config)
+        if not lots:
+            console.print("[dim]No reports pending — all up to date.[/dim]")
+            return
+        console.print(f"[bold]Regenerating {len(lots)} pending report(s)…[/bold]")
+    elif lot_id:
+        if not product:
+            console.print("[red]Error:[/red] --product is required with --lot")
+            sys.exit(1)
+        cats = [test_category] if test_category else resolve_lot_categories(config, product, lot_id)
+        if not cats:
+            console.print(f"[yellow]No ingested data for {product}/{lot_id}[/yellow]")
+            return
+        lots = [(product, c, lot_id) for c in cats]
+    else:
+        console.print("[red]Error:[/red] specify --lot (with --product) or --pending")
+        sys.exit(1)
+
+    written = generate_reports_for_lots(
+        config, lots, warn=lambda m: console.print(f"[yellow]![/yellow] {m}")
+    )
+    for path in written:
+        console.print(f"[green]✓[/green] {path}")
+    console.print(f"\n[green]✓[/green] Wrote {len(written)} report(s)")
+
+
 if __name__ == "__main__":
     main()
