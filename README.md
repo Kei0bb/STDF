@@ -72,7 +72,7 @@ DuckDB glob ビュー（起動時1回登録、クエリごとに fs スキャン
 
 | モジュール | 役割 |
 |---|---|
-| `storage.py` | Parquet Hive パーティション書き込み（4テーブル） |
+| `storage.py` | Parquet Hive パーティション書き込み（5テーブル） |
 | `database.py` | CLI・`query.py` 用 DuckDB コンテキストマネージャー（`query()` / `query_df()` 等ヘルパー付き） |
 | `config.py` | `config.yaml` 読み込み（FTP / Storage 設定、`${ENV_VAR}` 展開対応） |
 
@@ -116,7 +116,7 @@ glob ビュー (`read_parquet('data/**/*.parquet', hive_partitioning=true)`) は
 **起動ログ例:**
 ```
 [server] data_dir: /home/user/stdf/data
-[server] DuckDB views registered: lots, wafers, parts, test_data
+[server] DuckDB views registered: lots, wafers, parts, test_data, chipid
 ```
 登録されたテーブル名が表示されない場合は `data_dir` のパスを確認してください。
 
@@ -162,9 +162,24 @@ stdf web   # http://localhost:8000
 
 ### SQL クエリ（VS Code）
 
-```bash
-# VS Code で query.py を開いて Shift+Enter でセルを実行（DuckDB）
+VS Code で `query.py` を開き、各セル (`# %%`) を Shift+Enter で実行（DuckDB）。
+クエリ集は `docs/sample_queries.md` を参照。
+
+```python
+q("SELECT * FROM lots ORDER BY start_time DESC")   # プレビュー（既定 LIMIT 100）
+
+# 大量データで *_final が遅いとき: 対象ロットを materialize → 以降 ~45x 高速
+use_lot("E6A773.00")
+q("SELECT * FROM test_data_final WHERE lot_id = 'E6A773.00'", limit=0)
+use_all()                                          # 全ロットビューに復元
+
+# 全件を高速に取り込む / ファイル出力
+tbl = q("SELECT * FROM test_data_final", limit=0, as_arrow=True)  # pyarrow.Table（~3.5x）
+to_csv("SELECT * FROM test_data_final WHERE lot_id = 'E6A773.00'")  # DuckDB COPY（メモリ0）
 ```
+
+> `*_final` ビューはリテスト重複排除を毎クエリ計算するため巨大データでは重い。
+> 1 ロット単位の作業では `use_lot()` でそのロットを materialize すると大幅に速くなる。
 
 ### CLI クエリ
 
@@ -220,14 +235,18 @@ scripts\unregister_task.bat
 
 ## データ構造
 
-### 4 テーブル
+### 5 テーブル
 
 | テーブル | 説明 |
 |---------|------|
 | `lots` | ロット情報（product, test_category, sub_process） |
-| `wafers` | ウェハー歩留まり（リテスト追跡含む） |
-| `parts` | 個片結果（Bin, X/Y 座標） |
+| `wafers` | ウェハー歩留まり（リテスト追跡含む）。**CP 専用**（FT は WIR/WRR が無く生成されない） |
+| `parts` | 個片結果（Bin, X/Y 座標）。CP=ダイ / FT=パッケージ |
 | `test_data` | テスト測定値（PTR/MPR/FTR 統合）。MPR は 1 レコードをピン数分の行に展開し `pin_num` / `pin_name` 列に PMR のピン情報を格納。PTR/FTR 行ではこれらは NULL。 |
+| `chipid` | FT chiplet の die 出自トレース（GDR `EN-S0-CHIPID_R` をデコード）。**FT 専用** |
+
+> 解析・歩留りは重複排除済みの `parts_final` / `test_data_final` / `chipid_final`
+> ビューを使う（詳細は `docs/schema.md` / `docs/sample_queries.md`）。
 
 ### Parquet パーティション構造
 
@@ -238,7 +257,7 @@ data/
         └── test_category={CP|FT}/
             └── sub_process={CP11|FT2}/
                 └── lot_id={lot_id}/
-                    └── (wafer_id={id}/retest={n}/)  ← wafers のみ
+                    └── (wafer_id={id}/retest={n}/)  ← wafers/parts/test_data/chipid
                         └── data.parquet
 ```
 
