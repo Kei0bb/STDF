@@ -36,7 +36,7 @@ def list_reports() -> list[dict]:
                 "test_category": parts.get("test_category", ""),
                 "lot_id": parts.get("lot_id", ""),
                 "modified": mtime,
-                "url": "/reports/" + quote(rel),
+                "url": "/reports/" + quote(rel, safe="/="),
             })
         except Exception as e:  # noqa: BLE001
             logger.warning("skipping report %s: %s", report, e)
