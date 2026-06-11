@@ -112,9 +112,14 @@ class Config:
 
     @classmethod
     def load(cls, config_path: Path | None = None) -> "Config":
-        """Load configuration from YAML file."""
+        """Load configuration from YAML file.
+
+        Resolution order: explicit arg → STDF_CONFIG env var → cwd config.yaml.
+        If the resolved path does not exist, defaults are returned.
+        """
         if config_path is None:
-            config_path = Path("config.yaml")
+            env_path = os.environ.get("STDF_CONFIG")
+            config_path = Path(env_path) if env_path else Path("config.yaml")
 
         if not config_path.exists():
             return cls()
