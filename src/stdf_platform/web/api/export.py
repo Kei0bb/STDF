@@ -2,7 +2,6 @@
 
 import io
 import logging
-from threading import Lock
 from typing import Annotated, Literal
 
 import duckdb
@@ -16,7 +15,7 @@ logger = logging.getLogger(__name__)
 from .deps import get_db
 
 router = APIRouter(tags=["export"])
-DB = Annotated[tuple[duckdb.DuckDBPyConnection, Lock], Depends(get_db)]
+DB = Annotated[duckdb.DuckDBPyConnection, Depends(get_db)]
 
 
 class ExportRequest(BaseModel):
@@ -51,8 +50,7 @@ def _build_where(
 
 
 @router.post("/export/csv")
-def export_csv(req: ExportRequest, db_tuple: DB) -> StreamingResponse:
-    db, lock = db_tuple
+def export_csv(req: ExportRequest, db: DB) -> StreamingResponse:
     where, params = _build_where(req.lots, req.wafers, req.test_nums)
     try:
         if req.format == "pivot":
@@ -75,8 +73,7 @@ def export_csv(req: ExportRequest, db_tuple: DB) -> StreamingResponse:
                 WHERE {where}
                 ORDER BY td.lot_id, td.wafer_id, td.part_id, col_key
             """
-            with lock:
-                df = db.execute(sql, params).fetchdf()
+            df = db.execute(sql, params).fetchdf()
             index_cols = ["lot_id", "wafer_id", "part_id", "x_coord", "y_coord",
                           "hard_bin", "soft_bin", "part_passed"]
             df = df.pivot_table(index=index_cols, columns="col_key",
@@ -98,8 +95,7 @@ def export_csv(req: ExportRequest, db_tuple: DB) -> StreamingResponse:
                 WHERE {where}
                 ORDER BY td.lot_id, td.wafer_id, td.part_id, td.test_num, td.pin_num
             """
-            with lock:
-                df = db.execute(sql, params).fetchdf()
+            df = db.execute(sql, params).fetchdf()
 
         buf = io.StringIO()
         df.to_csv(buf, index=False)
@@ -120,19 +116,17 @@ def export_csv(req: ExportRequest, db_tuple: DB) -> StreamingResponse:
 
 
 @router.post("/export/preview")
-def export_preview(req: ExportRequest, db_tuple: DB) -> dict:
-    db, lock = db_tuple
+def export_preview(req: ExportRequest, db: DB) -> dict:
     where, params = _build_where(req.lots, req.wafers, req.test_nums)
     try:
-        with lock:
-            row = db.execute(f"""
-                SELECT
-                    COUNT(DISTINCT td.part_id) AS parts,
-                    COUNT(DISTINCT td.test_num) AS tests,
-                    COUNT(*) AS total_rows
-                FROM test_data_final td
-                WHERE {where}
-            """, params).fetchone()
+        row = db.execute(f"""
+            SELECT
+                COUNT(DISTINCT td.part_id) AS parts,
+                COUNT(DISTINCT td.test_num) AS tests,
+                COUNT(*) AS total_rows
+            FROM test_data_final td
+            WHERE {where}
+        """, params).fetchone()
         parts, tests, total = row or (0, 0, 0)
         return {
             "parts": int(parts or 0),
