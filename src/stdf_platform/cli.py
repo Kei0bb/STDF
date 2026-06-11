@@ -7,6 +7,7 @@ import shutil
 from pathlib import Path
 
 import click
+import pandas as pd
 from rich.console import Console
 from rich.table import Table
 from rich.progress import Progress, SpinnerColumn, TextColumn
@@ -710,54 +711,66 @@ def export_lot(ctx, lot_ids: tuple, output: Path, pivot: bool):
     try:
         with Database(config.storage) as db_conn:
             if pivot:
-                sql = f"""
-                PIVOT (
-                    SELECT
-                        tr.lot_id,
-                        tr.wafer_id,
-                        tr.part_id,
-                        p.x_coord,
-                        p.y_coord,
-                        p.hard_bin,
-                        p.soft_bin,
-                        p.passed as part_passed,
-                        t.test_name,
-                        tr.result
-                    FROM test_results tr
-                    JOIN parts p ON tr.part_id = p.part_id
-                    JOIN tests t ON tr.test_num = t.test_num AND tr.lot_id = t.lot_id
-                    WHERE tr.lot_id IN ({placeholders})
-                )
-                ON test_name
-                USING first(result)
-                GROUP BY lot_id, wafer_id, part_id, x_coord, y_coord, hard_bin, soft_bin, part_passed
-                ORDER BY lot_id, wafer_id, part_id
-                """
-            else:
+                # DuckDB PIVOT with dynamic values cannot use bound parameters.
+                # Fetch long-format first, then pivot via pandas (matches web API).
                 sql = f"""
                 SELECT
-                    tr.lot_id,
-                    tr.wafer_id,
-                    tr.part_id,
+                    td.lot_id,
+                    td.wafer_id,
+                    td.part_id,
                     p.x_coord,
                     p.y_coord,
                     p.hard_bin,
                     p.soft_bin,
-                    t.test_num,
-                    t.test_name,
-                    tr.result,
-                    tr.passed,
-                    t.lo_limit,
-                    t.hi_limit,
-                    t.units
-                FROM test_results tr
-                JOIN parts p ON tr.part_id = p.part_id
-                JOIN tests t ON tr.test_num = t.test_num AND tr.lot_id = t.lot_id
-                WHERE tr.lot_id IN ({placeholders})
-                ORDER BY tr.lot_id, tr.wafer_id, tr.part_id, t.test_num
+                    p.passed AS part_passed,
+                    td.test_name,
+                    td.result
+                FROM test_data_final td
+                JOIN parts_final p
+                    ON  td.lot_id   = p.lot_id
+                    AND td.wafer_id = p.wafer_id
+                    AND td.part_id  = p.part_id
+                WHERE td.lot_id IN ({placeholders})
+                ORDER BY td.lot_id, td.wafer_id, td.part_id, td.test_name
                 """
-
-            df = db_conn.query_df(sql, params)
+                long_df = db_conn.query_df(sql, params)
+                if long_df.empty:
+                    df = long_df
+                else:
+                    index_cols = ["lot_id", "wafer_id", "part_id", "x_coord",
+                                  "y_coord", "hard_bin", "soft_bin", "part_passed"]
+                    df = long_df.pivot_table(
+                        index=index_cols, columns="test_name",
+                        values="result", aggfunc="first",
+                    )
+                    df.columns.name = None
+                    df = df.reset_index()
+            else:
+                sql = f"""
+                SELECT
+                    td.lot_id,
+                    td.wafer_id,
+                    td.part_id,
+                    p.x_coord,
+                    p.y_coord,
+                    p.hard_bin,
+                    p.soft_bin,
+                    td.test_num,
+                    td.test_name,
+                    td.result,
+                    td.passed,
+                    td.lo_limit,
+                    td.hi_limit,
+                    td.units
+                FROM test_data_final td
+                JOIN parts_final p
+                    ON  td.lot_id   = p.lot_id
+                    AND td.wafer_id = p.wafer_id
+                    AND td.part_id  = p.part_id
+                WHERE td.lot_id IN ({placeholders})
+                ORDER BY td.lot_id, td.wafer_id, td.part_id, td.test_num
+                """
+                df = db_conn.query_df(sql, params)
 
             if df.empty:
                 console.print("[yellow]No results to export[/yellow]")
