@@ -126,35 +126,41 @@ def wafer_map(conn, product, test_category, lot_id, wafer_id) -> list[dict]:
 
 def top_fail_tests(conn, product, test_category, lot_id, top_n) -> list[dict]:
     """Top-N tests by fail rate (adapted from /fails). passed is 'P'/'F'."""
-    rows = conn.execute(
-        """
-        SELECT test_num, FIRST(test_name) AS test_name,
-               COUNT(*)                                           AS total,
-               SUM(CASE WHEN passed = 'F' THEN 1 ELSE 0 END)      AS fail_count,
-               ROUND(100.0 * SUM(CASE WHEN passed = 'F' THEN 1 ELSE 0 END)
-                   / COUNT(*), 2)                                 AS fail_rate
-        FROM test_data_final
-        WHERE lot_id = ?
-        GROUP BY test_num
-        HAVING SUM(CASE WHEN passed = 'F' THEN 1 ELSE 0 END) > 0
-        ORDER BY fail_rate DESC, test_num
-        LIMIT ?
-        """,
-        [lot_id, top_n],
-    ).fetchdf()
+    try:
+        rows = conn.execute(
+            """
+            SELECT test_num, FIRST(test_name) AS test_name,
+                   COUNT(*)                                           AS total,
+                   SUM(CASE WHEN passed = 'F' THEN 1 ELSE 0 END)      AS fail_count,
+                   ROUND(100.0 * SUM(CASE WHEN passed = 'F' THEN 1 ELSE 0 END)
+                       / COUNT(*), 2)                                 AS fail_rate
+            FROM test_data_final
+            WHERE lot_id = ?
+            GROUP BY test_num
+            HAVING SUM(CASE WHEN passed = 'F' THEN 1 ELSE 0 END) > 0
+            ORDER BY fail_rate DESC, test_num
+            LIMIT ?
+            """,
+            [lot_id, top_n],
+        ).fetchdf()
+    except duckdb.CatalogException:
+        return []
     return rows.to_dict(orient="records")
 
 
 def test_values(conn, product, test_category, lot_id, test_num) -> dict:
     """Numeric results + limits for one test (for a histogram)."""
-    meta = conn.execute(
-        """
-        SELECT FIRST(test_name), FIRST(units), FIRST(lo_limit), FIRST(hi_limit)
-        FROM test_data_final
-        WHERE lot_id = ? AND test_num = ?
-        """,
-        [lot_id, test_num],
-    ).fetchone()
+    try:
+        meta = conn.execute(
+            """
+            SELECT FIRST(test_name), FIRST(units), FIRST(lo_limit), FIRST(hi_limit)
+            FROM test_data_final
+            WHERE lot_id = ? AND test_num = ?
+            """,
+            [lot_id, test_num],
+        ).fetchone()
+    except duckdb.CatalogException:
+        return {}
     if not meta or meta[0] is None:
         return {}
     vals = conn.execute(
