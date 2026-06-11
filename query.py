@@ -14,7 +14,6 @@
 # - `use_all()` — *_final を全ロット対象のビューに復元
 
 # %% Setup — DuckDB
-import duckdb
 import pandas as pd
 from pathlib import Path
 
@@ -33,10 +32,12 @@ _storage = _cfg.get("storage", {})
 DATA_DIR = Path(_storage.get("data_dir", "./data"))
 print(f"Data dir: {DATA_DIR}")
 
-from stdf_platform.views import _DEDUP_UNIT, setup_views
+from stdf_platform.analysis import AnalysisSession
+from stdf_platform.views import _DEDUP_UNIT  # still used by use_lot/_make_final_views
 
-con = duckdb.connect(":memory:")
-for _name in setup_views(con, DATA_DIR):
+_session = AnalysisSession(DATA_DIR)
+con = _session.conn
+for _name in _session.registered:
     print(f"  ✓ {_name}")
 
 # retest 重複排除ビュー（全ロット）。ROW_NUMBER() ウィンドウを毎クエリ計算するため
