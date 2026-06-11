@@ -20,12 +20,16 @@ function app() {
       { id: 'dashboard', label: 'Dashboard' },
       { id: 'wafer',     label: 'Wafer' },
       { id: 'tests',     label: 'Tests' },
+      { id: 'reports',   label: 'Reports' },
       { id: 'export',    label: '⬇ Export' },
     ],
     activeTab: 'dashboard',
 
     // ── Dashboard ───────────────────────────────────────────────
     summaryRows: [],
+
+    // ── Reports ─────────────────────────────────────────────────
+    reports: [],
 
     // ── Wafer ───────────────────────────────────────────────────
     selectedLotForWafer: '',
@@ -190,6 +194,10 @@ function app() {
       drawDistribution('chart-distribution', data);
     },
 
+    async loadReports() {
+      this.reports = await fetch('/api/reports').then(r => r.json());
+    },
+
     async refreshPreview() {
       if (this.selLots.size === 0) return;
       const body = {
@@ -209,6 +217,7 @@ function app() {
     // ── Tab switching ───────────────────────────────────────────
     setTab(id) {
       this.activeTab = id;
+      if (id === 'reports') { this.loadReports(); }
       this.$nextTick(() => {
         if (id === 'dashboard' && this.summaryRows.length)
           drawYieldBar('chart-yield-lot', this.summaryRows);

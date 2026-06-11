@@ -171,7 +171,7 @@
       <div class="flex-1 overflow-y-auto p-4">
 
         <!-- No data message -->
-        <div x-show="!applied" class="flex flex-col items-center justify-center h-full text-center">
+        <div x-show="!applied && activeTab !== 'reports'" class="flex flex-col items-center justify-center h-full text-center">
           <div class="text-5xl mb-4">📊</div>
           <div class="text-xl font-semibold text-slate-300 mb-2">No data selected</div>
           <div class="text-slate-500 text-sm">Select lots in the sidebar and click Apply</div>
@@ -321,6 +321,44 @@
               <div class="text-sm font-semibold text-slate-300 mb-3">Fail Pareto</div>
               <div id="chart-pareto" style="height:240px"></div>
             </div>
+          </div>
+        </div>
+
+        <!-- Reports tab -->
+        <div x-show="activeTab === 'reports'" class="space-y-4">
+          <div class="card p-4">
+            <div class="flex items-center justify-between mb-3">
+              <div class="text-sm font-semibold text-slate-300">Generated Reports</div>
+              <button class="btn-secondary text-xs" @click="loadReports()">Refresh</button>
+            </div>
+            <div x-show="reports.length === 0" class="text-xs text-slate-500 italic py-4">
+              No reports yet. Run <code class="bg-slate-800 px-2 py-0.5 rounded">stdf report --pending</code>
+              or ingest data (reports regenerate automatically).
+            </div>
+            <table x-show="reports.length > 0" class="w-full text-sm">
+              <thead>
+                <tr class="text-left text-slate-400 border-b border-slate-700">
+                  <th class="pb-2 pr-4">Product</th>
+                  <th class="pb-2 pr-4">Category</th>
+                  <th class="pb-2 pr-4">Lot</th>
+                  <th class="pb-2 pr-4">Modified</th>
+                  <th class="pb-2">Open</th>
+                </tr>
+              </thead>
+              <tbody>
+                <template x-for="r in reports" :key="r.url">
+                  <tr class="border-b border-slate-800 hover:bg-slate-800/50">
+                    <td class="py-1.5 pr-4 text-slate-300" x-text="r.product"></td>
+                    <td class="py-1.5 pr-4 text-slate-400" x-text="r.test_category"></td>
+                    <td class="py-1.5 pr-4 font-mono text-indigo-300" x-text="r.lot_id"></td>
+                    <td class="py-1.5 pr-4 text-slate-500 text-xs" x-text="r.modified"></td>
+                    <td class="py-1.5">
+                      <a :href="r.url" target="_blank" class="text-indigo-400 hover:text-indigo-300">View ↗</a>
+                    </td>
+                  </tr>
+                </template>
+              </tbody>
+            </table>
           </div>
         </div>
 
