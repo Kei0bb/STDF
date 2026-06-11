@@ -159,6 +159,27 @@ stdf web   # http://localhost:8000
 | **Wafer** | ウェハー別歩留まり + ウェハーマップ（Pass/Fail or Bin 色分け） |
 | **Tests** | テストパラメーター一覧（AG Grid）+ 分布ヒストグラム + フェール Pareto |
 | **Export** | CSV ダウンロード（Pivot形式 / Long形式）、lot・wafer・test_num フィルター |
+| **Reports** | 生成済み HTML レポートの一覧・閲覧（`data/reports/` をスキャン） |
+
+### HTML レポート
+
+ロット単位の自己完結 HTML レポート（plotly.js 同梱でオフライン閲覧可）。歩留まりサマリ・ビン Pareto・ウェハーマップ・パラメトリックヒストグラム（規格線 + Cpk）・リテスト履歴を収録。FT ロットはウェハーマップを省略し ChipID 集計を追加。
+
+```bash
+stdf report --lot E6A773.00 -p SCT101A        # 単一ロット（-c CP|FT 省略時は両カテゴリ）
+stdf report --pending                          # 未生成・更新分をまとめて再生成
+```
+
+レポートは `ingest` / `ingest-all` / `fetch` 完了時に該当ロット分が**自動生成**されます（生成失敗は ingest を失敗させません）。出力は `data/reports/product={P}/test_category={C}/lot_id={L}/report.html`。Parquet が真実のソースで、レポートは常に上書き再生成される使い捨てキャッシュです。Web UI の **Reports** タブからブラウザで閲覧できます。
+
+ヒストグラム対象テストはフェイル率上位 N（既定 20）＋ `config.yaml` の製品別指定：
+
+```yaml
+reporting:
+  histogram_top_n: 20
+  always_include_tests:
+    SCT101A: [1234, 5678]   # 常に表示する test_num
+```
 
 ### SQL クエリ（VS Code）
 
