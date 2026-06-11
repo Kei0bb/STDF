@@ -23,8 +23,11 @@ def render_report(product, test_category, lot_id, sections: list[SectionResult],
                   generated_at: str) -> str:
     # Per-section JSON array of figure specs (each section's figures[] are
     # already fig.to_json() strings -> wrap into a JS array literal).
+    # "</" is escaped to "<\/" (valid JSON) so STDF-derived strings such as
+    # test names can never terminate the <script> block early (XSS vector).
     figures_json = [
-        "[" + ",".join(s.figures) + "]" for s in sections
+        ("[" + ",".join(s.figures) + "]").replace("</", "<\\/")
+        for s in sections
     ]
     template = _env.get_template("report.html.j2")
     return template.render(

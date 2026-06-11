@@ -44,3 +44,25 @@ def test_report_embeds_single_plotly_bundle(tmp_path):
     # the bundle defines this once; ensure it is present and not duplicated
     assert html.count("Plotly.register") <= 2  # bundle internals, not per-fig
     assert len(html) > 1_000_000              # plotly.js embedded (~4MB)
+
+
+def test_figure_json_escapes_script_close(tmp_path):
+    # A malicious/odd test name containing </script> must not terminate the
+    # JSON <script> block early (XSS vector).
+    from stdf_platform.reporting.sections import SectionResult
+    import plotly.graph_objects as go
+
+    # plotly.to_json() already encodes < and / as </; the render
+    # layer additionally escapes any literal "</" for figure JSON built by
+    # other means (e.g. json.dumps).
+    fig = go.Figure(go.Bar(x=[1], y=[1], name='</script><img src=x>'))
+    sec = SectionResult(title="t", figures=[fig.to_json()])
+    html = render_report("P", "CP", "L", [sec], "2026-06-11T00:00:00Z")
+    assert "</script><img src=x>" not in html
+
+    import json
+    raw = json.dumps({"data": [{"name": "</script><img src=x>"}], "layout": {}})
+    sec2 = SectionResult(title="t", figures=[raw])
+    html2 = render_report("P", "CP", "L", [sec2], "2026-06-11T00:00:00Z")
+    assert "</script><img src=x>" not in html2
+    assert "<\\/script><img src=x>" in html2
