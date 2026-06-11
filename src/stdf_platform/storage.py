@@ -192,14 +192,21 @@ class ParquetStorage:
         """
         Write Parquet file.
 
-        Keeps Parquet 1.0 format for maximum reader compatibility; zstd codec is
-        read by DuckDB and is smaller + faster to decompress than gzip/snappy.
+        Format version 2.6 (the highest pyarrow exposes) with default dictionary
+        encoding. Real-data benchmarks (scripts/bench_parquet_real.py) showed
+        v2.6 default is size- and fetch-neutral vs the old v1.0, while the modern
+        column encodings it *enables* are a net loss for our float64 measurement
+        data: BYTE_STREAM_SPLIT inflates files ~15% and slows fetch, and DELTA on
+        ints trades ~13% smaller files for ~16% slower fetch — the wrong trade
+        when large-fetch latency is the bottleneck. So we move to v2.6 but do NOT
+        set column_encoding. Only DuckDB and pyarrow read these files; both
+        support v2.6 fully (no external/legacy reader to keep at v1.0).
         """
         pq.write_table(
             table,
             path,
             compression=compression,
-            version="1.0",  # Maximum compatibility (zstd codec works at v1.0)
+            version="2.6",  # default dictionary encoding (no BSS/DELTA — see docstring)
             use_dictionary=True,
             write_statistics=True,
             coerce_timestamps="ms",  # Millisecond precision
