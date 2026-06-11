@@ -1,20 +1,11 @@
 """DuckDB database for STDF analytics."""
 
-from pathlib import Path
 from typing import Any
 
 import duckdb
 
 from .config import StorageConfig
-
-
-# Dedup identity within a (lot, retest) group, expressed as native partition
-# columns. CP rows have part_txt='' (so they group by wafer_id + x/y); FT rows
-# have wafer_id='' and x=y=-32768 (so they group by part_txt). Listing all four
-# columns is equivalent to the old CASE/CONCAT key for both categories — the
-# "unused" columns are constant within a category — but avoids per-row string
-# concatenation, making the ROW_NUMBER() window dedup ~25% faster.
-_DEDUP_UNIT = "wafer_id, x_coord, y_coord, part_txt"
+from .views import setup_views
 
 
 class Database:
@@ -54,53 +45,8 @@ class Database:
         return self._conn
 
     def _create_views(self) -> None:
-        """Create views for Parquet datasets."""
-        tables = ["lots", "wafers", "parts", "test_data", "chipid"]
-        registered = []
-
-        for table in tables:
-            table_path = self.data_dir / table
-            if table_path.exists():
-                self.conn.execute(f"""
-                    CREATE OR REPLACE VIEW {table} AS
-                    SELECT * FROM read_parquet('{table_path}/**/*.parquet', hive_partitioning=true)
-                """)
-                registered.append(table)
-
-        if "parts" in registered:
-            self.conn.execute(f"""
-                CREATE OR REPLACE VIEW parts_final AS
-                SELECT * EXCLUDE (rn) FROM (
-                    SELECT *, ROW_NUMBER() OVER (
-                        PARTITION BY lot_id, {_DEDUP_UNIT}
-                        ORDER BY retest_num DESC
-                    ) AS rn FROM parts
-                ) WHERE rn = 1
-            """)
-
-        if "test_data" in registered:
-            self.conn.execute(f"""
-                CREATE OR REPLACE VIEW test_data_final AS
-                SELECT * EXCLUDE (rn) FROM (
-                    SELECT *, ROW_NUMBER() OVER (
-                        PARTITION BY lot_id, {_DEDUP_UNIT}, test_num, pin_num
-                        ORDER BY retest_num DESC
-                    ) AS rn FROM test_data
-                ) WHERE rn = 1
-            """)
-
-        if "chipid" in registered:
-            # die identity = decoded ChipID (efuse_raw), NOT positional
-            # chip_occurrence_index (which can swap die0/die1 across retests).
-            self.conn.execute("""
-                CREATE OR REPLACE VIEW chipid_final AS
-                SELECT * EXCLUDE (rn) FROM (
-                    SELECT *, ROW_NUMBER() OVER (
-                        PARTITION BY lot_id, efuse_raw
-                        ORDER BY retest_num DESC
-                    ) AS rn FROM chipid
-                ) WHERE rn = 1
-            """)
+        """Create views for Parquet datasets (delegates to stdf_platform.views)."""
+        setup_views(self.conn, self.data_dir)
 
     def refresh_views(self) -> None:
         """Refresh views after new data is added."""

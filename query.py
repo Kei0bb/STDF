@@ -33,22 +33,11 @@ _storage = _cfg.get("storage", {})
 DATA_DIR = Path(_storage.get("data_dir", "./data"))
 print(f"Data dir: {DATA_DIR}")
 
-# Dedup identity within a (lot, retest) group, as native partition columns.
-# CP groups by wafer_id+x/y (part_txt=''), FT groups by part_txt (wafer/x/y
-# constant). Equivalent to a CASE/CONCAT key but faster (no per-row string concat).
-_DEDUP_UNIT = "wafer_id, x_coord, y_coord, part_txt"
+from stdf_platform.views import _DEDUP_UNIT, setup_views
 
 con = duckdb.connect(":memory:")
-for table in ["lots", "wafers", "parts", "test_data", "chipid"]:
-    path = DATA_DIR / table
-    if path.exists():
-        con.execute(f"""
-            CREATE OR REPLACE VIEW {table} AS
-            SELECT * FROM read_parquet('{path.as_posix()}/**/*.parquet', hive_partitioning=true)
-        """)
-        print(f"  ✓ {table}")
-    else:
-        print(f"  - {table}  (not found)")
+for _name in setup_views(con, DATA_DIR):
+    print(f"  ✓ {_name}")
 
 # retest 重複排除ビュー（全ロット）。ROW_NUMBER() ウィンドウを毎クエリ計算するため
 # 大規模だと重い → 1 ロットに絞って作業するなら use_lot() で materialize 推奨。

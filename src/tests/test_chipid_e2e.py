@@ -14,7 +14,7 @@ from stdf_platform.parser import parse_stdf  # noqa: E402
 from stdf_platform.storage import ParquetStorage  # noqa: E402
 from stdf_platform.config import StorageConfig  # noqa: E402
 from stdf_platform.chipid import decode_chipid  # noqa: E402
-from stdf_platform.database import _DEDUP_UNIT  # noqa: E402
+from stdf_platform.views import _DEDUP_UNIT  # noqa: E402
 
 
 def _storage(tmp_path: Path) -> ParquetStorage:
