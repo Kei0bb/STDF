@@ -7,7 +7,8 @@ import plotly.graph_objects as go
 
 from ..config import Config
 from ..reporting import queries as rq
-from ..reporting.sections import _cpk  # reuse the one Cpk definition
+# SQL Cpk formula (stddev_pop / LEAST) mirrors reporting.sections._cpk —
+# numeric equality is asserted in test_analysis_compare.py.
 
 
 def _in_clause(lot_ids):

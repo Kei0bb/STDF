@@ -181,6 +181,31 @@ to_csv("SELECT * FROM test_data_final WHERE lot_id = 'E6A773.00'")  # DuckDB COP
 > `*_final` ビューはリテスト重複排除を毎クエリ計算するため巨大データでは重い。
 > 1 ロット単位の作業では `use_lot()` でそのロットを materialize すると大幅に速くなる。
 
+### 分析 API（`stdf_platform.analysis`）
+
+`AnalysisSession` を通じてリテスト重複排除済みビューにアクセスし、DataFrame / Plotly figure を返す再利用可能な分析関数群。
+
+```python
+from stdf_platform.analysis import AnalysisSession, yield_by_lot, lot_trend, cp_ft_yield, zone_yield, trend_fig
+
+s = AnalysisSession()                              # config.yaml を自動読み込み
+
+# ロット間比較
+df = yield_by_lot(s, product="SCT101A", lot_ids=["L001", "L002"], test_category="CP")
+
+# トレンド（MIR start_time 順、mean±3σ コントロールライン付き）
+fig = trend_fig(lot_trend(s, product="SCT101A", test_category="CP"))
+
+# CP↔FT 歩留まり相関
+df = cp_ft_yield(s, product="SCT101A")
+
+# CP ウェハー面内ゾーン別歩留まり（n_zones=3 で Center / Middle / Edge）
+df = zone_yield(s, product="SCT101A", lot_id="L001")
+```
+
+すべての関数は `*_final` ビューを使用するため、歩留まり・Cpk の定義がレポートや Web UI と完全に一致します。  
+`templates/analysis/*.py` は `# %%` セル形式（VS Code / Jupytext）で、Shift+Enter で逐次実行可能。
+
 ### CLI クエリ
 
 ```bash

@@ -71,6 +71,18 @@ The `retest_num` is derived from partition depth, not stored in STDF — duplica
     - `sections.py` — section builders → Plotly figures + tables (graph_objects)
     - `render.py` — Jinja2 (`templates/report.html.j2`) + embedded plotly.js
     - `generator.py` — `generate_lot_report` / `pending_lots`; writes `data/reports/...`
+  - `analysis/` — reusable, retest-aware analysis API (returns DataFrames / plotly figures)
+    - `session.py` — `AnalysisSession`: owns the DuckDB :memory: conn + views (config-resolved)
+    - `compare.py` — lot-to-lot yield / bin pareto / test stats / distribution overlay
+    - `trend.py` — lot & test trends ordered by MIR start_time, with mean±3σ control lines
+    - `correlation.py` — CP↔FT lot & die join (via decoded ChipID origin) + test-to-test corr
+    - `spatial.py` — CP wafer-plane radial zone yield / radial profile / parametric wafermap
+
+### Analysis Package & Cell-Script Templates
+
+`templates/analysis/*.py` are `# %%` cell-scripts (VSCode/Jupytext) over `AnalysisSession`;
+`query.py` is a thin wrapper over the same session. All analysis uses the `*_final` views so
+yield/Cpk definitions are identical across users.
 
 ### Web UI DuckDB Connection Pattern
 FastAPI server creates one shared DuckDB `:memory:` connection at startup (via `lifespan`). All API requests reuse this single connection — Parquet is the source of truth. CLI tools (`stdf db`) and `query.py` also use DuckDB `:memory:`.
