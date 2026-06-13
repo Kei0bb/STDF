@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-`stdf` is a high-speed ETL pipeline for semiconductor test data (STDF format) → Parquet + DuckDB. It supports CLI usage and a FastAPI + Alpine.js web UI. Python-only parser; parallel batch ingestion uses a ThreadPoolExecutor of isolated subprocesses (one subprocess per file).
+`stdf` is a high-speed ETL pipeline for semiconductor test data (STDF format) → Parquet + DuckDB. CLI-first tool; no web UI. Python-only parser; parallel batch ingestion uses a ThreadPoolExecutor of isolated subprocesses (one subprocess per file).
 
 ## Commands
 
@@ -18,7 +18,6 @@ uv sync                                    # Install dependencies
 stdf ingest <file> --product PROD       # Ingest single STDF file (Parquet)
 stdf ingest-all ./downloads -p PROD     # Batch ingest directory (parallel workers)
 stdf fetch                              # FTP differential sync
-stdf web                                # Web UI at http://localhost:8000
 stdf report --lot X -p PROD [-c CP|FT]   # Generate one lot's HTML report
 stdf report --pending                    # Regenerate missing/stale reports
 ```
@@ -32,7 +31,7 @@ uv run python make_test_stdf.py            # Generate synthetic STDF files in te
 
 ### Data Flow
 ```
-STDF file → Python parser (struct.Struct optimized) → Parquet (Hive-partitioned) → DuckDB views → Web UI / CLI
+STDF file → Python parser (struct.Struct optimized) → Parquet (Hive-partitioned) → DuckDB views → CLI / analysis
 ```
 
 The ingest worker runs in an **isolated subprocess** (`_ingest_worker.py`) for memory safety — parser crashes don't affect the main process. Batch ingestion uses `ThreadPoolExecutor` with configurable worker count.
@@ -57,17 +56,11 @@ The `retest_num` is derived from partition depth, not stored in STDF — duplica
   - `parser.py` — Pure Python STDF V4 parser
   - `database.py` — DuckDB view management
   - `storage.py` — Parquet Hive-partition writer
+  - `views.py` — single source for `_DEDUP_UNIT` and `setup_views(conn, data_dir)`
   - `ftp_client.py` — FTP differential sync
   - `_ingest_worker.py` — Isolated subprocess worker
-  - `web/` — FastAPI web app
-    - `server.py` — FastAPI app + router registration
-    - `api/filters.py` — products, categories, lots, wafers endpoints
-    - `api/data.py` — summary, wafermap, tests, distribution endpoints
-    - `api/export.py` — CSV export (pivot & long format)
-    - `api/deps.py` — per-request `:memory:` DuckDB connection
-    - `static/` — Alpine.js SPA (index.html, app.js, plots.js)
   - `reporting/` — HTML report engine (Parquet → self-contained HTML)
-    - `queries.py` — analysis SQL on the Phase-1 views (`views.py`)
+    - `queries.py` — analysis SQL on the views (`views.py`)
     - `sections.py` — section builders → Plotly figures + tables (graph_objects)
     - `render.py` — Jinja2 (`templates/report.html.j2`) + embedded plotly.js
     - `generator.py` — `generate_lot_report` / `pending_lots`; writes `data/reports/...`
@@ -84,9 +77,6 @@ The `retest_num` is derived from partition depth, not stored in STDF — duplica
 `query.py` is a thin wrapper over the same session. All analysis uses the `*_final` views so
 yield/Cpk definitions are identical across users.
 
-### Web UI DuckDB Connection Pattern
-FastAPI server creates one shared DuckDB `:memory:` connection at startup (via `lifespan`). All API requests reuse this single connection — Parquet is the source of truth. CLI tools (`stdf db`) and `query.py` also use DuckDB `:memory:`.
-
 ### Configuration
 `config.yaml` (not tracked; copy from `config.yaml.example`). Supports `${ENV_VAR}` expansion. The `--env dev` flag isolates data to `data-dev/` and skips sync history tracking.
 
@@ -94,7 +84,7 @@ FastAPI server creates one shared DuckDB `:memory:` connection at startup (via `
 
 - **No Rust dependency**: Pure Python parser is the only parser. Removed for simplicity.
 - **Subprocess isolation**: Each ingest runs in a separate process — memory leaks or parser crashes are contained.
-- **DuckDB :memory: for web**: Avoids file locking; Parquet is the source of truth.
+- **DuckDB :memory:**: All analysis (CLI, `query.py`, `AnalysisSession`) uses `:memory:` connections with `setup_views()` — Parquet is the source of truth.
 - **pandas pivot for CSV export**: DuckDB dynamic PIVOT cannot be combined with `?` parameters. pandas `pivot_table()` is used instead after fetching long-format data.
 - **FTP deduplication**: `sync_history.json` tracks ingested files. `--env dev` bypasses this.
 - **Gzip auto-detection**: Files matching `*.stdf.gz`, `*.std.gz` are decompressed to a temp path before parsing.

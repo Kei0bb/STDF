@@ -135,13 +135,12 @@ def test_cp_reingest_does_not_double_count(tmp_path):
     assert rows[0]["total"] == 10  # not 20
 
 
-# ── web endpoints share the parts_final yield path ───────────────────────────
+# ── setup_views covers the parts_final yield path ─────────────────────────────
 
-def test_web_summary_and_wafer_yield_retest_aware(tmp_path):
-    """The FastAPI /summary and /wafer-yield SQL must also be retest-aware and
-    work for FT (no wafers table). Exercises the real setup_views() path."""
+def test_setup_views_summary_and_wafer_yield_retest_aware(tmp_path):
+    """setup_views must be retest-aware and work for FT (no wafers table)."""
     import duckdb
-    from stdf_platform.web.api.deps import setup_views
+    from stdf_platform.views import setup_views
 
     ft = tmp_path / "ft.stdf"
     make_ft_stdf(ft, "FTY", parts=4, fail_part_ids={0, 1})

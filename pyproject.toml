@@ -10,8 +10,6 @@ dependencies = [
     "click>=8.1.0",
     "rich>=13.0.0",
     "pyyaml>=6.0",
-    "fastapi>=0.111.0",
-    "uvicorn[standard]>=0.29.0",
     "pandas>=2.0.0",
     "jinja2>=3.1.0",
     "plotly>=5.20.0",
@@ -32,6 +30,5 @@ include = ["src/stdf_platform"]
 
 [dependency-groups]
 dev = [
-    "httpx>=0.28.1",
     "pytest>=8.0.0",
 ]

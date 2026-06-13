@@ -811,34 +811,6 @@ def export_lot(ctx, lot_ids: tuple, output: Path, pivot: bool):
         sys.exit(1)
 
 
-@main.command()
-@click.option("--port", "-p", default=8000, show_default=True, help="Port to run on")
-@click.option("--host", "-h", default="127.0.0.1", show_default=True, help="Host to bind")
-@click.pass_context
-def web(ctx, port: int, host: str):
-    """Start the web UI (FastAPI + Uvicorn)."""
-    import os
-    import uvicorn
-
-    config: Config = ctx.obj["config"]
-    os.environ["STDF_DATA_DIR"] = str(config.storage.data_dir)
-
-    console.print(f"\n[bold]stdf - Web UI[/bold]")
-    console.print(f"  URL:  [link]http://{host}:{port}[/link]")
-    console.print(f"  Data: {config.storage.data_dir}")
-    if ctx.obj.get("env"):
-        console.print(f"  Env:  [yellow]{ctx.obj['env']}[/yellow]")
-    console.print()
-    console.print("[dim]Press Ctrl+C to stop[/dim]\n")
-
-    uvicorn.run(
-        "stdf_platform.web.server:app",
-        host=host,
-        port=port,
-        reload=False,
-        log_level="warning",
-    )
-
 
 @main.command()
 @click.option("--lot", "-l", "lot_id", help="Lot ID to report on")
