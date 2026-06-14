@@ -40,7 +40,18 @@ processing:
   batch_size: 1000
   compression: "zstd"  # gzip より高圧縮・高速展開。DuckDB が読める（Parquet v2.6 / 既定エンコーディング）
 
-# Report engine (stdf report / auto-regenerated after ingest)
+# Per-product settings
+# gross_die: expected total die per wafer (from mask layout).
+#   Dies lost to fab inline failure are never probed; gross die fill entries
+#   (bin = gd_fail_bin) are injected at first ingest so yield denominators
+#   reflect the full gross die count.
+# gd_fail_bin: soft/hard bin assigned to inline-fail (unprobed) fill dies (default 200).
+products:
+  # SCT101A:
+  #   gross_die: 1234
+  #   gd_fail_bin: 200
+
+# Report engine (stdf report)
 reporting:
   histogram_top_n: 20          # parametric histograms: top-N by fail rate
   always_include_tests: {}     # e.g. {PRODUCT_A: [1234, 5678]} — always plotted

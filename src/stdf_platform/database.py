@@ -140,7 +140,7 @@ class Database:
         FROM parts_final
         WHERE lot_id = $1
         GROUP BY wafer_id
-        ORDER BY yield_pct DESC
+        ORDER BY wafer_id
         """
         return self.query(sql, [lot_id])
 
@@ -172,7 +172,7 @@ class Database:
         FROM parts_final
         WHERE lot_id = $1
         GROUP BY soft_bin
-        ORDER BY count DESC
+        ORDER BY soft_bin
         """
         return self.query(sql, [lot_id])
 

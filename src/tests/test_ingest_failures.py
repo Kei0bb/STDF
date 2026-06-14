@@ -17,7 +17,7 @@ def test_writes_failures_json(tmp_path, monkeypatch):
 
     bad = data_dir / "broken.stdf"
 
-    def fake_pool(files, data_dir, compression, max_workers, timeout):
+    def fake_pool(files, data_dir, compression, max_workers, timeout, gross_die_map=None):
         fail = IngestResult(local_path=bad, remote_path="r/broken.stdf",
                             success=False, error="boom")
         return [], [fail]

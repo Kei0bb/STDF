@@ -84,6 +84,13 @@ class ProductFilter:
 
 
 @dataclass
+class ProductConfig:
+    """Per-product settings (gross die, etc.)."""
+    gross_die: int | None = None
+    gd_fail_bin: int = 200
+
+
+@dataclass
 class Config:
     """Main configuration."""
     ftp: FTPConfig = field(default_factory=FTPConfig)
@@ -92,6 +99,16 @@ class Config:
     reporting: ReportingConfig = field(default_factory=ReportingConfig)
     filters: list[ProductFilter] = field(default_factory=list)
     exclude: list[str] = field(default_factory=list)
+    products: dict[str, ProductConfig] = field(default_factory=dict)
+
+    @property
+    def gross_die_map(self) -> dict[str, tuple[int, int]]:
+        """Returns {product: (gross_die, gd_fail_bin)} for products with gross_die set."""
+        return {
+            prod: (pc.gross_die, pc.gd_fail_bin)
+            for prod, pc in self.products.items()
+            if pc.gross_die is not None
+        }
 
     def should_exclude(self, path: str) -> bool:
         """Return True if the filename matches any exclude pattern (case-insensitive fnmatch)."""
@@ -163,6 +180,15 @@ class Config:
 
         exclude = [str(p) for p in (data.get("exclude") or [])]
 
+        products: dict[str, ProductConfig] = {}
+        for prod, pc_data in (data.get("products") or {}).items():
+            if not isinstance(pc_data, dict):
+                continue
+            products[str(prod)] = ProductConfig(
+                gross_die=int(pc_data["gross_die"]) if pc_data.get("gross_die") is not None else None,
+                gd_fail_bin=int(pc_data.get("gd_fail_bin", 200)),
+            )
+
         raw_always = reporting_data.get("always_include_tests", {}) or {}
         always_include = {
             str(prod): [int(t) for t in (tests or [])]
@@ -182,6 +208,7 @@ class Config:
             reporting=reporting,
             filters=filters,
             exclude=exclude,
+            products=products,
         )
 
     def ensure_directories(self):

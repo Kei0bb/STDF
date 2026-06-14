@@ -47,6 +47,7 @@ def _run_single(
     compression: str,
     timeout: int,
     log_path: Optional[Path],
+    gross_die_json: str = "{}",
 ) -> IngestResult:
     """Run one ingest worker subprocess. Called from a thread pool worker.
 
@@ -60,6 +61,7 @@ def _run_single(
         product,
         str(data_dir),
         compression,
+        gross_die_json,
     ]
 
     try:
@@ -128,6 +130,7 @@ def run_ingest_pool(
     compression: str,
     max_workers: int = 4,
     timeout: int = 300,
+    gross_die_map: dict[str, tuple[int, int]] | None = None,
 ) -> tuple[list[IngestResult], list[IngestResult]]:
     """Ingest files concurrently using a subprocess worker pool.
 
@@ -144,6 +147,9 @@ def run_ingest_pool(
     log_path = data_dir / "ingest_worker.log"
     successes: list[IngestResult] = []
     failures: list[IngestResult] = []
+    gross_die_json = json.dumps(
+        {k: list(v) for k, v in (gross_die_map or {}).items()}
+    )
 
     with Progress(
         SpinnerColumn(),
@@ -161,6 +167,7 @@ def run_ingest_pool(
                 executor.submit(
                     _run_single,
                     local_path, product, data_dir, compression, timeout, log_path,
+                    gross_die_json,
                 ): (remote_path, local_path, product)
                 for remote_path, local_path, product, _ttype in files
             }
