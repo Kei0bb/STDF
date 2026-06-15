@@ -29,7 +29,7 @@ def generate_lot_report(config, product: str, test_category: str, lot_id: str) -
     data_dir = config.storage.data_dir
     conn = duckdb.connect(":memory:")
     try:
-        setup_views(conn, data_dir)
+        setup_views(conn, data_dir, config.gross_die_map)
         sections = build_sections(conn, product, test_category, lot_id, config)
     finally:
         conn.close()

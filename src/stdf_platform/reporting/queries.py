@@ -58,17 +58,13 @@ def wafer_ids(conn, product, test_category, lot_id) -> list[str]:
 
 
 def wafer_yield(conn, product, test_category, lot_id) -> list[dict]:
-    """Per-wafer (or single FT group) yield from parts_final."""
+    """Per-wafer (or single FT group) yield from wafer_yield_final
+    (gross-die denominator applied for CP)."""
     rows = conn.execute(
         """
-        SELECT wafer_id,
-               COUNT(*)                                          AS total,
-               SUM(CASE WHEN passed THEN 1 ELSE 0 END)           AS good,
-               ROUND(100.0 * SUM(CASE WHEN passed THEN 1 ELSE 0 END)
-                   / NULLIF(COUNT(*), 0), 2)                     AS yield_pct
-        FROM parts_final
+        SELECT wafer_id, total, good, yield_pct
+        FROM wafer_yield_final
         WHERE lot_id = ?
-        GROUP BY wafer_id
         ORDER BY wafer_id
         """,
         [lot_id],
@@ -77,14 +73,13 @@ def wafer_yield(conn, product, test_category, lot_id) -> list[dict]:
 
 
 def lot_yield_total(conn, product, test_category, lot_id) -> dict:
-    """Lot-level totals from parts_final."""
+    """Lot-level totals from wafer_yield_final (gross-die aware)."""
     row = conn.execute(
         """
-        SELECT COUNT(*)                                          AS total,
-               SUM(CASE WHEN passed THEN 1 ELSE 0 END)           AS good,
-               ROUND(100.0 * SUM(CASE WHEN passed THEN 1 ELSE 0 END)
-                   / NULLIF(COUNT(*), 0), 2)                     AS yield_pct
-        FROM parts_final
+        SELECT SUM(total)                                        AS total,
+               SUM(good)                                         AS good,
+               ROUND(100.0 * SUM(good) / NULLIF(SUM(total), 0), 2) AS yield_pct
+        FROM wafer_yield_final
         WHERE lot_id = ?
         """,
         [lot_id],
@@ -96,16 +91,27 @@ def lot_yield_total(conn, product, test_category, lot_id) -> dict:
 
 def bin_pareto(conn, product, test_category, lot_id) -> list[dict]:
     """Soft-bin counts per wafer (for a stacked pareto). One row per
-    (soft_bin, wafer_id). FT collapses to a single wafer_id=''."""
+    (soft_bin, wafer_id). FT collapses to a single wafer_id=''.
+
+    Unprobed dies (gross die − probed) are added per wafer under the product's
+    gd_fail_bin so the pareto totals match the gross-die denominator."""
     rows = conn.execute(
         """
-        SELECT soft_bin, wafer_id, COUNT(*) AS count
-        FROM parts_final
-        WHERE lot_id = ?
+        SELECT soft_bin, wafer_id, SUM(count) AS count
+        FROM (
+            SELECT soft_bin, wafer_id, COUNT(*) AS count
+            FROM parts_final
+            WHERE lot_id = ?
+            GROUP BY soft_bin, wafer_id
+            UNION ALL
+            SELECT gd_fail_bin AS soft_bin, wafer_id, unprobed AS count
+            FROM wafer_yield_final
+            WHERE lot_id = ? AND gd_fail_bin IS NOT NULL AND unprobed > 0
+        )
         GROUP BY soft_bin, wafer_id
         ORDER BY soft_bin, wafer_id
         """,
-        [lot_id],
+        [lot_id, lot_id],
     ).fetchdf()
     return rows.to_dict(orient="records")
 

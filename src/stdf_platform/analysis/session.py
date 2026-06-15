@@ -19,11 +19,12 @@ from ..views import setup_views
 
 class AnalysisSession:
     def __init__(self, data_dir: Path | None = None) -> None:
+        config = Config.load()
         if data_dir is None:
-            data_dir = Config.load().storage.data_dir
+            data_dir = config.storage.data_dir
         self.data_dir = Path(data_dir)
         self.conn = duckdb.connect(":memory:")
-        self.registered = setup_views(self.conn, self.data_dir)
+        self.registered = setup_views(self.conn, self.data_dir, config.gross_die_map)
 
     def q(self, sql: str, params: list | None = None) -> pd.DataFrame:
         """Run raw SQL (bound params) and return a DataFrame. Escape hatch."""

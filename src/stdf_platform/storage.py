@@ -150,13 +150,10 @@ def extract_test_rev_from_filename(filename: str) -> str:
 class ParquetStorage:
     """Parquet storage for STDF data with Hive-style partitioning."""
 
-    def __init__(self, config: StorageConfig,
-                 gross_die_map: dict[str, tuple[int, int]] | None = None):
+    def __init__(self, config: StorageConfig):
         self.config = config
         self.data_dir = config.data_dir
         self.data_dir.mkdir(parents=True, exist_ok=True)
-        # {product: (gross_die, gd_fail_bin)} — filled at first-ingest time (retest_num=0)
-        self._gross_die_map: dict[str, tuple[int, int]] = gross_die_map or {}
 
     @staticmethod
     def _sanitize(value: str) -> str:
@@ -356,29 +353,6 @@ class ParquetStorage:
 
             for (lot_id, wafer_id), parts in part_groups.items():
                 retest_num = wafer_retest_map.get(wafer_id, 0)
-
-                # Gross die fill: at first ingest only (retest_num=0, CP wafers only).
-                # Dies lost to fab inline failure are never probed; we add synthetic
-                # entries so that yield denominators use the full gross die count.
-                if retest_num == 0 and wafer_id and product in self._gross_die_map:
-                    gross_die, gd_fail_bin = self._gross_die_map[product]
-                    fill_count = max(0, gross_die - len(parts))
-                    for i in range(fill_count):
-                        parts.append({
-                            "part_id": f"__GDFILL_{i:06d}",
-                            "part_txt": f"__GDFILL_{i:06d}",
-                            "lot_id": lot_id,
-                            "wafer_id": wafer_id,
-                            "head_num": 0,
-                            "site_num": 0,
-                            "x_coord": -32768,
-                            "y_coord": -32768,
-                            "hard_bin": gd_fail_bin,
-                            "soft_bin": gd_fail_bin,
-                            "passed": False,
-                            "test_count": 0,
-                            "test_time": 0,
-                        })
 
                 part_path = (
                     self._get_table_path("parts", product, test_category, sub_process)

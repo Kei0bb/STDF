@@ -19,14 +19,9 @@ def yield_by_lot(s, product, lot_ids, test_category):
     ph = _in_clause(lot_ids)
     return s.conn.execute(
         f"""
-        SELECT lot_id, wafer_id,
-               COUNT(*)                                        AS total,
-               SUM(CASE WHEN passed THEN 1 ELSE 0 END)         AS good,
-               ROUND(100.0 * SUM(CASE WHEN passed THEN 1 ELSE 0 END)
-                     / NULLIF(COUNT(*), 0), 2)                 AS yield_pct
-        FROM parts_final
+        SELECT lot_id, wafer_id, total, good, yield_pct
+        FROM wafer_yield_final
         WHERE lot_id IN ({ph})
-        GROUP BY lot_id, wafer_id
         ORDER BY lot_id, wafer_id
         """,
         list(lot_ids),
@@ -35,17 +30,29 @@ def yield_by_lot(s, product, lot_ids, test_category):
 
 def bin_pareto_by_lot(s, product, lot_ids, test_category):
     ph = _in_clause(lot_ids)
+    # Probed dies + the gross-die QC-fail (unprobed) bucket so per-lot bin totals
+    # match the gross-die denominator.
     return s.conn.execute(
         f"""
-        SELECT lot_id, soft_bin, COUNT(*) AS count,
-               ROUND(100.0 * COUNT(*)
-                   / SUM(COUNT(*)) OVER (PARTITION BY lot_id), 2) AS pct
-        FROM parts_final
-        WHERE lot_id IN ({ph})
+        WITH binned AS (
+            SELECT lot_id, soft_bin, COUNT(*) AS count
+            FROM parts_final
+            WHERE lot_id IN ({ph})
+            GROUP BY lot_id, soft_bin
+            UNION ALL
+            SELECT lot_id, gd_fail_bin AS soft_bin, SUM(unprobed) AS count
+            FROM wafer_yield_final
+            WHERE lot_id IN ({ph}) AND gd_fail_bin IS NOT NULL AND unprobed > 0
+            GROUP BY lot_id, gd_fail_bin
+        )
+        SELECT lot_id, soft_bin, SUM(count) AS count,
+               ROUND(100.0 * SUM(count)
+                   / SUM(SUM(count)) OVER (PARTITION BY lot_id), 2) AS pct
+        FROM binned
         GROUP BY lot_id, soft_bin
         ORDER BY lot_id, count DESC
         """,
-        list(lot_ids),
+        list(lot_ids) + list(lot_ids),
     ).fetchdf()
 
 

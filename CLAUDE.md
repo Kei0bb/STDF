@@ -56,7 +56,7 @@ The `retest_num` is derived from partition depth, not stored in STDF — duplica
   - `parser.py` — Pure Python STDF V4 parser
   - `database.py` — DuckDB view management
   - `storage.py` — Parquet Hive-partition writer
-  - `views.py` — single source for `_DEDUP_UNIT` and `setup_views(conn, data_dir)`
+  - `views.py` — single source for `_DEDUP_UNIT`, `setup_views(conn, data_dir, gross_die_map)`, and the `wafer_yield_final` view (gross-die denominator)
   - `ftp_client.py` — FTP differential sync
   - `_ingest_worker.py` — Isolated subprocess worker
   - `reporting/` — HTML report engine (Parquet → self-contained HTML)
@@ -90,6 +90,7 @@ yield/Cpk definitions are identical across users.
 - **Gzip auto-detection**: Files matching `*.stdf.gz`, `*.std.gz` are decompressed to a temp path before parsing.
 - **Windows path safety**: Partition values are sanitized to remove characters invalid on Windows filesystems.
 - **Product detection**: Use `--from-path` to infer product/test_type from FTP path structure `{...}/{PRODUCT}/{CP|FT}/...`.
+- **Gross die at query time (CP only)**: `config.yaml` `products.<P>.gross_die` sets the per-wafer mask total. It is applied at query time via the `wafer_yield_final` view (`total = max(probed, GD)`), never written to Parquet. This is robust to retests and partial/aborted probes — dies probed across multiple runs dedup by `(wafer, x, y)`, and only genuinely-unprobed dies (`GD − probed`) inflate the denominator. Those unprobed dies show up in bin distributions under `gd_fail_bin`. GD never applies to FT (`wafer_id=''`) or to spatial/radial-zone analysis (unprobed dies have no coordinate).
 - **Reports are a disposable cache**: `data/reports/.../report.html` is always
   overwritten and regenerated from Parquet (the source of truth). plotly.js is
   embedded inline (~4MB) for offline viewing. Post-ingest regeneration is

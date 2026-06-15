@@ -201,7 +201,7 @@ def lots(ctx, lot: str | None):
     config: Config = ctx.obj["config"]
 
     try:
-        with Database(config.storage) as db_conn:
+        with Database(config.storage, config.gross_die_map) as db_conn:
             results = db_conn.get_lot_summary(lot)
 
             if not results:
@@ -249,7 +249,7 @@ def yield_cmd(ctx, lot_id: str):
     config: Config = ctx.obj["config"]
 
     try:
-        with Database(config.storage) as db:
+        with Database(config.storage, config.gross_die_map) as db:
             results = db.get_wafer_yield(lot_id)
 
             if not results:
@@ -288,7 +288,7 @@ def test_fail(ctx, lot_id: str, top: int):
     config: Config = ctx.obj["config"]
 
     try:
-        with Database(config.storage) as db:
+        with Database(config.storage, config.gross_die_map) as db:
             results = db.get_test_fail_rate(lot_id, top)
 
             if not results:
@@ -326,7 +326,7 @@ def bins(ctx, lot_id: str):
     config: Config = ctx.obj["config"]
 
     try:
-        with Database(config.storage) as db:
+        with Database(config.storage, config.gross_die_map) as db:
             results = db.get_bin_summary(lot_id)
 
             if not results:
@@ -360,7 +360,7 @@ def query(ctx, sql: str):
     config: Config = ctx.obj["config"]
 
     try:
-        with Database(config.storage) as db_conn:
+        with Database(config.storage, config.gross_die_map) as db_conn:
             results = db_conn.query(sql)
 
             if not results:
@@ -424,7 +424,6 @@ def _run_ingest_batch(
         compression=config.processing.compression,
         max_workers=max_workers,
         timeout=timeout,
-        gross_die_map=config.gross_die_map or None,
     )
 
     for result in successes:
@@ -676,7 +675,7 @@ def export_csv(ctx, sql: str, output: Path, format: str):
     console.print()
 
     try:
-        with Database(config.storage) as db_conn:
+        with Database(config.storage, config.gross_die_map) as db_conn:
             df = db_conn.query_df(sql)
 
             if df.empty:
@@ -722,7 +721,7 @@ def export_lot(ctx, lot_ids: tuple, output: Path, pivot: bool):
     params = list(lot_ids)
 
     try:
-        with Database(config.storage) as db_conn:
+        with Database(config.storage, config.gross_die_map) as db_conn:
             if pivot:
                 # DuckDB PIVOT with dynamic values cannot use bound parameters.
                 # Fetch long-format first, then pivot via pandas (matches web API).

@@ -13,6 +13,9 @@ _ZONE3 = {0: "center", 1: "mid", 2: "edge"}
 
 
 def zone_yield(s, product, lot_id, n_zones=3):
+    # Probed dies only: unprobed gross-die dies have no wafer coordinate and
+    # cannot be assigned to a radial zone, so the gross-die denominator does not
+    # apply here (unlike wafer_yield_final). Zone yield = good/probed per zone.
     df = s.conn.execute(
         """
         WITH ext AS (

@@ -11,10 +11,14 @@ from .views import setup_views
 class Database:
     """DuckDB database for STDF analytics."""
 
-    def __init__(self, config: StorageConfig):
+    def __init__(self, config: StorageConfig,
+                 gross_die_map: dict[str, tuple[int, int]] | None = None):
         self.config = config
         self.db_path = config.database
         self.data_dir = config.data_dir
+        # {product: (gross_die, gd_fail_bin)} — applied at query time for the
+        # gross-die yield denominator and QC-fail bin bucket (CP only).
+        self.gross_die_map = gross_die_map
         self._conn: duckdb.DuckDBPyConnection | None = None
 
     def connect(self) -> None:
@@ -46,7 +50,7 @@ class Database:
 
     def _create_views(self) -> None:
         """Create views for Parquet datasets (delegates to stdf_platform.views)."""
-        setup_views(self.conn, self.data_dir)
+        setup_views(self.conn, self.data_dir, self.gross_die_map)
 
     def refresh_views(self) -> None:
         """Refresh views after new data is added."""
@@ -84,10 +88,11 @@ class Database:
     def get_lot_summary(self, lot_id: str | None = None) -> list[dict]:
         """Get lot summary with yield information (retest-aware).
 
-        Yield is derived from parts_final (each die/package's latest retest),
-        not from the WRR summary in `wafers`. The WRR of a retest run covers
-        only the re-measured subset, and FT has no WRR at all — parts_final is
-        correct for both CP and FT regardless of partial vs full retests.
+        Yield is derived from wafer_yield_final (each die/package's latest
+        retest, with the gross-die denominator applied for CP). The WRR of a
+        retest run covers only the re-measured subset, and FT has no WRR at all —
+        wafer_yield_final is correct for both CP and FT regardless of partial vs
+        full retests, and totals reflect gross die when configured.
         """
         where_clause = "WHERE l.lot_id = $1" if lot_id else ""
         params = [lot_id] if lot_id else []
@@ -109,12 +114,11 @@ class Database:
         LEFT JOIN (
             SELECT
                 lot_id,
-                COUNT(DISTINCT NULLIF(wafer_id, '')) as wafer_count,
-                COUNT(*) as total_parts,
-                SUM(CASE WHEN passed THEN 1 ELSE 0 END) as good_parts,
-                ROUND(100.0 * SUM(CASE WHEN passed THEN 1 ELSE 0 END)
-                      / NULLIF(COUNT(*), 0), 2) as yield_pct
-            FROM parts_final
+                COUNT(*) FILTER (WHERE wafer_id <> '') as wafer_count,
+                SUM(total) as total_parts,
+                SUM(good) as good_parts,
+                ROUND(100.0 * SUM(good) / NULLIF(SUM(total), 0), 2) as yield_pct
+            FROM wafer_yield_final
             GROUP BY lot_id
         ) p ON l.lot_id = p.lot_id
         {where_clause}
@@ -126,20 +130,15 @@ class Database:
     def get_wafer_yield(self, lot_id: str) -> list[dict]:
         """Get yield by wafer for a lot (retest-aware, die-level).
 
-        Computed from parts_final so each die's final disposition is its latest
-        retest. For FT (no wafer concept) wafer_id is empty, yielding a single
-        package-level group instead of an empty result.
+        Computed from wafer_yield_final so each die's final disposition is its
+        latest retest and CP totals use the gross-die denominator when
+        configured. For FT (no wafer concept) wafer_id is empty, yielding a
+        single package-level group instead of an empty result.
         """
         sql = """
-        SELECT
-            wafer_id,
-            COUNT(*) as total,
-            SUM(CASE WHEN passed THEN 1 ELSE 0 END) as good,
-            ROUND(100.0 * SUM(CASE WHEN passed THEN 1 ELSE 0 END)
-                  / NULLIF(COUNT(*), 0), 2) as yield_pct
-        FROM parts_final
+        SELECT wafer_id, total, good, yield_pct
+        FROM wafer_yield_final
         WHERE lot_id = $1
-        GROUP BY wafer_id
         ORDER BY wafer_id
         """
         return self.query(sql, [lot_id])
@@ -163,14 +162,30 @@ class Database:
         return self.query(sql, [lot_id, top_n])
 
     def get_bin_summary(self, lot_id: str) -> list[dict]:
-        """Get bin distribution for a lot."""
+        """Get bin distribution for a lot.
+
+        Probed dies are counted from parts_final; dies lost to inline failure /
+        aborted probe (gross die − probed) are added under the product's
+        gd_fail_bin so the distribution totals match the gross-die denominator.
+        Merges into an existing real bin if gd_fail_bin collides with one.
+        """
         sql = """
+        WITH binned AS (
+            SELECT soft_bin, COUNT(*) AS count
+            FROM parts_final
+            WHERE lot_id = $1
+            GROUP BY soft_bin
+            UNION ALL
+            SELECT gd_fail_bin AS soft_bin, SUM(unprobed) AS count
+            FROM wafer_yield_final
+            WHERE lot_id = $1 AND gd_fail_bin IS NOT NULL AND unprobed > 0
+            GROUP BY gd_fail_bin
+        )
         SELECT
             soft_bin,
-            COUNT(*) as count,
-            ROUND(100.0 * COUNT(*) / SUM(COUNT(*)) OVER (), 2) as pct
-        FROM parts_final
-        WHERE lot_id = $1
+            SUM(count) AS count,
+            ROUND(100.0 * SUM(count) / SUM(SUM(count)) OVER (), 2) AS pct
+        FROM binned
         GROUP BY soft_bin
         ORDER BY soft_bin
         """
@@ -192,12 +207,11 @@ class Database:
         LEFT JOIN (
             SELECT
                 lot_id,
-                COUNT(DISTINCT NULLIF(wafer_id, '')) as wafers,
-                COUNT(*) as total,
-                SUM(CASE WHEN passed THEN 1 ELSE 0 END) as good,
-                ROUND(100.0 * SUM(CASE WHEN passed THEN 1 ELSE 0 END)
-                      / NULLIF(COUNT(*), 0), 2) as yield_pct
-            FROM parts_final
+                COUNT(*) FILTER (WHERE wafer_id <> '') as wafers,
+                SUM(total) as total,
+                SUM(good) as good,
+                ROUND(100.0 * SUM(good) / NULLIF(SUM(total), 0), 2) as yield_pct
+            FROM wafer_yield_final
             GROUP BY lot_id
         ) p ON l.lot_id = p.lot_id
         WHERE l.lot_id IN ({placeholders})

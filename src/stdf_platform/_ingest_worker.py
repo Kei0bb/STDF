@@ -5,9 +5,7 @@ Runs parse_stdf + save_stdf_data in an isolated process so it can be
 killed with SIGKILL if it hangs.
 
 Usage:
-    python -m stdf_platform._ingest_worker <file> <product> <data_dir> <compression> [gross_die_json]
-
-gross_die_json (optional): JSON object {"PRODUCT": [gross_die, gd_fail_bin], ...}
+    python -m stdf_platform._ingest_worker <file> <product> <data_dir> <compression>
 
 Outputs JSON to stdout on success:
     {"ok": true, "sub_process": "CP11", "test_category": "CP"}
@@ -22,7 +20,7 @@ from pathlib import Path
 
 def main():
     if len(sys.argv) < 5:
-        print("Usage: _ingest_worker <file> <product> <data_dir> <compression> [gross_die_json]",
+        print("Usage: _ingest_worker <file> <product> <data_dir> <compression>",
               file=sys.stderr)
         sys.exit(1)
 
@@ -32,13 +30,6 @@ def main():
     product = sys.argv[2]
     data_dir = Path(sys.argv[3])
     compression = sys.argv[4]
-    gross_die_map: dict[str, tuple[int, int]] = {}
-    if len(sys.argv) >= 6:
-        try:
-            raw = json.loads(sys.argv[5])
-            gross_die_map = {k: (int(v[0]), int(v[1])) for k, v in raw.items()}
-        except Exception:
-            pass
 
     file_size_mb = file_path.stat().st_size / (1024 * 1024)
     print(f"[worker] start: {file_path.name} ({file_size_mb:.1f} MB)", file=sys.stderr)
@@ -60,7 +51,7 @@ def main():
     test_category = _get_test_category(sub_process)
 
     storage_config = StorageConfig(data_dir=data_dir)
-    storage = ParquetStorage(storage_config, gross_die_map=gross_die_map or None)
+    storage = ParquetStorage(storage_config)
 
     t1 = time.monotonic()
     _ = storage.save_stdf_data(
