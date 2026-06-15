@@ -20,7 +20,13 @@ def _conn(tmp_path: Path) -> duckdb.DuckDBPyConnection:
     return conn
 
 
-def _cp_data(lot_id="LOT1", wafer_id="W1", n_parts=7) -> STDFData:
+def _cp_data(lot_id="LOT1", wafer_id="W1", n_parts=7, part_txt=False) -> STDFData:
+    """Build a synthetic CP STDFData.
+
+    part_txt=True populates a per-part-unique PRR.PART_TXT (serial / 2D barcode),
+    which real CP testers may emit. Die identity must remain (wafer, x, y) so
+    such part_txt values must NOT defeat retest dedup.
+    """
     data = STDFData()
     data.lot_id = lot_id
     data.part_type = "TEST"
@@ -40,6 +46,7 @@ def _cp_data(lot_id="LOT1", wafer_id="W1", n_parts=7) -> STDFData:
     data.parts = [
         {
             "part_id": f"{lot_id}_{wafer_id}_{i}",
+            "part_txt": f"SN-{lot_id}-{wafer_id}-{i:04d}" if part_txt else "",
             "lot_id": lot_id, "wafer_id": wafer_id,
             "head_num": 1, "site_num": 1,
             "x_coord": i, "y_coord": i,
@@ -188,3 +195,44 @@ def test_gross_die_ft_not_filled(tmp_path):
         "SELECT COUNT(*) FROM parts_final WHERE lot_id = 'FTLOT'"
     ).fetchone()[0]
     assert total == 5  # no fill for FT
+
+
+def test_cp_part_txt_does_not_break_retest_dedup(tmp_path):
+    """CP dies carrying a per-part PART_TXT must still dedup by (wafer, x, y).
+
+    Regression: the dedup key once included part_txt unconditionally. When a CP
+    tester emits a unique serial per part, the same physical die had a different
+    part_txt across retests and was never collapsed — totals summed every retest.
+    """
+    storage = _storage(tmp_path, gross_die_map=None)
+    # Full probe then a selective retest of the same wafer — both carry serials.
+    storage.save_stdf_data(_cp_data("LOT1", "W1", 10, part_txt=True),
+                           product="P", test_category="CP",
+                           sub_process="CP1", source_file="f1.stdf")
+    storage.save_stdf_data(_cp_data("LOT1", "W1", 4, part_txt=True),
+                           product="P", test_category="CP",
+                           sub_process="CP1", source_file="f2.stdf")
+
+    conn = _conn(tmp_path)
+    total = conn.execute(
+        "SELECT COUNT(*) FROM parts_final WHERE lot_id = 'LOT1'"
+    ).fetchone()[0]
+    assert total == 10  # 10 distinct dies, NOT 14 (10 + 4 retested)
+
+
+def test_gross_die_total_is_gd_with_part_txt_and_retest(tmp_path):
+    """End-to-end: with serials AND a retest, parts_final total == gross_die."""
+    gross_die = 10
+    storage = _storage(tmp_path, gross_die_map={"P": (gross_die, 200)})
+    storage.save_stdf_data(_cp_data("LOT1", "W1", 7, part_txt=True),
+                           product="P", test_category="CP",
+                           sub_process="CP1", source_file="f1.stdf")
+    storage.save_stdf_data(_cp_data("LOT1", "W1", 3, part_txt=True),
+                           product="P", test_category="CP",
+                           sub_process="CP1", source_file="f2.stdf")
+
+    conn = _conn(tmp_path)
+    total = conn.execute(
+        "SELECT COUNT(*) FROM parts_final WHERE lot_id = 'LOT1'"
+    ).fetchone()[0]
+    assert total == gross_die

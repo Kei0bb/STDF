@@ -5,7 +5,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 from pathlib import Path
 
-from stdf_platform.views import _DEDUP_UNIT, setup_views
+from stdf_platform.views import setup_views
 
 
 def _write_parts(data_dir: Path):
@@ -27,8 +27,40 @@ def _write_parts(data_dir: Path):
     pq.write_table(table, path)
 
 
-def test_dedup_unit_constant():
-    assert _DEDUP_UNIT == "wafer_id, x_coord, y_coord, part_txt"
+def _write_two_retests_same_die(data_dir: Path):
+    """Same physical CP die (W1, x=1, y=1) probed twice with DIFFERENT part_txt
+    serials — must collapse to one row in parts_final."""
+    schema = pa.schema([
+        ("lot_id", pa.string()), ("wafer_id", pa.string()), ("part_txt", pa.string()),
+        ("x_coord", pa.int64()), ("y_coord", pa.int64()),
+        ("soft_bin", pa.int64()), ("passed", pa.bool_()), ("retest_num", pa.int64()),
+    ])
+    for retest, sn, passed in [(0, "SN-A", False), (1, "SN-B", True)]:
+        path = (
+            data_dir / "parts" / "product=PROD" / "test_category=CP"
+            / "sub_process=" / "lot_id=LOT1" / "wafer_id=W1"
+            / f"retest={retest}" / "data.parquet"
+        )
+        path.parent.mkdir(parents=True, exist_ok=True)
+        pq.write_table(pa.table({
+            "lot_id": ["LOT1"], "wafer_id": ["W1"], "part_txt": [sn],
+            "x_coord": [1], "y_coord": [1], "soft_bin": [1],
+            "passed": [passed], "retest_num": [retest],
+        }, schema=schema), path)
+
+
+def test_dedup_ignores_part_txt_for_cp_dies(tmp_path):
+    """CP die identity is (wafer, x, y); a per-part part_txt must not defeat
+    retest dedup. The latest retest (retest_num DESC) wins."""
+    _write_two_retests_same_die(tmp_path)
+    conn = duckdb.connect(":memory:")
+    setup_views(conn, tmp_path)
+    rows = conn.execute(
+        "SELECT COUNT(*) AS n, BOOL_OR(passed) AS passed"
+        " FROM parts_final WHERE lot_id='LOT1'"
+    ).fetchone()
+    assert rows[0] == 1          # collapsed to one die, not summed
+    assert rows[1] is True       # kept the latest retest (passing) result
 
 
 def test_setup_views_registers_base_and_final(tmp_path):

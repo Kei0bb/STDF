@@ -11,12 +11,27 @@ import duckdb
 
 
 # Dedup identity within a (lot, retest) group, expressed as native partition
-# columns. CP rows have part_txt='' (so they group by wafer_id + x/y); FT rows
-# have wafer_id='' and x=y=-32768 (so they group by part_txt). Listing all four
-# columns is equivalent to the old CASE/CONCAT key for both categories — the
-# "unused" columns are constant within a category — but avoids per-row string
-# concatenation, making the ROW_NUMBER() window dedup ~25% faster.
-_DEDUP_UNIT = "wafer_id, x_coord, y_coord, part_txt"
+# columns.
+#
+#   CP die identity = (wafer_id, x_coord, y_coord) — the probe location. CP
+#   testers MAY populate PRR.PART_TXT with a per-part serial / 2D barcode, so
+#   part_txt is NOT safe to include in the CP key: the same physical die would
+#   carry a different part_txt across retests and fail to dedup, inflating
+#   counts by summing every retest (and breaking gross-die fill).
+#
+#   FT has no wafer/probe coordinates (wafer_id='', x=y=-32768); its die
+#   identity is the package barcode in part_txt.
+#
+#   Gross-die fill rows are CP rows with x=y=-32768 and a unique synthetic
+#   part_txt (__GDFILL_*); they fall into the coordinate-less branch and stay
+#   distinct from each other and from real probed dies.
+#
+# The CASE selects part_txt ONLY for coordinate-less rows (FT + fill), and a
+# constant otherwise so CP probed dies group purely by wafer_id + x/y.
+_DEDUP_UNIT = (
+    "wafer_id, x_coord, y_coord, "
+    "CASE WHEN x_coord = -32768 AND y_coord = -32768 THEN part_txt ELSE '' END"
+)
 
 
 def setup_views(conn: duckdb.DuckDBPyConnection, data_dir: Path) -> list[str]:
