@@ -52,8 +52,3 @@ products:
   # SCT101A:
   #   gross_die: 1234
   #   gd_fail_bin: 200
-
-# Report engine (stdf report)
-reporting:
-  histogram_top_n: 20          # parametric histograms: top-N by fail rate
-  always_include_tests: {}     # e.g. {PRODUCT_A: [1234, 5678]} — always plotted

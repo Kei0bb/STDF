@@ -5,7 +5,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from test_reporting_queries import _write_ft  # noqa: E402
+from synth_data import _write_ft  # noqa: E402
 from stdf_platform.analysis import AnalysisSession, correlation  # noqa: E402
 
 

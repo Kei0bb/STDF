@@ -6,7 +6,7 @@ import pyarrow.parquet as pq
 import plotly.graph_objects as go
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from test_reporting_queries import _write_cp  # noqa: E402
+from synth_data import _write_cp, _cpk  # noqa: E402
 from stdf_platform.analysis import AnalysisSession  # noqa: E402
 from stdf_platform.analysis import compare  # noqa: E402
 
@@ -90,7 +90,6 @@ def test_test_stats_default_picks_fail_tests(tmp_path):
 
 
 def test_test_stats_cpk_matches_python_helper(tmp_path):
-    from stdf_platform.reporting.sections import _cpk
     with _sess(tmp_path) as s:
         df = compare.test_stats_by_lot(s, "PROD", ["LOT2"], "CP", [1001])
         got = float(df.iloc[0]["cpk"])

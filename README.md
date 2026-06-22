@@ -18,8 +18,9 @@ cp config.yaml.example config.yaml
 # 3. データ取り込み
 stdf ingest-all ./downloads -p YOUR_PRODUCT
 
-# 4. レポート生成（自動でも生成される）
-stdf report --pending
+# 4. クエリ / 解析
+stdf db query "SELECT * FROM lots LIMIT 10"
+stdf analyze yield --lot YOUR_LOT -p YOUR_PRODUCT
 ```
 
 ---
@@ -43,7 +44,7 @@ downloads/
      ↓
 DuckDB glob ビュー（クエリごとに fs スキャン）
      ↓
-     ├── HTML レポート (data/reports/**/*.html)
+     ├── stdf db query / analyze  (CLI)
      └── query.py  (VS Code インタラクティブ)
 ```
 
@@ -55,7 +56,7 @@ DuckDB glob ビュー（クエリごとに fs スキャン）
 
 | モジュール | 役割 |
 |---|---|
-| `cli.py` | Click CLI — `ingest` / `ingest-all` / `fetch` / `db` / `analyze` / `report` コマンド |
+| `cli.py` | Click CLI — `ingest` / `ingest-all` / `fetch` / `db` / `analyze` / `export` コマンド |
 | `worker.py` | `ThreadPoolExecutor` でファイルごとに subprocess を起動・タイムアウト管理 |
 | `_ingest_worker.py` | 独立 subprocess — 1ファイルを parse → Parquet 書き込みして JSON を stdout に出力 |
 | `parser.py` | Pure Python STDF V4 パーサー（`struct.Struct` 最適化、FAR/MIR/WIR/PIR/PRR/PTR/MPR/FTR/PMR対応） |
@@ -119,26 +120,6 @@ stdf ingest-all ./downloads -p SCT101A --workers 8 --timeout 600
 stdf ingest-all ./downloads -p SCT101A --force   # 全ファイル強制再取り込み
 ```
 
-### HTML レポート
-
-ロット単位の自己完結 HTML レポート（plotly.js 同梱でオフライン閲覧可）。歩留まりサマリ・ビン Pareto・ウェハーマップ・パラメトリックヒストグラム（規格線 + Cpk）・リテスト履歴を収録。FT ロットはウェハーマップを省略し ChipID 集計を追加。
-
-```bash
-stdf report --lot E6A773.00 -p SCT101A        # 単一ロット（-c CP|FT 省略時は両カテゴリ）
-stdf report --pending                          # 未生成・更新分をまとめて再生成
-```
-
-レポートは `ingest` / `ingest-all` / `fetch` 完了時に該当ロット分が**自動生成**されます（生成失敗は ingest を失敗させません）。出力は `data/reports/product={P}/test_category={C}/lot_id={L}/report.html`。Parquet が真実のソースで、レポートは常に上書き再生成される使い捨てキャッシュです。ブラウザで直接ファイルを開くだけで閲覧できます。
-
-ヒストグラム対象テストはフェイル率上位 N（既定 20）＋ `config.yaml` の製品別指定：
-
-```yaml
-reporting:
-  histogram_top_n: 20
-  always_include_tests:
-    SCT101A: [1234, 5678]   # 常に表示する test_num
-```
-
 ### SQL クエリ（VS Code）
 
 VS Code で `query.py` を開き、各セル (`# %%`) を Shift+Enter で実行（DuckDB）。
@@ -182,8 +163,8 @@ df = cp_ft_yield(s, product="SCT101A")
 df = zone_yield(s, product="SCT101A", lot_id="L001")
 ```
 
-すべての関数は `*_final` ビューを使用するため、歩留まり・Cpk の定義がレポートと完全に一致します。  
-`templates/analysis/*.py` は `# %%` セル形式（VS Code / Jupytext）で、Shift+Enter で逐次実行可能。
+すべての関数は `*_final` ビューを使用するため、歩留まり・Cpk の定義が CLI（`stdf analyze`）と完全に一致します。  
+`query.py` は `# %%` セル形式（VS Code / Jupytext）で、Shift+Enter で逐次実行可能。
 
 ### CLI クエリ
 

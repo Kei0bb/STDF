@@ -2,17 +2,66 @@
 
 from __future__ import annotations
 
+import duckdb
 import pandas as pd
 import plotly.graph_objects as go
 
-from ..config import Config
-from ..reporting import queries as rq
-# SQL Cpk formula (stddev_pop / LEAST) mirrors reporting.sections._cpk —
-# numeric equality is asserted in test_analysis_compare.py.
+# Default top-N tests (by fail rate) auto-selected when test_nums is omitted.
+_TOP_FAIL_TESTS = 20
 
 
 def _in_clause(lot_ids):
     return ",".join("?" for _ in lot_ids)
+
+
+def _top_fail_tests(conn, lot_id, top_n) -> list[int]:
+    """test_nums for the top-N tests by fail rate in a lot (passed='P'/'F')."""
+    try:
+        rows = conn.execute(
+            """
+            SELECT test_num
+            FROM test_data_final
+            WHERE lot_id = ?
+            GROUP BY test_num
+            HAVING SUM(CASE WHEN passed = 'F' THEN 1 ELSE 0 END) > 0
+            ORDER BY ROUND(100.0 * SUM(CASE WHEN passed = 'F' THEN 1 ELSE 0 END)
+                         / COUNT(*), 2) DESC, test_num
+            LIMIT ?
+            """,
+            [lot_id, top_n],
+        ).fetchall()
+    except duckdb.CatalogException:
+        return []
+    return [int(r[0]) for r in rows]
+
+
+def _test_values(conn, lot_id, test_num) -> dict:
+    """Numeric results + limits for one test (for a histogram)."""
+    try:
+        meta = conn.execute(
+            """
+            SELECT FIRST(test_name), FIRST(units), FIRST(lo_limit), FIRST(hi_limit)
+            FROM test_data_final
+            WHERE lot_id = ? AND test_num = ?
+            """,
+            [lot_id, test_num],
+        ).fetchone()
+    except duckdb.CatalogException:
+        return {}
+    if not meta or meta[0] is None:
+        return {}
+    vals = conn.execute(
+        """
+        SELECT result FROM test_data_final
+        WHERE lot_id = ? AND test_num = ? AND result IS NOT NULL
+        """,
+        [lot_id, test_num],
+    ).fetchall()
+    return {
+        "test_name": meta[0] or "", "units": meta[1] or "",
+        "lo_limit": meta[2], "hi_limit": meta[3],
+        "values": [r[0] for r in vals],
+    }
 
 
 def yield_by_lot(s, product, lot_ids, test_category):
@@ -58,11 +107,9 @@ def bin_pareto_by_lot(s, product, lot_ids, test_category):
 
 def test_stats_by_lot(s, product, lot_ids, test_category, test_nums=None):
     if test_nums is None:
-        top_n = Config.load().reporting.histogram_top_n
         nums = set()
         for lot in lot_ids:
-            for f in rq.top_fail_tests(s.conn, product, test_category, lot, top_n):
-                nums.add(int(f["test_num"]))
+            nums.update(_top_fail_tests(s.conn, lot, _TOP_FAIL_TESTS))
         test_nums = sorted(nums)
     if not test_nums:
         # no failing tests anywhere → empty frame with the right columns
@@ -98,7 +145,7 @@ def test_distribution_fig(s, product, lot_ids, test_category, test_num):
     fig = go.Figure()
     lo = hi = name = units = None
     for lot in lot_ids:
-        v = rq.test_values(s.conn, product, test_category, lot, test_num)
+        v = _test_values(s.conn, lot, test_num)
         if not v or not v.get("values"):
             continue
         lo, hi = v["lo_limit"], v["hi_limit"]

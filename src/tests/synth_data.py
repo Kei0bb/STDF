@@ -1,18 +1,32 @@
-"""reporting.queries against synthetic Parquet fixtures (Phase-1 views)."""
+"""Synthetic Parquet fixtures + helpers shared across analysis tests.
 
-import duckdb
+`_write_cp` / `_write_ft` build a minimal Hive-partitioned store that the
+Phase-1 views (setup_views) read directly, so tests need no STDF parsing.
+`_cpk` is the reference process-capability formula the SQL Cpk is checked against.
+"""
+
+from pathlib import Path
+from statistics import mean, pstdev
+
 import pyarrow as pa
 import pyarrow.parquet as pq
-from pathlib import Path
-
-from stdf_platform.views import setup_views
-from stdf_platform.reporting import queries as q
 
 
-def _conn(data_dir: Path):
-    conn = duckdb.connect(":memory:")
-    setup_views(conn, data_dir)
-    return conn
+def _cpk(values, lo, hi) -> float | None:
+    """Process capability. Needs at least one finite limit and >1 sample."""
+    vals = [v for v in values if v is not None]
+    if len(vals) < 2:
+        return None
+    sigma = pstdev(vals)
+    if sigma == 0:
+        return None
+    mu = mean(vals)
+    cands = []
+    if hi is not None:
+        cands.append((hi - mu) / (3 * sigma))
+    if lo is not None:
+        cands.append((mu - lo) / (3 * sigma))
+    return round(min(cands), 3) if cands else None
 
 
 def _write_cp(data_dir: Path):
@@ -118,63 +132,3 @@ def _write_ft(data_dir: Path):
         "origin_x": [12, 102], "origin_y": [22, 202],
         "reserved_bits": ["00", "00"], "retest_num": [0, 0],
     }), cp)
-
-
-def test_lot_header_cp(tmp_path):
-    _write_cp(tmp_path)
-    conn = _conn(tmp_path)
-    h = q.lot_header(conn, "PROD", "CP", "LOT1")
-    assert h["lot_id"] == "LOT1"
-    assert h["part_type"] == "SCT101A"
-    assert h["tester_type"] == "J750"
-
-
-def test_cp_yield_is_retest_aware(tmp_path):
-    _write_cp(tmp_path)
-    conn = _conn(tmp_path)
-    total = q.lot_yield_total(conn, "PROD", "CP", "LOT1")
-    # 4 distinct dies (W1:A,B ; W2:C,D); A passes via retest1 -> all 4 good
-    assert total["total"] == 4
-    assert total["good"] == 4
-    assert total["yield_pct"] == 100.0
-    assert q.max_retest(conn, "PROD", "CP", "LOT1") == 1
-
-
-def test_wafer_yield_and_ids(tmp_path):
-    _write_cp(tmp_path)
-    conn = _conn(tmp_path)
-    assert q.wafer_ids(conn, "PROD", "CP", "LOT1") == ["W1", "W2"]
-    wy = {r["wafer_id"]: r for r in q.wafer_yield(conn, "PROD", "CP", "LOT1")}
-    assert wy["W1"]["total"] == 2 and wy["W1"]["good"] == 2
-    assert wy["W2"]["total"] == 2
-
-
-def test_top_fail_and_values(tmp_path):
-    _write_cp(tmp_path)
-    conn = _conn(tmp_path)
-    fails = q.top_fail_tests(conn, "PROD", "CP", "LOT1", 20)
-    assert fails and fails[0]["test_num"] == 1001
-    assert fails[0]["fail_count"] >= 1
-    vals = q.test_values(conn, "PROD", "CP", "LOT1", 1001)
-    assert vals["lo_limit"] == 0.3 and vals["hi_limit"] == 0.8
-    assert len(vals["values"]) == 3
-
-
-def test_bin_pareto_and_wafer_map(tmp_path):
-    _write_cp(tmp_path)
-    conn = _conn(tmp_path)
-    pareto = q.bin_pareto(conn, "PROD", "CP", "LOT1")
-    bins = {r["soft_bin"] for r in pareto}
-    assert 1 in bins  # passing bin present
-    wm = q.wafer_map(conn, "PROD", "CP", "LOT1", "W1")
-    assert len(wm) == 2
-    assert {(r["x_coord"], r["y_coord"]) for r in wm} == {(0, 0), (1, 0)}
-
-
-def test_ft_chipid_summary(tmp_path):
-    _write_ft(tmp_path)
-    conn = _conn(tmp_path)
-    assert q.wafer_ids(conn, "CHIP", "FT", "FT1") == []  # FT has no wafers
-    summary = {r["origin_fab"]: r for r in q.chipid_summary(conn, "CHIP", "FT", "FT1")}
-    assert summary["TSMC1"]["dies"] == 1
-    assert summary["TSMC2"]["dies"] == 1

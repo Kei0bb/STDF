@@ -4,7 +4,7 @@ from pathlib import Path
 import plotly.graph_objects as go
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from test_reporting_queries import _write_cp  # noqa: E402
+from synth_data import _write_cp  # noqa: E402
 from test_analysis_compare import _write_cp_lot2  # noqa: E402
 from stdf_platform.analysis import AnalysisSession, trend  # noqa: E402
 

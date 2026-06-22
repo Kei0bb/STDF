@@ -6,7 +6,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from stdf_platform.analysis import AnalysisSession
-from test_reporting_queries import _write_cp, _write_ft
+from synth_data import _write_cp, _write_ft
 
 
 def test_session_registers_views(tmp_path):

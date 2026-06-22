@@ -117,8 +117,8 @@ def setup_views(
     #   aborted probe — they sit in the denominator (QC fail) without any row in
     #   Parquet. GREATEST guards the rare probed>GD case from going negative.
     #
-    # Every yield consumer (CLI, reporting, analysis) reads this view so the
-    # gross-die definition lives in exactly one place.
+    # Every yield consumer (CLI, analysis) reads this view so the gross-die
+    # definition lives in exactly one place.
     if "parts_final" in registered:
         if "lots" in registered:
             lot_product = (
