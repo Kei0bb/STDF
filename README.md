@@ -20,7 +20,7 @@ stdf ingest-all ./downloads -p YOUR_PRODUCT
 
 # 4. クエリ / 解析
 stdf db query "SELECT * FROM lots LIMIT 10"
-stdf analyze yield --lot YOUR_LOT -p YOUR_PRODUCT
+stdf analyze yield YOUR_LOT
 ```
 
 ---

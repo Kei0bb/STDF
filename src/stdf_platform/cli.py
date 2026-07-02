@@ -7,7 +7,6 @@ import shutil
 from pathlib import Path
 
 import click
-import pandas as pd
 from rich.console import Console
 from rich.table import Table
 from rich.progress import Progress, SpinnerColumn, TextColumn
@@ -127,7 +126,6 @@ def ingest_all(ctx, directory: Path, product: str, glob: str, workers: int, time
 
     Example: stdf ingest-all ./downloads -p SCT101A --workers 8
     """
-    from .worker import run_ingest_pool
     from .ingest_history import IngestHistory
 
     config: Config = ctx.obj["config"]

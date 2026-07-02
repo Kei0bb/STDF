@@ -518,15 +518,3 @@ class ParquetStorage:
             counts["chipid"] = len(data.chip_ids)
 
         return counts
-
-    def get_lots(self) -> list[str]:
-        """Get list of lot IDs in storage."""
-        lots_path = self._get_table_path("lots")
-        if not lots_path.exists():
-            return []
-
-        lots = []
-        for p in lots_path.iterdir():
-            if p.is_dir() and p.name.startswith("lot_id="):
-                lots.append(p.name[7:])  # Remove "lot_id=" prefix
-        return lots

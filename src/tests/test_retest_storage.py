@@ -14,7 +14,6 @@ def test_test_data_schema_has_retest_num():
     assert pa.types.is_integer(field.type)
 
 
-import tempfile
 from pathlib import Path
 from stdf_platform.storage import ParquetStorage
 from stdf_platform.config import StorageConfig

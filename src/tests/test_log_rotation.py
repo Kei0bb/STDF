@@ -1,6 +1,5 @@
 """Size-capped rotation of data/ingest_worker.log in worker._run_single."""
 
-import subprocess
 
 from stdf_platform import worker
 

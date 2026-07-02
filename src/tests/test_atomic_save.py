@@ -1,7 +1,6 @@
 """Atomic-write tests for SyncManager._save and IngestHistory._save."""
 
 import json
-from pathlib import Path
 
 from stdf_platform.sync_manager import SyncManager
 from stdf_platform.ingest_history import IngestHistory

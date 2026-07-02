@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import pandas as pd
 
 
 def cp_ft_yield(s, product, lot_ids=None):

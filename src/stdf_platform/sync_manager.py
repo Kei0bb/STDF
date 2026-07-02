@@ -1,11 +1,11 @@
 """Sync manager for tracking downloaded and ingested STDF files."""
 
 import json
-import os
-import tempfile
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
+
+from .atomic import atomic_write_json
 
 
 class SyncManager:
@@ -32,21 +32,8 @@ class SyncManager:
                 self._history = {"files": {}}
 
     def _save(self) -> None:
-        """Save history atomically (temp file in same dir + os.replace)."""
-        self.history_file.parent.mkdir(parents=True, exist_ok=True)
-        fd, tmp = tempfile.mkstemp(
-            dir=self.history_file.parent, prefix=".sync_history.", suffix=".tmp"
-        )
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                json.dump(self._history, f, indent=2, ensure_ascii=False)
-            os.replace(tmp, self.history_file)
-        except BaseException:
-            try:
-                os.unlink(tmp)
-            except OSError:
-                pass
-            raise
+        """Save history atomically."""
+        atomic_write_json(self.history_file, self._history)
 
     def is_downloaded(self, remote_path: str) -> bool:
         """
@@ -59,19 +46,6 @@ class SyncManager:
             True if file has been downloaded
         """
         return remote_path in self._history["files"]
-
-    def is_ingested(self, remote_path: str) -> bool:
-        """
-        Check if a file has been ingested.
-
-        Args:
-            remote_path: Remote file path
-
-        Returns:
-            True if file has been ingested
-        """
-        entry = self._history["files"].get(remote_path)
-        return entry.get("ingested", False) if entry else False
 
     def mark_downloaded(
         self,
@@ -134,12 +108,3 @@ class SyncManager:
     def get_downloaded_count(self) -> int:
         """Get count of downloaded files."""
         return len(self._history["files"])
-
-    def get_ingested_count(self) -> int:
-        """Get count of ingested files."""
-        return sum(1 for f in self._history["files"].values() if f.get("ingested", False))
-
-    def clear(self) -> None:
-        """Clear all history."""
-        self._history = {"files": {}}
-        self._save()

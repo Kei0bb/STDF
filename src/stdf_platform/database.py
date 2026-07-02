@@ -1,7 +1,5 @@
 """DuckDB database for STDF analytics."""
 
-from typing import Any
-
 import duckdb
 
 from .config import StorageConfig
@@ -51,10 +49,6 @@ class Database:
     def _create_views(self) -> None:
         """Create views for Parquet datasets (delegates to stdf_platform.views)."""
         setup_views(self.conn, self.data_dir, self.gross_die_map)
-
-    def refresh_views(self) -> None:
-        """Refresh views after new data is added."""
-        self._create_views()
 
     def query(self, sql: str, params: list | None = None) -> list[dict]:
         """
@@ -190,32 +184,3 @@ class Database:
         ORDER BY soft_bin
         """
         return self.query(sql, [lot_id])
-
-    def compare_lots(self, lot_ids: list[str]) -> list[dict]:
-        """Compare yield across multiple lots (retest-aware, die-level)."""
-        placeholders = ", ".join(f"${i+1}" for i in range(len(lot_ids)))
-        sql = f"""
-        SELECT
-            l.lot_id,
-            l.job_name,
-            l.job_rev,
-            MAX(p.wafers) as wafers,
-            MAX(p.total) as total,
-            MAX(p.good) as good,
-            MAX(p.yield_pct) as yield_pct
-        FROM lots l
-        LEFT JOIN (
-            SELECT
-                lot_id,
-                COUNT(*) FILTER (WHERE wafer_id <> '') as wafers,
-                SUM(total) as total,
-                SUM(good) as good,
-                ROUND(100.0 * SUM(good) / NULLIF(SUM(total), 0), 2) as yield_pct
-            FROM wafer_yield_final
-            GROUP BY lot_id
-        ) p ON l.lot_id = p.lot_id
-        WHERE l.lot_id IN ({placeholders})
-        GROUP BY l.lot_id, l.job_name, l.job_rev
-        ORDER BY yield_pct DESC
-        """
-        return self.query(sql, lot_ids)

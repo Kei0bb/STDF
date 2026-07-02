@@ -16,7 +16,6 @@ import random
 import sys
 from pathlib import Path
 
-import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from make_test_stdf import make_ft_stdf, make_stdf  # noqa: E402

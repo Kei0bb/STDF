@@ -1,7 +1,6 @@
 """`_run_ingest_batch` writes data/ingest_failures.json atomically."""
 
 import json
-from pathlib import Path
 
 from stdf_platform import cli
 from stdf_platform.config import Config, StorageConfig

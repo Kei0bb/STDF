@@ -4,7 +4,6 @@ import sys
 from pathlib import Path
 
 import duckdb
-import pytest
 
 # make_ft_stdf lives alongside this test in src/tests/
 sys.path.insert(0, str(Path(__file__).resolve().parent))

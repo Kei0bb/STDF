@@ -37,13 +37,11 @@ class STDFData:
     chip_ids: list[dict] = field(default_factory=list)
     bins_hard: dict[int, dict] = field(default_factory=dict)
     bins_soft: dict[int, dict] = field(default_factory=dict)
-    sites: list[dict] = field(default_factory=list)
     # PMR pin map: pmr_index -> pin_name (LOG_NAM > PHY_NAM > CHAN_NAM)
     pin_map: dict[int, str] = field(default_factory=dict)
 
     # Internal state
     _current_wafer: str = ""
-    _current_part_index: int = 0
 
 
 # STDF Record types (typ, sub)
@@ -79,7 +77,6 @@ class STDFParser:
 
     def _set_endian(self, endian: str):
         """Set endianness and rebuild all pre-compiled struct objects."""
-        self._endian = endian
         self._s_u1 = struct.Struct(endian + "B")
         self._s_u2 = struct.Struct(endian + "H")
         self._s_u4 = struct.Struct(endian + "I")
@@ -267,7 +264,6 @@ class STDFParser:
         head_num = self._read_u1(f)
         site_num = self._read_u1(f)
         self._part_counter += 1
-        self.data._current_part_index = self._part_counter
         # Cache part_id once per part so test records don't re-allocate the string 59k times
         self._cached_part_id = f"{self.data.lot_id}_{self.data._current_wafer}_{self._part_counter}"
         # Reset ChipID accumulator for this DUT (GDRs arrive between PIR and PRR)

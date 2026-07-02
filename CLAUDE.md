@@ -19,12 +19,12 @@ stdf ingest <file> --product PROD       # Ingest single STDF file (Parquet)
 stdf ingest-all ./downloads -p PROD     # Batch ingest directory (parallel workers)
 stdf fetch                              # FTP differential sync
 stdf db query "SELECT ..."              # Ad-hoc DuckDB query over the views
-stdf analyze yield --lot X -p PROD       # Per-lot wafer yield (gross-die aware)
+stdf analyze yield LOT_ID               # Per-lot wafer yield (gross-die aware)
 ```
 
 ### Generate test data
 ```bash
-uv run python make_test_stdf.py            # Generate synthetic STDF files in test_data/
+uv run python src/tests/make_test_stdf.py  # Generate synthetic STDF files in test_data/
 ```
 
 ## Architecture

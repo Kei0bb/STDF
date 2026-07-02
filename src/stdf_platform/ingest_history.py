@@ -5,10 +5,10 @@ State is persisted to {data_dir}/ingest_history.json.
 """
 
 import json
-import os
-import tempfile
 from datetime import datetime
 from pathlib import Path
+
+from .atomic import atomic_write_json
 
 
 class IngestHistory:
@@ -29,20 +29,7 @@ class IngestHistory:
                 self._done = {}
 
     def _save(self) -> None:
-        self.history_file.parent.mkdir(parents=True, exist_ok=True)
-        fd, tmp = tempfile.mkstemp(
-            dir=self.history_file.parent, prefix=".ingest_history.", suffix=".tmp"
-        )
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                json.dump({"ingested": self._done}, f, indent=2, ensure_ascii=False)
-            os.replace(tmp, self.history_file)
-        except BaseException:
-            try:
-                os.unlink(tmp)
-            except OSError:
-                pass
-            raise
+        atomic_write_json(self.history_file, {"ingested": self._done})
 
     def is_done(self, path: Path) -> bool:
         return str(path.resolve()) in self._done
@@ -52,6 +39,3 @@ class IngestHistory:
         for p in paths:
             self._done[str(p.resolve())] = now
         self._save()
-
-    def count(self) -> int:
-        return len(self._done)
