@@ -57,7 +57,7 @@ The `retest_num` is derived from partition depth, not stored in STDF — duplica
   - `parser.py` — Pure Python STDF V4 parser
   - `database.py` — DuckDB view management
   - `storage.py` — Parquet Hive-partition writer
-  - `views.py` — single source for `_DEDUP_UNIT`, `setup_views(conn, data_dir, gross_die_map)`, the `wafer_yield_final` view (gross-die denominator), and the `test_data_of(lot, name_like)` fast-path macro (pre-filters by matching test_num set so the dedup WINDOW sees only relevant rows; exactly equivalent to filtering test_data_final — naive test_name pre-filtering is NOT, renamed-across-retest rows would resurface)
+  - `views.py` — single source for `_DEDUP_UNIT`, `setup_views(conn, data_dir, gross_die_map)`, and the `wafer_yield_final` view (gross-die denominator)
   - `ftp_client.py` — FTP differential sync
   - `_ingest_worker.py` — Isolated subprocess worker
   - `server/` — read-only HTTP query API (`stdf serve`). Built as an APIRouter
