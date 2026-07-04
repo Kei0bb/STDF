@@ -52,3 +52,11 @@ products:
   # SCT101A:
   #   gross_die: 1234
   #   gd_fail_bin: 200
+
+# Read-only HTTP query server (stdf serve) — multi-user access.
+# VSCode members use client/stdf_client.py against this URL; SQL is restricted
+# to a single SELECT and filesystem access is locked to data_dir.
+server:
+  host: "0.0.0.0"    # LAN 公開。ローカル専用にするなら 127.0.0.1
+  port: 8555
+  max_rows: 10000    # 1クエリの結果行数上限(超過分は truncated=true で切り詰め)

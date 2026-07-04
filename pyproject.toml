@@ -12,6 +12,8 @@ dependencies = [
     "pyyaml>=6.0",
     "pandas>=2.0.0",
     "plotly>=5.20.0",
+    "fastapi>=0.139.0",
+    "uvicorn>=0.50.0",
 ]
 
 [project.scripts]
@@ -29,5 +31,6 @@ include = ["src/stdf_platform"]
 
 [dependency-groups]
 dev = [
+    "httpx>=0.28.1",
     "pytest>=8.0.0",
 ]

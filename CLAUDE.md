@@ -20,6 +20,7 @@ stdf ingest-all ./downloads -p PROD     # Batch ingest directory (parallel worke
 stdf fetch                              # FTP differential sync
 stdf db query "SELECT ..."              # Ad-hoc DuckDB query over the views
 stdf analyze yield LOT_ID               # Per-lot wafer yield (gross-die aware)
+stdf serve                              # Read-only HTTP query server (multi-user)
 ```
 
 ### Generate test data
@@ -59,6 +60,11 @@ The `retest_num` is derived from partition depth, not stored in STDF — duplica
   - `views.py` — single source for `_DEDUP_UNIT`, `setup_views(conn, data_dir, gross_die_map)`, and the `wafer_yield_final` view (gross-die denominator)
   - `ftp_client.py` — FTP differential sync
   - `_ingest_worker.py` — Isolated subprocess worker
+  - `server/` — read-only HTTP query API (`stdf serve`). Built as an APIRouter
+    (future dashboard mounts it via `include_router`); one request = one
+    :memory: AnalysisSession; user SQL is single-SELECT-only with filesystem
+    access locked to data_dir (`allowed_directories`). Thin VSCode client:
+    `client/stdf_client.py` (requests+pandas only). See docs/multi-user-server.md
   - `analysis/` — reusable, retest-aware analysis API (returns DataFrames / plotly figures)
     - `session.py` — `AnalysisSession`: owns the DuckDB :memory: conn + views (config-resolved)
     - `compare.py` — lot-to-lot yield / bin pareto / test stats / distribution overlay

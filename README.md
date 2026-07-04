@@ -21,6 +21,9 @@ stdf ingest-all ./downloads -p YOUR_PRODUCT
 # 4. クエリ / 解析
 stdf db query "SELECT * FROM lots LIMIT 10"
 stdf analyze yield YOUR_LOT
+
+# 5. マルチユーザー: 読み取り専用クエリサーバ(各メンバーはVSCode+薄クライアントで接続)
+stdf serve    # → docs/multi-user-server.md
 ```
 
 ---

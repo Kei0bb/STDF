@@ -183,6 +183,29 @@ def ingest_all(ctx, directory: Path, product: str, glob: str, workers: int, time
         history.mark_done_batch([r.local_path for r in successes])
 
 
+@main.command()
+@click.option("--host", default=None, help="Bind address (default: config server.host)")
+@click.option("--port", default=None, type=int, help="Port (default: config server.port)")
+@click.pass_context
+def serve(ctx, host: str | None, port: int | None):
+    """Start the read-only HTTP query server (multi-user access).
+
+    One request = one in-memory DuckDB session over the Parquet store; user
+    SQL is restricted to a single SELECT with filesystem access locked to
+    data_dir. See docs/multi-user-server.md.
+    """
+    import uvicorn
+
+    from .server import create_app
+
+    config: Config = ctx.obj["config"]
+    host = host or config.server.host
+    port = port or config.server.port
+    console.print(f"[bold]stdf query server[/bold] → http://{host}:{port}")
+    console.print(f"  data_dir: {config.storage.data_dir}")
+    uvicorn.run(create_app(config), host=host, port=port)
+
+
 # ── db group ──────────────────────────────────────────────────────
 
 @main.group()
