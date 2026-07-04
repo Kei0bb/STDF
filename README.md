@@ -2,6 +2,7 @@
 
 半導体テストデータ（STDF V4）を **Parquet + DuckDB** に変換する高速 ETL パイプライン。  
 Pure Python パーサー × ThreadPoolExecutor による並列処理で、1000 ファイル以上のバッチ取り込みに対応。  
+数人での共同解析は読み取り専用クエリサーバ（`stdf serve`）+ 薄クライアントで対応。  
 **Docker 不要 — `uv sync` のみでセットアップ完了。**
 
 ---
@@ -48,7 +49,9 @@ downloads/
 DuckDB glob ビュー（クエリごとに fs スキャン）
      ↓
      ├── stdf db query / analyze  (CLI)
-     └── query.py  (VS Code インタラクティブ)
+     ├── query.py  (VS Code インタラクティブ)
+     └── stdf serve (読み取り専用 HTTP API)
+          └── 各メンバーの PC → client/stdf_client.py (VS Code) / 将来: ダッシュボード
 ```
 
 ---
@@ -77,7 +80,14 @@ DuckDB glob ビュー（クエリごとに fs スキャン）
 | `storage.py` | Parquet Hive パーティション書き込み（5テーブル） |
 | `views.py` | `_DEDUP_UNIT` 定数と `setup_views(conn, data_dir)` の単一ソース |
 | `database.py` | CLI・`query.py` 用 DuckDB コンテキストマネージャー（`query()` / `query_df()` 等ヘルパー付き） |
-| `config.py` | `config.yaml` 読み込み（FTP / Storage 設定、`${ENV_VAR}` 展開対応） |
+| `config.py` | `config.yaml` 読み込み（FTP / Storage / Server 設定、`${ENV_VAR}` 展開対応） |
+
+#### マルチユーザー層
+
+| モジュール | 役割 |
+|---|---|
+| `server/app.py` | 読み取り専用 HTTP クエリ API（`stdf serve`）。`APIRouter` 実装で将来のダッシュボード統合に対応 |
+| `client/stdf_client.py` | メンバー配布用の薄いクライアント（依存: requests + pandas のみ、単体1ファイル） |
 
 ---
 
@@ -184,6 +194,32 @@ stdf analyze yield LOT001       # Wafer 歩留まり
 stdf analyze test-fail LOT001   # フェールテスト上位
 stdf analyze bins LOT001        # Bin 分布
 ```
+
+### マルチユーザー解析（`stdf serve`）
+
+データと歩留まり定義は共有マシンに置いたまま、読み取り専用の HTTP API だけを社内 LAN に公開。
+メンバーは repo 不要 — `client/stdf_client.py` 1ファイルと `pip install requests pandas` だけで
+VS Code のセルから解析できます。
+
+```bash
+# 共有マシン側（1回だけ）
+stdf serve        # config.yaml の server: 節（host / port / max_rows）に従って起動
+```
+
+```python
+# メンバー側（VS Code セル、STDF_SERVER=http://<共有マシン>:8555 を設定）
+from stdf_client import q, to_csv, views
+
+views()                                                    # 使えるビュー一覧
+df = q("SELECT * FROM wafer_yield_final WHERE lot_id = 'ABC123'")
+to_csv("SELECT * FROM test_data_final WHERE lot_id = 'ABC123'", "abc123.csv")
+```
+
+- ユーザー SQL は**単一 SELECT のみ**。ファイルアクセスは data_dir 配下に制限
+  （DuckDB `allowed_directories` + `enable_external_access=false`）
+- 結果は `server.max_rows`（既定 10,000 行）で切り詰め（`truncated` フラグ付き）
+- 1リクエスト = 1 DuckDB セッション。全員が `views.py` の同一定義で計算
+- 常駐化（Task Scheduler）・メンバー配布手順 → `docs/multi-user-server.md`
 
 ### FTP 差分同期
 
