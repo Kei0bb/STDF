@@ -353,6 +353,21 @@ ORDER BY fail_neighbors DESC, a.y_coord, a.x_coord;
 
 ## 5. パラメトリック測定（test_data）
 
+> **テスト名で絞るときは `test_data_of()` を使う(数十〜数百倍高速)。**
+> `test_data_final` への `test_name` 条件はリテスト重複排除(WINDOW)の後に
+> しか適用できず、ロット全行(実データで1.4億行 ≈ 12分)を重複排除してから
+> 捨てることになる。`test_data_of(lot, name_like := ...)` は同じ結果を
+> 返しつつ、絞り込みを WINDOW の前に押し込む:
+>
+> ```sql
+> -- test_data_final WHERE lot_id=... AND test_name LIKE '%IDDQ%' と完全に同じ結果
+> SELECT * FROM test_data_of('YOUR_LOT_ID', name_like := '%IDDQ%');
+> ```
+>
+> ※「サブクエリ内で test_name を先に絞る」手書きの書き換えは**非等価**なので不可
+> (同じ test_num のままテスト名がリテスト間で変わると、古いリテスト行が復活する)。
+> `test_data_of` は test_num 集合で絞るためこの罠がない。
+
 ### 5-1. 特定テスト項目の統計サマリ
 
 ```sql

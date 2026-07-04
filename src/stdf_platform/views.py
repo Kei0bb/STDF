@@ -81,6 +81,36 @@ def setup_views(
         """)
         registered.append("test_data_final")
 
+        # Fast per-lot path: test_data_of(lot, name_like := '%IDDQ%').
+        #
+        # A test_name predicate on test_data_final cannot be pushed below the
+        # dedup WINDOW (test_name is not in the PARTITION BY), so DuckDB
+        # windows the lot's entire row set first (measured: 1.4e8 rows /
+        # ~12 min on real data) and filters last. Filtering test_name BEFORE
+        # the window is NOT equivalent: if a retest renamed a test (same
+        # test_num), the superseded old-name row would resurface.
+        #
+        # Instead we pre-filter by the SET OF test_num whose ANY row matches
+        # name_like. test_num is in the PARTITION BY, so this keeps or drops
+        # whole dedup groups — ROW_NUMBER is unchanged for surviving groups —
+        # and the trailing rn=1 AND test_name filter therefore returns exactly
+        # test_data_final WHERE lot_id/test_name. The semi join sits below the
+        # WINDOW, shrinking its input to the matching tests only.
+        conn.execute(f"""
+            CREATE OR REPLACE MACRO test_data_of(lot, name_like := '%') AS TABLE
+            SELECT * EXCLUDE (rn) FROM (
+                SELECT *, ROW_NUMBER() OVER (
+                    PARTITION BY lot_id, {_DEDUP_UNIT}, test_num, pin_num
+                    ORDER BY retest_num DESC
+                ) AS rn FROM test_data
+                WHERE lot_id = lot AND test_num IN (
+                    SELECT DISTINCT test_num FROM test_data
+                    WHERE lot_id = lot AND test_name LIKE name_like
+                )
+            ) WHERE rn = 1 AND test_name LIKE name_like
+        """)
+        registered.append("test_data_of")
+
     if "chipid" in registered:
         # die identity = decoded ChipID (efuse_raw), NOT positional
         # chip_occurrence_index (which can swap die0/die1 across retests).
