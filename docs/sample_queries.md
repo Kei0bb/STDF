@@ -25,6 +25,8 @@
 
 プロジェクトルートの **`query.py`** を VS Code で開き、各セル (`# %%`) を Shift+Enter で実行します。
 [Python 拡張](https://marketplace.visualstudio.com/items?itemName=ms-python.python) + Jupyter サポートが必要です。
+`query.py` は gitignore された個人スクラッチです — 初回やリポジトリ更新後は
+`cp query.py.example query.py` でテンプレートから最新化してください。
 
 ```
 # セットアップセルを実行後、LOT_ID を書き換えて各セルを実行

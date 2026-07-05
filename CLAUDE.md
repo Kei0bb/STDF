@@ -76,7 +76,9 @@ The `retest_num` is derived from partition depth, not stored in STDF — duplica
 
 `query.py` is a thin `# %%` cell-script wrapper over `AnalysisSession` (open in VSCode/Jupytext,
 run cells with Shift+Enter). All analysis uses the `*_final` views so yield/Cpk definitions are
-identical across users.
+identical across users. `query.py` itself is gitignored (personal scratch space); the tracked
+template is `query.py.example` — update the template when view definitions change, and refresh
+local copies with `cp query.py.example query.py`.
 
 ### Configuration
 `config.yaml` (not tracked; copy from `config.yaml.example`). Supports `${ENV_VAR}` expansion. The `--env dev` flag isolates data to `data-dev/` and skips sync history tracking.
