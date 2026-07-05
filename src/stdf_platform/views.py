@@ -1,8 +1,17 @@
 """Single source of truth for DuckDB view definitions over the Parquet store.
 
-Imported by database.py, web/api/deps.py and query.py so the dedup key and the
-base/final view SQL exist in exactly one place. Paths use .as_posix() so the
-generated SQL is valid on Windows as well as POSIX hosts.
+Imported by database.py, web/api/deps.py, cli.py (db verify-flags) and
+query.py so the dedup key and the base/final view SQL exist in exactly one
+place. Paths use .as_posix() so the generated SQL is valid on Windows as well
+as POSIX hosts.
+
+test_data dedup happens at ingest time (storage.py writes retest_flag/
+exec_seq per row), so test_data_final below is a plain predicate filter, not
+a window — see that view's comments for why. parts_final and chipid_final
+are small enough that the ROW_NUMBER() window cost is negligible, and are
+left as-is: collapsing to one row per die there is exactly the desired
+semantics (unlike test_data, where a die/test pair can legitimately have
+many rows — loop measurements).
 """
 
 from pathlib import Path
@@ -49,10 +58,14 @@ def setup_views(
     for table in ["lots", "wafers", "parts", "test_data", "chipid"]:
         path = data_dir / table
         if path.exists():
+            # test_data alone can mix pre-migration files (no exec_seq/
+            # retest_flag columns) with new ones; union_by_name fills the
+            # missing columns with NULL instead of erroring on schema mismatch.
+            extra_opt = ", union_by_name=true" if table == "test_data" else ""
             conn.execute(f"""
                 CREATE OR REPLACE VIEW {table} AS
                 SELECT * FROM read_parquet(
-                    '{path.as_posix()}/**/*.parquet', hive_partitioning=true
+                    '{path.as_posix()}/**/*.parquet', hive_partitioning=true{extra_opt}
                 )
             """)
             registered.append(table)
@@ -70,14 +83,39 @@ def setup_views(
         registered.append("parts_final")
 
     if "test_data" in registered:
-        conn.execute(f"""
+        # test_data is large enough that the old ROW_NUMBER()-per-key window
+        # (still used below for parts_final/chipid_final) was a real cost:
+        # a window's PARTITION BY is not a predicate, so a WHERE on a
+        # non-PARTITION-BY column (e.g. `test_name LIKE ...` scoped to one
+        # lot) can never be pushed below the window — DuckDB had to
+        # materialize the *entire* windowed relation before filtering,
+        # turning a lot-scoped query into a full-table scan (12+ minutes on
+        # the real store). Dedup is now precomputed at ingest time instead
+        # (storage.py writes `retest_flag`; 0 = the newest run containing a
+        # key — see _DEDUP_UNIT above for the key and _demote_superseded for
+        # how older runs get bumped). `retest_flag = 0` is a plain predicate,
+        # so DuckDB pushes it into the Parquet scan same as any other filter
+        # — a lot-scoped test_name query is now a cheap scan again.
+        #
+        # Row-semantics change vs the old window view: the window kept
+        # exactly ONE arbitrary row per (die, test, pin) per lot, silently
+        # discarding loop measurements (e.g. an OTP dump logging 512 PTRs
+        # under one test_num — 511 of 512 rows were dropped) and potentially
+        # hiding a failing iteration. The flag-based view keeps ALL rows of
+        # the latest run, including every loop iteration; use `exec_seq`
+        # (0-based occurrence order within the run) to distinguish them when
+        # one-value-per-test is wanted.
+        #
+        # Rows with retest_flag IS NULL (test_data files written by
+        # pre-flag/pre-migration code — see union_by_name above) are
+        # EXCLUDED here, not treated as "current": there is no reliable
+        # per-key recency signal for them, so silently including them risks
+        # mixing stale and current measurements. A store in this state must
+        # be re-ingested (the user's own WIPE-and-re-ingest plan covers
+        # this); `stdf db verify-flags` detects and reports it.
+        conn.execute("""
             CREATE OR REPLACE VIEW test_data_final AS
-            SELECT * EXCLUDE (rn) FROM (
-                SELECT *, ROW_NUMBER() OVER (
-                    PARTITION BY lot_id, {_DEDUP_UNIT}, test_num, pin_num
-                    ORDER BY retest_num DESC
-                ) AS rn FROM test_data
-            ) WHERE rn = 1
+            SELECT * FROM test_data WHERE retest_flag = 0
         """)
         registered.append("test_data_final")
 

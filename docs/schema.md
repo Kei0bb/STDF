@@ -137,6 +137,8 @@ data/
 | retest_num | INT64 | 自動算出 | リテスト番号 |
 | pin_num | INT64 | MPR.PMR_INDX | ピン番号（MPR のみ。PTR/FTR は NULL） |
 | pin_name | STRING | PMR から解決 | ピン名（MPR のみ） |
+| exec_seq | INT64 | 自動算出（ingest 時） | 同一 run 内でのキー出現順（0始まり）。ループ計測（例: OTP ダンプが 1 test_num に 512 PTR を書く）の各回を区別 |
+| retest_flag | INT64 | 自動算出（ingest 時） | キーごとの新しさ順位。0 = そのキーを含む最新 run。`test_data_final` は `retest_flag = 0` で絞り込み |
 
 ---
 
@@ -172,14 +174,31 @@ FT chiplet 製品の die トレーサビリティ。GDR の `EN-S0-CHIPID_R`（*
 
 リテストの最新のみを残す重複排除ビュー。dedup の単位（identity）は工程で分岐：
 
-| VIEW | dedup 単位（PARTITION） | 用途 |
-|------|------------------------|------|
-| `parts_final` | CP=`lot_id, wafer_id, x, y` / FT=`lot_id, part_txt` | 最新リテストのダイ/パッケージ |
-| `test_data_final` | 同上 + `test_num, pin_num` | 最新リテストの測定値 |
-| `chipid_final` | `lot_id, efuse_raw` | die（eFuse）単位の最新。occurrence 順入替えに堅牢 |
+| VIEW | dedup 方式 | 用途 |
+|------|------------|------|
+| `parts_final` | `ROW_NUMBER() OVER (PARTITION BY lot_id, <dedup 単位> ORDER BY retest_num DESC)` | 最新リテストのダイ/パッケージ |
+| `test_data_final` | `WHERE retest_flag = 0`（ingest 時に付与済み。下記参照） | 最新リテストの測定値（ループ計測は全行保持） |
+| `chipid_final` | `ROW_NUMBER() OVER (PARTITION BY lot_id, efuse_raw ORDER BY retest_num DESC)` | die（eFuse）単位の最新。occurrence 順入替えに堅牢 |
 
-いずれも `ORDER BY retest_num DESC` で最新を採用。CP は従来どおりウェーハ座標、
-FT は座標が無いため 2D バーコード（`part_txt`）/ eFuse を identity に使う。
+`parts_final` / `chipid_final` は小テーブルなのでウィンドウ計算コストが無視できる範囲。
+CP は従来どおりウェーハ座標、FT は座標が無いため 2D バーコード（`part_txt`）/ eFuse を
+identity に使う。
+
+`test_data_final` は `retest_num` 順のウィンドウではなく、ingest 時に `storage.py` が
+書き込む `retest_flag`（キーごとの新しさ順位。0 = 最新 run）を使った単純な述語フィルタ。
+ウィンドウの `PARTITION BY` は述語ではないため、非パーティション列（`test_name` など）
+への絞り込みがウィンドウの下までプッシュダウンされず、ロット絞り込みの `test_name LIKE`
+検索が実データで 12 分以上かかる原因になっていた。`retest_flag = 0` は通常の述語なので
+Parquet スキャンまでプッシュダウンされ、高速。
+
+また、旧ウィンドウ版は (die, test, pin) ごとに 1 行だけを残す仕様だったため、ループ計測
+（例: OTP ダンプが 1 test_num の下に 512 個の PTR を書く場合）の 511/512 行が無条件に
+捨てられ、Fail した回だけが消えることもあった。フラグ方式は最新 run の全行を保持する
+ため、ループ回を区別するには `exec_seq`（run 内 0 始まり出現順）を使う。
+
+`retest_flag IS NULL`（旧スキーマ／フラグ未対応でストアされたファイル）の行は
+`test_data_final` から除外される — そのストアは再取り込みが必要。`stdf db verify-flags`
+で検出できる。
 
 ---
 

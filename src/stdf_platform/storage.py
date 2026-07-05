@@ -1,9 +1,12 @@
 """Parquet storage for STDF data."""
 
+import os
 import re
+import tempfile
 from pathlib import Path
 from datetime import datetime, timezone
 
+import duckdb
 import pyarrow as pa
 import pyarrow.parquet as pq
 
@@ -98,6 +101,9 @@ TEST_DATA_SCHEMA = pa.schema([
     # MPR per-pin fields (NULL for PTR/FTR)
     ("pin_num", pa.int64()),
     ("pin_name", pa.string()),
+    # Ingest-time dedup metadata (see views.py _DEDUP_UNIT for the flag key)
+    ("exec_seq", pa.int64()),     # 0-based occurrence order of the key within this run
+    ("retest_flag", pa.int64()),  # recency rank across retest runs; 0 = newest
 ])
 
 # Decoded EN-SO-CHIPID_R ChipID schema (one row per die occurrence)
@@ -201,17 +207,32 @@ class ParquetStorage:
         when large-fetch latency is the bottleneck. So we move to v2.6 but do NOT
         set column_encoding. Only DuckDB and pyarrow read these files; both
         support v2.6 fully (no external/legacy reader to keep at v1.0).
+
+        Written atomically: a temp file in the same directory is renamed onto
+        `path` via os.replace, so a reader on a network share never observes a
+        partial file; the temp file is removed if writing fails.
         """
-        pq.write_table(
-            table,
-            path,
-            compression=compression,
-            version="2.6",  # default dictionary encoding (no BSS/DELTA — see docstring)
-            use_dictionary=True,
-            write_statistics=True,
-            coerce_timestamps="ms",  # Millisecond precision
-            allow_truncated_timestamps=True,
-        )
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+        os.close(fd)
+        try:
+            pq.write_table(
+                table,
+                tmp,
+                compression=compression,
+                version="2.6",  # default dictionary encoding (no BSS/DELTA — see docstring)
+                use_dictionary=True,
+                write_statistics=True,
+                coerce_timestamps="ms",  # Millisecond precision
+                allow_truncated_timestamps=True,
+            )
+            os.replace(tmp, path)
+        except BaseException:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
 
     def _get_next_retest_num(
         self, product: str, test_category: str, sub_process: str, lot_id: str, wafer_id: str
@@ -242,8 +263,82 @@ class ParquetStorage:
                     max_retest = max(max_retest, retest_num)
                 except (ValueError, IndexError):
                     pass
-        
+
         return max_retest + 1
+
+    def _demote_superseded(
+        self, wafer_dir: Path, new_keys: set[tuple], up_to_retest: int
+    ) -> None:
+        """
+        Bump retest_flag on earlier test_data retest files for keys re-measured
+        by the run just written at wafer_dir/retest={up_to_retest}.
+
+        `new_keys` is the DISTINCT set of flag keys
+        (wafer_id, x_coord, y_coord, ft_txt, test_num, pin_num) from that run
+        (see views._DEDUP_UNIT). Every sibling retest=k directory with k <
+        up_to_retest gets rows matching those keys incremented by 1 — the
+        newest run containing a key always reads as retest_flag=0, and a die
+        never re-measured keeps flag 0 forever.
+
+        Files without a retest_flag column (pre-migration schema) are left
+        untouched — flags become authoritative only after the migration
+        command (a later phase).
+
+        Assumes a single writer per (lot, wafer): concurrent ingest of two
+        retest files for the same wafer is not supported (pre-existing
+        constraint of _get_next_retest_num too).
+        """
+        if not new_keys:
+            return
+
+        new_keys_table = pa.table({
+            "wafer_id": [k[0] for k in new_keys],
+            "x_coord": [k[1] for k in new_keys],
+            "y_coord": [k[2] for k in new_keys],
+            "ft_txt": [k[3] for k in new_keys],
+            "test_num": [k[4] for k in new_keys],
+            "pin_num": [k[5] for k in new_keys],
+        })
+
+        for retest_num in range(up_to_retest):
+            old_path = wafer_dir / f"retest={retest_num}" / "data.parquet"
+            if not old_path.exists():
+                continue
+
+            existing_schema = pq.ParquetFile(old_path).schema_arrow
+            if "retest_flag" not in existing_schema.names:
+                continue  # store not yet migrated; skip per docstring
+
+            con = duckdb.connect()
+            try:
+                con.register("new_keys", new_keys_table)
+                updated = con.execute(f"""
+                    WITH nk AS (SELECT DISTINCT * FROM new_keys)
+                    SELECT old.* EXCLUDE (file_row_number) REPLACE (
+                        retest_flag + CASE WHEN nk.test_num IS NOT NULL
+                                           THEN 1 ELSE 0 END AS retest_flag
+                    )
+                    FROM (
+                        SELECT * FROM read_parquet(
+                            '{old_path.as_posix()}',
+                            file_row_number=true, hive_partitioning=false
+                        )
+                    ) old
+                    LEFT JOIN nk
+                      ON old.wafer_id = nk.wafer_id
+                     AND old.x_coord = nk.x_coord
+                     AND old.y_coord = nk.y_coord
+                     AND (CASE WHEN old.x_coord = -32768 AND old.y_coord = -32768
+                               THEN old.part_txt ELSE '' END) = nk.ft_txt
+                     AND old.test_num = nk.test_num
+                     AND old.pin_num IS NOT DISTINCT FROM nk.pin_num
+                    ORDER BY old.file_row_number
+                """).arrow().read_all()
+            finally:
+                con.close()
+
+            updated = updated.cast(TEST_DATA_SCHEMA)
+            self._write_parquet(updated, old_path)
 
     def save_stdf_data(
         self,
@@ -412,16 +507,28 @@ class ParquetStorage:
                 result_path.mkdir(parents=True, exist_ok=True)
 
                 enriched = []
+                # exec_seq = 0-based occurrence order of the flag key within
+                # this run (file record order). The counter dict mirrors the
+                # flag key in views._DEDUP_UNIT (plus test_num/pin_num) so loop
+                # measurements (e.g. an OTP dump writing 512 PTRs under one
+                # test_num) get distinct 0,1,2... instead of colliding.
+                seq_counters: dict[tuple, int] = {}
                 for r in results:
                     test_num = r.get("test_num", 0)
                     test_info = data.tests.get(test_num, {})
                     part_id = r.get("part_id", "")
                     x_coord, y_coord = part_coords.get(part_id, (-32768, -32768))
+                    part_txt = part_txt_map.get(part_id, "")
+                    ft_txt = part_txt if x_coord == -32768 and y_coord == -32768 else ""
+                    pin_num = r.get("pin_num")
+                    flag_key = (wafer_id, x_coord, y_coord, ft_txt, test_num, pin_num)
+                    exec_seq = seq_counters.get(flag_key, 0)
+                    seq_counters[flag_key] = exec_seq + 1
                     enriched.append({
                         "lot_id": r.get("lot_id", ""),
                         "wafer_id": r.get("wafer_id", ""),
                         "part_id": part_id,
-                        "part_txt": part_txt_map.get(part_id, ""),
+                        "part_txt": part_txt,
                         "x_coord": x_coord,
                         "y_coord": y_coord,
                         "test_num": test_num,
@@ -433,9 +540,13 @@ class ParquetStorage:
                         "result": r.get("result"),
                         "passed": "P" if r.get("passed", False) else "F",
                         "retest_num": retest_num,
-                        "pin_num": r.get("pin_num"),
+                        "pin_num": pin_num,
                         "pin_name": r.get("pin_name"),
+                        "exec_seq": exec_seq,
+                        "retest_flag": 0,
                     })
+
+                new_keys = set(seq_counters.keys())
 
                 result_table = pa.table({
                     "lot_id": [r["lot_id"] for r in enriched],
@@ -455,8 +566,19 @@ class ParquetStorage:
                     "retest_num": [r["retest_num"] for r in enriched],
                     "pin_num": [r["pin_num"] for r in enriched],
                     "pin_name": [r["pin_name"] for r in enriched],
+                    "exec_seq": [r["exec_seq"] for r in enriched],
+                    "retest_flag": [r["retest_flag"] for r in enriched],
                 }, schema=TEST_DATA_SCHEMA)
                 self._write_parquet(result_table, result_path / "data.parquet", compression)
+
+                if retest_num > 0 and new_keys:
+                    self._demote_superseded(
+                        self._get_table_path("test_data", product, test_category, sub_process)
+                        / f"lot_id={self._sanitize(lot_id)}"
+                        / f"wafer_id={self._sanitize(wafer_id)}",
+                        new_keys,
+                        retest_num,
+                    )
 
             counts["test_data"] = len(data.test_results)
 

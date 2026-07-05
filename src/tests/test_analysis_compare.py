@@ -34,6 +34,7 @@ def _write_cp_lot2(data_dir: Path):
         "test_name": ["Vth_N", "Vth_N"], "rec_type": ["PTR", "PTR"],
         "lo_limit": [0.3, 0.3], "hi_limit": [0.8, 0.8], "units": ["V", "V"],
         "result": [0.95, 0.55], "passed": ["F", "P"], "retest_num": [0, 0],
+        "exec_seq": [0, 0], "retest_flag": [0, 0],
     }), td)
     lots = (data_dir / "lots" / "product=PROD" / "test_category=CP"
             / "sub_process=CP1" / "lot_id=LOT2" / "data.parquet")

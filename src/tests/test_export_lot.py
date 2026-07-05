@@ -34,6 +34,7 @@ def _write(data_dir: Path):
         "test_num": [100], "pin_num": [0], "test_name": ["VDD"],
         "result": [1.23], "passed": ["P"], "lo_limit": [0.0], "hi_limit": [2.0],
         "units": ["V"], "retest_num": [0],
+        "exec_seq": [0], "retest_flag": [0],
     }), td_path)
 
 

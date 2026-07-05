@@ -10,6 +10,14 @@
 > `chipid_final` は「ダイ/パッケージごとに最新リテストのみ」へ重複排除済みです。
 > `wafers` の `part_count` / `good_count` は WRR の報告値（リテストは部分母集団・
 > FT には存在しない）なので、**歩留りは `parts_final` から算出**します。
+>
+> **`test_data_final` の行セマンティクスに注意**: 重複排除は ingest 時点で
+> 付与される `retest_flag`（`storage.py`）によるもので、`test_data_final` は
+> `WHERE retest_flag = 0` の単純フィルタです（`parts_final` / `chipid_final` は
+> 従来どおり `ROW_NUMBER()` ウィンドウ）。そのため、旧実装と異なり **(die, test,
+> pin) につき複数行が残ることがあります**（例: OTP ダンプの 1 test_num に対する
+> 512 個のループ計測）。反復回を区別するには `exec_seq`（run 内 0 始まり出現順）
+> を使い、1 テストにつき 1 値が欲しい場合は `exec_seq` で絞るか集約してください。
 
 ## 実行方法
 
@@ -24,11 +32,18 @@ LOT_ID = "E6A773.00"
 ```
 
 > [!TIP]
-> **大量データで `*_final` クエリが遅いとき**：`*_final` は `ROW_NUMBER()` の重複
-> 排除を毎回計算するため、巨大テーブルでは重くなります。1 ロットに絞って作業する
-> なら `use_lot('LOT_ID')` を呼ぶと、そのロットの `parts_final` /
-> `test_data_final` / `chipid_final` をメモリ上の表に materialize し、以降のクエリが
-> 約 45 倍高速になります（実測）。全ロットに戻すには `use_all()`。
+> **`test_data_final` はもう遅くありません**：ingest 時に付与される `retest_flag`
+> による単純フィルタなので、`test_name LIKE` などロット絞り込みクエリも通常の
+> Parquet スキャンと同じ速さです（`test_data_final` を毎クエリ `ROW_NUMBER()` で
+> 再計算していた旧実装では、ロット単位の `test_name` 検索が実データで 12 分以上
+> かかっていました）。
+>
+> **`parts_final` / `chipid_final` は引き続き `ROW_NUMBER()` ウィンドウ**です
+> （小テーブルなのでコストは無視できる範囲）。同じロットへ繰り返しクエリする
+> 場合は `use_lot('LOT_ID')` を呼ぶと、そのロットの `parts_final` /
+> `test_data_final` / `chipid_final` をメモリ上の表に materialize し、クエリ
+> ごとの Parquet 再スキャン（特にネットワーク共有上のストアで重い）を回避
+> できます。全ロットに戻すには `use_all()`。
 > 全件を Python に取り込む場合は `q(sql, limit=0, as_arrow=True)`（pandas 変換を
 > 省いて約 3.5 倍）か、ファイル出力なら `to_csv(sql)` を使ってください。
 
@@ -52,9 +67,13 @@ import duckdb
 con = duckdb.connect(":memory:")
 
 for t in ["lots", "wafers", "parts", "test_data", "chipid"]:
+    # test_data alone can mix pre-flag files (no exec_seq/retest_flag columns)
+    # with new ones; union_by_name fills the missing columns with NULL instead
+    # of erroring on schema mismatch.
+    extra = ", union_by_name=true" if t == "test_data" else ""
     con.execute(f"""
         CREATE OR REPLACE VIEW {t} AS
-        SELECT * FROM read_parquet('data/{t}/**/*.parquet', hive_partitioning=true)
+        SELECT * FROM read_parquet('data/{t}/**/*.parquet', hive_partitioning=true{extra})
     """)
 
 # dedup identity: CP=ダイ座標 / FT=パッケージ 2D バーコード
@@ -68,13 +87,13 @@ con.execute(f"""
             PARTITION BY lot_id, {DEDUP} ORDER BY retest_num DESC) AS rn
         FROM parts) WHERE rn = 1
 """)
-con.execute(f"""
+# test_data_final is NOT a window: dedup happens at ingest time (storage.py
+# writes retest_flag per row), so this is a plain predicate filter — cheap,
+# and pushed into the Parquet scan. Rows with retest_flag IS NULL (pre-flag
+# files) are excluded; that store needs a re-ingest (see stdf db verify-flags).
+con.execute("""
     CREATE OR REPLACE VIEW test_data_final AS
-    SELECT * EXCLUDE (rn) FROM (
-        SELECT *, ROW_NUMBER() OVER (
-            PARTITION BY lot_id, {DEDUP}, test_num, pin_num
-            ORDER BY retest_num DESC) AS rn
-        FROM test_data) WHERE rn = 1
+    SELECT * FROM test_data WHERE retest_flag = 0
 """)
 con.execute("""
     CREATE OR REPLACE VIEW chipid_final AS
@@ -352,6 +371,13 @@ ORDER BY fail_neighbors DESC, a.y_coord, a.x_coord;
 ---
 
 ## 5. パラメトリック測定（test_data）
+
+> [!NOTE]
+> `test_data_final` は最新 run の全行を保持します。ループ計測（例: 1 test_num
+> の下に複数回書かれる OTP ワード）がある場合、同じ `(die, test_num, pin_num)`
+> に複数行が残ります。反復回を区別したいときは `exec_seq`（run 内 0 始まり
+> 出現順。OTP ワードインデックス等に対応）で `WHERE` するか、以下のサマリ系
+> クエリのように `GROUP BY` / 集約関数で丸めてください。
 
 ### 5-1. 特定テスト項目の統計サマリ
 
@@ -807,3 +833,8 @@ WHERE lot_id = 'YOUR_FT_LOT';
 - FT は `wafer_id` / 座標が無いため、`*_final` の重複排除は `part_txt`（2D バーコード）
   を identity に使います。`chipid_final` は `efuse_raw`（die 恒久 ID）で排除。
 - `chipid` は **FT のみ**生成。CP には行がありません（出自はプローブ座標で代替）。
+- `test_data_final` の重複排除は ingest 時に付与された `retest_flag` によるもので
+  （`parts_final` / `chipid_final` は従来どおり `ROW_NUMBER()` ウィンドウ）、
+  (die, test, pin) につき複数行が残り得ます（ループ計測）。区別には `exec_seq`
+  を使ってください。`retest_flag IS NULL` の行（旧スキーマ）は
+  `test_data_final` から除外されます — 要再取り込み（`stdf db verify-flags`）。

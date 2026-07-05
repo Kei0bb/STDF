@@ -54,6 +54,7 @@ def _write_corr_tests(data_dir: Path):
         "lo_limit": [0.0] * 6, "hi_limit": [10.0] * 6, "units": ["V"] * 6,
         "result": [1.0, 2.0, 2.0, 4.0, 3.0, 6.0],   # test2 = 2*test1 → corr 1.0
         "passed": ["P"] * 6, "retest_num": [0] * 6,
+        "exec_seq": [0] * 6, "retest_flag": [0] * 6,
     }), td)
 
 

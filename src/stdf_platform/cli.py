@@ -15,6 +15,7 @@ from . import __version__
 from .config import Config
 from .database import Database
 from .sync_manager import SyncManager
+from .views import _DEDUP_UNIT
 
 
 console = Console()
@@ -402,6 +403,108 @@ def query(ctx, sql: str):
 
             if len(results) > 100:
                 console.print(f"[dim]... showing 100 of {len(results)} rows[/dim]")
+
+    except Exception as e:
+        console.print(f"[red]Error:[/red] {e}")
+        sys.exit(1)
+
+
+@db.command("verify-flags")
+@click.option("--lot", "-l", help="Filter by lot ID")
+@click.pass_context
+def verify_flags(ctx, lot: str | None):
+    """Verify the ingest-time retest_flag/exec_seq invariants on test_data.
+
+    Per lot, checks:
+
+    \b
+      null_flags        rows with no retest_flag (pre-flag files — the store
+                         needs a re-ingest; test_data_final excludes them).
+      orphaned_keys      keys whose newest run isn't flagged 0 (the demote
+                         invariant is broken — test_data_final would show no
+                         row at all for that die/test/pin).
+      inconsistent_runs  keys whose rows within one retest run don't all
+                         share the same flag (a partial demote).
+
+    Exits 1 if any lot fails a check.
+    """
+    config: Config = ctx.obj["config"]
+    key_cols = f"lot_id, {_DEDUP_UNIT}, test_num, pin_num"
+
+    try:
+        with Database(config.storage, config.gross_die_map) as db_conn:
+            if lot:
+                lot_ids = [lot]
+            else:
+                lot_ids = [
+                    row["lot_id"]
+                    for row in db_conn.query("SELECT DISTINCT lot_id FROM test_data ORDER BY lot_id")
+                ]
+
+            if not lot_ids:
+                console.print("[yellow]No test_data found[/yellow]")
+                return
+
+            table = Table(title="retest_flag Verification")
+            table.add_column("Lot ID", style="cyan")
+            table.add_column("Rows", justify="right")
+            table.add_column("Null Flags", justify="right")
+            table.add_column("Orphaned Keys", justify="right")
+            table.add_column("Inconsistent Runs", justify="right")
+
+            any_failed = False
+            for lot_id in lot_ids:
+                rows = db_conn.query(
+                    "SELECT COUNT(*) AS n FROM test_data WHERE lot_id = ?", [lot_id]
+                )[0]["n"]
+                null_flags = db_conn.query(
+                    "SELECT COUNT(*) AS n FROM test_data WHERE lot_id = ? AND retest_flag IS NULL",
+                    [lot_id],
+                )[0]["n"]
+                # Per-lot, so one huge lot's test_data doesn't have to be
+                # scanned alongside every other lot's rows in one query.
+                orphaned_keys = db_conn.query(
+                    f"""
+                    SELECT COUNT(*) AS n FROM (
+                        SELECT 1 FROM test_data WHERE lot_id = ?
+                        GROUP BY {key_cols}
+                        HAVING MIN(retest_flag) != 0
+                    ) sub
+                    """,
+                    [lot_id],
+                )[0]["n"]
+                inconsistent_runs = db_conn.query(
+                    f"""
+                    SELECT COUNT(*) AS n FROM (
+                        SELECT 1 FROM test_data WHERE lot_id = ?
+                        GROUP BY {key_cols}, retest_num
+                        HAVING MIN(retest_flag) != MAX(retest_flag)
+                    ) sub
+                    """,
+                    [lot_id],
+                )[0]["n"]
+
+                failed = null_flags > 0 or orphaned_keys > 0 or inconsistent_runs > 0
+                any_failed = any_failed or failed
+
+                def _cell(n: int) -> str:
+                    return f"[red]{n:,}[/red]" if n else "0"
+
+                table.add_row(
+                    lot_id,
+                    f"{rows:,}",
+                    _cell(null_flags),
+                    _cell(orphaned_keys),
+                    _cell(inconsistent_runs),
+                )
+
+            console.print(table)
+
+            if any_failed:
+                console.print("[red]FAILED[/red] — retest_flag invariant violations found (see counts above).")
+                sys.exit(1)
+            else:
+                console.print("[green]OK[/green] — all retest_flag invariants hold.")
 
     except Exception as e:
         console.print(f"[red]Error:[/red] {e}")

@@ -43,6 +43,7 @@ def _write_grid(data_dir: Path):
         "test_name": ["R"]*25, "rec_type": ["PTR"]*25,
         "lo_limit": [0.0]*25, "hi_limit": [10.0]*25, "units": ["V"]*25,
         "result": res, "passed": ["P"]*25, "retest_num": [0]*25,
+        "exec_seq": [0]*25, "retest_flag": [0]*25,
     }), td)
 
 

@@ -90,6 +90,9 @@ def _write_cp(data_dir: Path):
         "lo_limit": [0.3, 0.3, 0.3], "hi_limit": [0.8, 0.8, 0.8], "units": ["V", "V", "V"],
         "result": [0.95, 0.55, 0.60], "passed": ["F", "P", "P"],
         "retest_num": [0, 0, 0],
+        # Single-run fixture (no test_data retest scenario) — every row is
+        # current: exec_seq 0 (no loop measurements), retest_flag 0.
+        "exec_seq": [0, 0, 0], "retest_flag": [0, 0, 0],
     }), td)
 
 
