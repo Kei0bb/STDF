@@ -548,10 +548,8 @@ def _run_ingest_batch(
         compression=config.processing.compression,
         max_workers=max_workers,
         timeout=timeout,
+        on_success=lambda r: sync_manager.mark_ingested(r.remote_path),
     )
-
-    for result in successes:
-        sync_manager.mark_ingested(result.remote_path)
 
     # Structured failure record for automation (always written, even if empty).
     atomic_write_json(

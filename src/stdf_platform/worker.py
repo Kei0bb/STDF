@@ -12,7 +12,7 @@ import subprocess
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 from rich.console import Console
 from rich.progress import (
@@ -67,7 +67,16 @@ def _run_single(
             cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            encoding="utf-8",  # explicit UTF-8 for WSL2 / Windows compatibility
+            # Child stdio is pinned to UTF-8 via PYTHONIOENCODING (Python 3.14 on
+            # Windows is pre-PEP-686 and otherwise defaults child stdio to the
+            # locale encoding, e.g. cp932 on Japanese Windows, so error messages
+            # would arrive mangled). errors="replace" is a parent-side safety
+            # net: if some third-party output still isn't valid UTF-8, a stray
+            # byte degrades to U+FFFD instead of raising UnicodeDecodeError and
+            # killing the reader thread (as seen on Japanese Windows).
+            encoding="utf-8",
+            errors="replace",
+            env={**os.environ, "PYTHONIOENCODING": "utf-8"},
         )
     except Exception as e:
         return IngestResult(
@@ -128,6 +137,7 @@ def run_ingest_pool(
     compression: str,
     max_workers: int = 4,
     timeout: int = 300,
+    on_success: Optional[Callable[[IngestResult], None]] = None,
 ) -> tuple[list[IngestResult], list[IngestResult]]:
     """Ingest files concurrently using a subprocess worker pool.
 
@@ -137,6 +147,11 @@ def run_ingest_pool(
         compression: Parquet compression (zstd, gzip, snappy, etc.).
         max_workers: Max concurrent subprocesses (default 4).
         timeout: Per-file timeout in seconds (default 300).
+        on_success: Optional callback invoked on the pool's consumer thread
+            once per successful file (with its IngestResult, remote_path
+            already set), so callers can persist progress incrementally —
+            an aborted run (Ctrl+C mid-batch) does not lose track of files
+            that were already ingested.
 
     Returns:
         (successes, failures) — lists of IngestResult.
@@ -172,6 +187,8 @@ def run_ingest_pool(
 
                 if result.success:
                     successes.append(result)
+                    if on_success is not None:
+                        on_success(result)
                     progress.console.print(
                         f"  [green]✓[/green] {local_path.name}"
                         f"  [dim]{product}/{result.test_category}/{result.sub_process}[/dim]"
