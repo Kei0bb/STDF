@@ -81,6 +81,32 @@ def test_verify_flags_broken_store_exits_one(tmp_path, monkeypatch):
     assert "FAILED" in result.output
 
 
+def test_verify_flags_dup_current_violation(tmp_path, monkeypatch):
+    """Concurrency-corruption mode: two runs of the SAME key (die/test/pin)
+    both keep retest_flag=0 under different retest_num partitions — e.g. two
+    workers racing _get_next_retest_num and both claiming/writing distinct
+    retest slots for the same die/test without one demoting the other.
+    test_data_final (retest_flag = 0) would then return duplicate rows for
+    that key.
+    """
+    _write_test_data_file(
+        tmp_path / "test_data" / "product=PROD" / "test_category=CP"
+        / "lot_id=LOT1" / "wafer_id=W1" / "retest=0" / "data.parquet",
+        TEST_DATA_SCHEMA, **_clean_row(retest_num=[0], retest_flag=[0]),
+    )
+    _write_test_data_file(
+        tmp_path / "test_data" / "product=PROD" / "test_category=CP"
+        / "lot_id=LOT1" / "wafer_id=W1" / "retest=1" / "data.parquet",
+        TEST_DATA_SCHEMA, **_clean_row(retest_num=[1], retest_flag=[0]),
+    )
+
+    monkeypatch.setattr(cli.Config, "load", classmethod(lambda cls, p=None: _patched_config(tmp_path)))
+    result = CliRunner().invoke(cli.main, ["db", "verify-flags"])
+
+    assert result.exit_code == 1, result.output
+    assert "FAILED" in result.output
+
+
 def test_verify_flags_lot_filter(tmp_path, monkeypatch):
     _write_test_data_file(
         tmp_path / "test_data" / "product=PROD" / "test_category=CP"

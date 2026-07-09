@@ -3,6 +3,7 @@
 import os
 import re
 import tempfile
+import time
 from pathlib import Path
 from datetime import datetime, timezone
 
@@ -210,7 +211,10 @@ class ParquetStorage:
 
         Written atomically: a temp file in the same directory is renamed onto
         `path` via os.replace, so a reader on a network share never observes a
-        partial file; the temp file is removed if writing fails.
+        partial file; the temp file is removed if writing fails. The replace
+        is retried with exponential backoff on PermissionError (see below) to
+        absorb transient external file locks; the temp file is still cleaned
+        up if all retries are exhausted.
         """
         path.parent.mkdir(parents=True, exist_ok=True)
         fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
@@ -226,7 +230,21 @@ class ParquetStorage:
                 coerce_timestamps="ms",  # Millisecond precision
                 allow_truncated_timestamps=True,
             )
-            os.replace(tmp, path)
+            # Same-lot write races (two workers targeting this same path) are
+            # prevented upstream by per-lot serialization in worker.py — this
+            # retry is only a safety net for transient locks held by EXTERNAL
+            # processes (e.g. an antivirus scanner, or a reader briefly
+            # holding the destination open on Windows), which surface as
+            # PermissionError on os.replace.
+            backoff_delays = (0.1, 0.2, 0.4, 0.8, 1.6)
+            for attempt in range(5):
+                try:
+                    os.replace(tmp, path)
+                    break
+                except PermissionError:
+                    if attempt == 4:
+                        raise
+                    time.sleep(backoff_delays[attempt])
         except BaseException:
             try:
                 os.unlink(tmp)

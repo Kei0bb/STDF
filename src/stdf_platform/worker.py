@@ -9,6 +9,7 @@ import json
 import os
 import sys
 import subprocess
+import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
@@ -131,6 +132,27 @@ def _run_single(
         return IngestResult(local_path=local_path, remote_path=None, success=True)
 
 
+def _lot_key(local_path: Path) -> str:
+    """Grouping key for same-lot serialization: filename text before the
+    first '_' (e.g. "2613-X03_00_SC0G29A_...@FT1_1#202604050254.std" ->
+    "2613-X03"). If there is no '_', the whole filename is the key, so that
+    file gets its own single-file group (under-grouping is safe — it only
+    costs parallelism, never correctness).
+    """
+    name = local_path.name
+    return name.split("_", 1)[0] if "_" in name else name
+
+
+def _ts_key(local_path: Path) -> str:
+    """Sort key for chronological order within a lot group: the text after
+    the last '#' in the filename stem (e.g. "...#202604050254" ->
+    "202604050254"). Falls back to the full filename if there is no '#'.
+    Plain string comparison is fine — these are zero-padded timestamps.
+    """
+    stem = local_path.stem
+    return stem.rsplit("#", 1)[-1] if "#" in stem else local_path.name
+
+
 def run_ingest_pool(
     files: list[tuple],
     data_dir: Path,
@@ -141,17 +163,47 @@ def run_ingest_pool(
 ) -> tuple[list[IngestResult], list[IngestResult]]:
     """Ingest files concurrently using a subprocess worker pool.
 
+    Files are grouped by lot (see `_lot_key`) and each lot's files run
+    SEQUENTIALLY, in measurement-time order (`_ts_key`), within one group
+    worker. Different lots still run in parallel. This is required because
+    files from the same lot share mutable on-disk state that a
+    read-then-write race would corrupt:
+
+      1. the lots table always rewrites the same lot-level data.parquet —
+         two concurrent writers would clobber each other or trip the
+         os.replace retry (see storage.py).
+      2. `_get_next_retest_num` is a read-then-write directory scan — two
+         workers processing the same wafer concurrently can both read the
+         same "next" retest number and both claim it.
+      3. `_demote_superseded` reads and rewrites OLDER retest files when a
+         die/test key is re-measured — a second worker's os.replace on the
+         same file races the first (WinError 5 on Windows) and can corrupt
+         retest_flag ranks.
+
+    Grouping and ordering rely on the FTP filename convention: the lot
+    prefix is the text before the first '_', and the measurement timestamp
+    is the text after the last '#'. A wrong grouping only costs parallelism
+    in one direction: OVER-grouping (e.g. two unrelated files sharing a
+    prefix) just serializes files that could have run in parallel, which is
+    safe. UNDER-grouping cannot silently happen for files that really share
+    a lot, because `_lot_key` falls back to the literal filename (its own
+    single-file group) only when there is no '_' at all — an unexpected
+    naming scheme degrades to one group per file, not to merging unrelated
+    lots.
+
     Args:
         files: List of (remote_path, local_path, product, ttype) tuples.
         data_dir: Root data directory for Parquet output.
         compression: Parquet compression (zstd, gzip, snappy, etc.).
-        max_workers: Max concurrent subprocesses (default 4).
+        max_workers: Max concurrent lot GROUPS (default 4). Files within a
+            group always run one at a time regardless of this value.
         timeout: Per-file timeout in seconds (default 300).
-        on_success: Optional callback invoked on the pool's consumer thread
-            once per successful file (with its IngestResult, remote_path
-            already set), so callers can persist progress incrementally —
-            an aborted run (Ctrl+C mid-batch) does not lose track of files
-            that were already ingested.
+        on_success: Optional callback invoked once per successful file (from
+            whichever group-worker thread completed it — callers doing I/O
+            in this callback must be thread-safe), with its IngestResult
+            (remote_path already set), so callers can persist progress
+            incrementally — an aborted run (Ctrl+C mid-batch) does not lose
+            track of files that were already ingested.
 
     Returns:
         (successes, failures) — lists of IngestResult.
@@ -159,6 +211,17 @@ def run_ingest_pool(
     log_path = data_dir / "ingest_worker.log"
     successes: list[IngestResult] = []
     failures: list[IngestResult] = []
+    result_lock = threading.Lock()
+
+    # Group files by (product, lot) and sort each group chronologically so a
+    # single group-worker thread processes one lot's files in measurement
+    # order, never concurrently.
+    groups: dict[tuple[str, str], list[tuple]] = {}
+    for remote_path, local_path, product, ttype in files:
+        key = (product, _lot_key(local_path))
+        groups.setdefault(key, []).append((remote_path, local_path, product, ttype))
+    for key in groups:
+        groups[key].sort(key=lambda f: _ts_key(f[1]))
 
     with Progress(
         SpinnerColumn(),
@@ -171,34 +234,35 @@ def run_ingest_pool(
     ) as progress:
         task = progress.add_task(f"Ingesting ({max_workers} workers)...", total=len(files))
 
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            future_map = {
-                executor.submit(
-                    _run_single,
+        def _run_group(group_files: list[tuple]) -> None:
+            for remote_path, local_path, product, _ttype in group_files:
+                result = _run_single(
                     local_path, product, data_dir, compression, timeout, log_path,
-                ): (remote_path, local_path, product)
-                for remote_path, local_path, product, _ttype in files
-            }
-
-            for future in as_completed(future_map):
-                remote_path, local_path, product = future_map[future]
-                result = future.result()
+                )
                 result.remote_path = remote_path
 
-                if result.success:
-                    successes.append(result)
-                    if on_success is not None:
-                        on_success(result)
-                    progress.console.print(
-                        f"  [green]✓[/green] {local_path.name}"
-                        f"  [dim]{product}/{result.test_category}/{result.sub_process}[/dim]"
-                    )
-                else:
-                    failures.append(result)
-                    progress.console.print(
-                        f"  [red]✗[/red] {local_path.name}: {result.error}"
-                    )
+                with result_lock:
+                    if result.success:
+                        successes.append(result)
+                        if on_success is not None:
+                            on_success(result)
+                        progress.console.print(
+                            f"  [green]✓[/green] {local_path.name}"
+                            f"  [dim]{product}/{result.test_category}/{result.sub_process}[/dim]"
+                        )
+                    else:
+                        failures.append(result)
+                        progress.console.print(
+                            f"  [red]✗[/red] {local_path.name}: {result.error}"
+                        )
+                    progress.advance(task)
 
-                progress.advance(task)
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            group_futures = [
+                executor.submit(_run_group, group_files)
+                for group_files in groups.values()
+            ]
+            for future in as_completed(group_futures):
+                future.result()  # propagate any unexpected exception
 
     return successes, failures

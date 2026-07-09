@@ -425,6 +425,11 @@ def verify_flags(ctx, lot: str | None):
                          row at all for that die/test/pin).
       inconsistent_runs  keys whose rows within one retest run don't all
                          share the same flag (a partial demote).
+      dup_current        keys whose flag-0 rows span more than one
+                         retest_num (a concurrency-corruption mode where two
+                         runs of the same key both keep retest_flag=0 —
+                         test_data_final would then return duplicate
+                         measurements for that die/test/pin).
 
     Exits 1 if any lot fails a check.
     """
@@ -451,6 +456,7 @@ def verify_flags(ctx, lot: str | None):
             table.add_column("Null Flags", justify="right")
             table.add_column("Orphaned Keys", justify="right")
             table.add_column("Inconsistent Runs", justify="right")
+            table.add_column("Dup Current", justify="right")
 
             any_failed = False
             for lot_id in lot_ids:
@@ -483,8 +489,23 @@ def verify_flags(ctx, lot: str | None):
                     """,
                     [lot_id],
                 )[0]["n"]
+                dup_current = db_conn.query(
+                    f"""
+                    SELECT COUNT(*) AS n FROM (
+                        SELECT {key_cols}
+                        FROM test_data
+                        WHERE lot_id = ? AND retest_flag = 0
+                        GROUP BY ALL
+                        HAVING COUNT(DISTINCT retest_num) > 1
+                    ) sub
+                    """,
+                    [lot_id],
+                )[0]["n"]
 
-                failed = null_flags > 0 or orphaned_keys > 0 or inconsistent_runs > 0
+                failed = (
+                    null_flags > 0 or orphaned_keys > 0
+                    or inconsistent_runs > 0 or dup_current > 0
+                )
                 any_failed = any_failed or failed
 
                 def _cell(n: int) -> str:
@@ -496,6 +517,7 @@ def verify_flags(ctx, lot: str | None):
                     _cell(null_flags),
                     _cell(orphaned_keys),
                     _cell(inconsistent_runs),
+                    _cell(dup_current),
                 )
 
             console.print(table)
