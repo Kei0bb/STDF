@@ -671,84 +671,79 @@ ORDER BY cpk;
 
 > Cpk < 1.33 はマージン不足の目安。`5-5`（規格マージン）と併せて確認します。
 
-### 8-2. 次期プログラム向けスペック検討（緩和 / 締めの判断材料）
+### 8-2. 次期プログラム向けスペック検討（Cpk < 1.33 の洗い出し）
 
-現行データから、次期テストプログラムのリミット候補を `mean ± 3 × Cpk_target × σ`
-で算出し、**緩和・締めの両方向**を提案するクエリです。8-1 との違い:
+現行データから **Cp / Cpk が 1.33 を割っているテストを洗い出し**、新しいリミット候補を
+`mean ± 3 × Cpk_target × σ` で算出します。あわせて **pass/fail 件数**と、その現行
+リミットが**どのテストプログラムのものか**を突き合わせます。8-1 との違い:
 
 | | 8-1 | 8-2 |
 |---|---|---|
-| 母集団 | 1 ロット・全ダイ | 全ロット・**良品ダイのみ**（`parts.passed`）|
-| 現行スペック | 行が持つリミットで `GROUP BY` | **基準ロット**（工程ごとに `start_time` 最大）のリミット |
-| 出力 | Cp / Cpk | 新リミット候補 + 逸脱 ppm + 診断フラグ |
+| 母集団 | 1 ロット・全ダイ | 工程内の全ロット・**良品ダイのみ**（`parts.passed`）|
+| 現行スペック | 行が持つリミットで `GROUP BY` | **基準ロット**（`start_time` 最大）のリミット |
+| 出力 | Cp / Cpk | + 新リミット候補 / fail 件数 / プログラム版 |
 
-**このクエリが答える 2 つの問い**
+> [!IMPORTANT]
+> **`test_category` と `sub_process` は必ず指定してください。** 省略すると CP1 と CP2 の
+> ように測定条件の違うデータが同じ `test_num` で混ざります。加えて全工程の Parquet を
+> 読むことになり、集約キーに文字列が 3 本増えて実測 +31% 遅くなります。
 
-- *「そのスペックは最新か」* — リミットは STDF の PTR/MPR にロット（＝ファイル）
-  ごとに記録されています。基準ロットのリミットを「現行」とし、全ロットを通して
-  リミットが変わっているかを `limits_changed` / `LIMIT_CHANGED` で示します。
-- *「どのテストプログラムか」* — `lots.job_name` / `job_rev` を join し、基準ロット
-  の版を `latest_job_name` / `latest_job_rev` に出します。
+**このクエリが答える 3 つの問い**
 
-**データの流れと絞り込み条件**（丸数字は SQL 中の CTE コメントに対応）
+- *「Cpk が足りないテストはどれか」* — `cpk_current < target_cpk` で絞り、昇順に並べます。
+  新リミット候補は `direction`（`LOOSEN` / `TIGHTEN` / `MIXED`）付きで出ます。
+- *「そのスペックは最新か」* — リミットは STDF の PTR/MPR にロット（＝ファイル）ごとに
+  記録されています。基準ロットのリミットを「現行」とし、全ロットを通してリミットが
+  変わっているかを `limits_changed` / `LIMIT_CHANGED` で示します。
+- *「どのテストプログラムか」* — `lots.job_name` / `job_rev` を join し、基準ロットの版を
+  `ref_lot_id` / `latest_job_name` / `latest_job_rev` に出します。
+
+**データの流れ**（丸数字は SQL 中の CTE コメントに対応）
 
 ```mermaid
 flowchart TD
-    TD["test_data_final<br/>retest_flag = 0<br/>（最新 run のみ）"]
-    PA["parts<br/>（生テーブル）"]
-    LO["lots<br/>job_name / job_rev / start_time"]
+    PA["parts"] --> GD["⓪ good_die<br/>工程で絞ってから<br/>parts_final と同じ dedup<br/>passed = TRUE のみ"]
+    TD["test_data_final<br/>retest_flag = 0"] --> BASE
+    GD -->|"LEFT JOIN<br/>CP: wafer_id + x/y<br/>FT: part_txt"| BASE
+    BASE["① base<br/>工程内・全ロット<br/>rec_type = PTR / MPR<br/>lo_limit &lt; hi_limit<br/>units = V / A 系<br/>is_good = 良品ダイか"]
 
-    PA --> GD["⓪ good_die<br/>product で絞ってから<br/>parts_final と同じ dedup<br/>passed = TRUE のみ残す"]
+    LO["lots"] --> LL["② latest_lot<br/>start_time 最大の 1 本<br/>= 基準ロット"]
+    LL --> CS["③ current_spec<br/>基準ロットのリミット<br/>= 現行スペック"]
+    TD -->|"基準ロットのぶんだけ"| CS
 
-    TD -->|"_DEDUP_UNIT で join<br/>CP: wafer_id + x/y<br/>FT: part_txt"| BASE
-    GD --> BASE
-
-    BASE["① base（母集団）<br/>product 指定・全ロット<br/>rec_type = PTR / MPR<br/>lo_limit &lt; hi_limit<br/>units = V / A 系<br/>result が有限"]
-
-    LO --> LL["② latest_lot<br/>工程ごとに start_time 最大の 1 本<br/>= 基準ロット"]
-    LL --> CS["③ current_spec<br/>基準ロットが持つ lo/hi_limit<br/>= 現行スペック"]
-    TD -->|"基準ロットの<br/>パーティションのみ読む"| CS
-
-    BASE --> ST["④ stats<br/>キー: test_category, sub_process,<br/>test_num, pin_num<br/>n / mean / σ / skew / 分位点"]
-    BASE --> LV["⑤ lot_var<br/>n_lots<br/>σ_between / σ_within"]
-
-    ST --> CAND["⑥ 新スペック候補<br/>mean ± 3 × target_cpk × σ"]
-    CAND --> RND["⑦ 有効数字 3 桁・常に緩い側へ丸め"]
-
-    BASE --> IMP["⑧ impact<br/>base を再走査し<br/>新スペック外の実測を数える"]
-    RND --> IMP
-
-    CS --> JUDGE["⑨ 判定・フラグ付け"]
-    RND --> JUDGE
-    IMP --> JUDGE
-    LV --> JUDGE
+    BASE --> ST["④ stats<br/>キー: test_num, pin_num<br/>統計は is_good のみ<br/>fail 件数は全ダイ"]
+    ST --> CAND["⑤ 新リミット候補<br/>mean ± 3 × target_cpk × σ<br/>有効数字 3 桁・緩い側へ丸め"]
+    CS --> JUDGE["⑥ Cpk 判定・direction・フラグ"]
+    CAND --> JUDGE
 ```
 
-**判定フロー**
+**判定フロー**（`direction` 列）
 
 ```mermaid
 flowchart TD
     S["新 LSL/USL と現行 LSL/USL を比較"] --> A{"基準ロットに<br/>そのテストがある?"}
     A -->|"なし"| NB["NO_BASELINE<br/>新規追加 or 削除されたテスト<br/>→ 現行スペックとの比較不可"]
     A -->|"あり"| B{"両側とも外側へ?"}
-    B -->|"はい"| L["LOOSEN（緩和候補）<br/>→ cpk_current の低い順に検討<br/>→ NON_NORMAL / SKEWED なら<br/>　 実測分位点で個別判断"]
+    B -->|"はい"| L["LOOSEN（緩和候補）<br/>→ cpk_current の低い順に検討"]
     B -->|"いいえ"| C{"両側とも内側へ?"}
-    C -->|"はい"| T["TIGHTEN（締め候補）<br/>→ out_ppm_new で歩留り影響を確認<br/>→ ppm が大きい締めは採用しない"]
+    C -->|"はい"| T["TIGHTEN（締め候補）<br/>→ fail_n / min_val / max_val で<br/>　 実測が新リミットに収まるか確認"]
     C -->|"いいえ"| D{"現行と完全一致?"}
     D -->|"はい"| N["NO_CHANGE"]
-    D -->|"いいえ"| M["MIXED<br/>片側は緩め・片側は締め<br/>→ 片側ずつ判断"]
+    D -->|"いいえ"| M["MIXED<br/>片側は緩め・片側は締め"]
 ```
 
 ```sql
 WITH params AS (
     SELECT 'YOUR_PRODUCT'         AS product,
+           'CP'                   AS test_category,   -- 必ず指定（上記 IMPORTANT）
+           'CP1'                  AS sub_process,     -- 必ず指定
            CAST(1.33 AS DOUBLE)   AS target_cpk,
            30                     AS min_n,             -- これ未満は LOW_SAMPLE
            -- 除外ロット。例 CAST('2620%' AS VARCHAR) / 不要なら NULL のまま
            CAST(NULL AS VARCHAR)  AS exclude_lot_pattern
 ),
 
--- ⓪ 良品ダイ: parts_final と同一セマンティクスの dedup を product 指定の内側で行う
+-- ⓪ 良品ダイ: parts_final と同一セマンティクスの dedup を工程指定の内側で行う
 --    （parts_final をそのまま join すると全製品を読む。理由は後述「性能上の注意」）
 good_die AS (
     SELECT lot_id, wafer_id, x_coord, y_coord, part_txt
@@ -760,22 +755,24 @@ good_die AS (
                             THEN p.part_txt ELSE '' END
                    ORDER BY p.retest_num DESC) AS rn
         FROM parts p CROSS JOIN params pa
-        WHERE p.product = pa.product
+        WHERE p.product       = pa.product
+          AND p.test_category = pa.test_category
+          AND p.sub_process   = pa.sub_process
     ) WHERE rn = 1 AND passed
 ),
 
--- ① 母集団: 最新 run（test_data_final）× 良品ダイ（⓪ good_die）
+-- ① 母集団: 最新 run（test_data_final）に良品ダイを LEFT JOIN する。
+--    統計は is_good の行だけで取り、pass/fail 件数は全ダイで数えるため、
+--    INNER ではなく LEFT にして 1 パスで両方まかなう。
 --    join キーは views.py の _DEDUP_UNIT と同一（CP=ウェーハ+座標 / FT=part_txt）
 --    pin_num は PTR で NULL のため -1 に畳む（NULL は join で一致しないため）
 base AS (
-    SELECT
-        td.product, td.test_category, td.sub_process, td.lot_id,
-        td.test_num, td.test_name, td.units,
-        COALESCE(td.pin_num, -1) AS pin_num,
-        COALESCE(td.pin_name, '') AS pin_name,
-        td.lo_limit, td.hi_limit, td.result, td.exec_seq
+    SELECT td.test_num, COALESCE(td.pin_num, -1) AS pin_num,
+           td.test_name, td.units, COALESCE(td.pin_name, '') AS pin_name,
+           td.lo_limit, td.hi_limit, td.result, td.passed,
+           (p.lot_id IS NOT NULL) AS is_good
     FROM test_data_final td
-    JOIN good_die p
+    LEFT JOIN good_die p
       ON  p.lot_id   = td.lot_id
       AND p.wafer_id = td.wafer_id
       AND p.x_coord  = td.x_coord
@@ -785,7 +782,9 @@ base AS (
         = (CASE WHEN p.x_coord  = -32768 AND p.y_coord  = -32768
                 THEN p.part_txt  ELSE '' END)
     CROSS JOIN params pa
-    WHERE td.product = pa.product
+    WHERE td.product       = pa.product
+      AND td.test_category = pa.test_category
+      AND td.sub_process   = pa.sub_process
       AND td.rec_type IN ('PTR', 'MPR')
       AND (pa.exclude_lot_pattern IS NULL
            OR td.lot_id NOT LIKE pa.exclude_lot_pattern)
@@ -798,17 +797,18 @@ base AS (
       AND regexp_matches(UPPER(TRIM(td.units)), '^.?[VA]$')
 ),
 
--- ② 基準ロット: 工程（test_category × sub_process）ごとに start_time 最大の 1 本
+-- ② 基準ロット: 工程内で start_time 最大の 1 本
+--    lot_id はタイブレーク。start_time が同値のロットがあると基準ロットが
+--    実行ごとに変わり、現行スペックが揺れるため
 latest_lot AS (
-    SELECT product, test_category, sub_process, lot_id, job_name, job_rev
+    SELECT lot_id, job_name, job_rev
     FROM (
         SELECT l.*, ROW_NUMBER() OVER (
-                   PARTITION BY l.product, l.test_category, l.sub_process
-                   -- lot_id はタイブレーク。start_time が同値のロットがあると
-                   -- 基準ロットが実行ごとに変わり、現行スペックが揺れるため
                    ORDER BY l.start_time DESC, l.lot_id DESC) AS rn
         FROM lots l CROSS JOIN params pa
-        WHERE l.product = pa.product
+        WHERE l.product       = pa.product
+          AND l.test_category = pa.test_category
+          AND l.sub_process   = pa.sub_process
           AND (pa.exclude_lot_pattern IS NULL
                OR l.lot_id NOT LIKE pa.exclude_lot_pattern)
     ) WHERE rn = 1
@@ -816,92 +816,67 @@ latest_lot AS (
 
 -- ③ 現行スペック = 基準ロットが持っていたリミット
 --    base ではなく test_data_final から直接引く。リミットはダイに依存しないので
---    良品フィルタが不要で、lot_id はパーティション列なので基準ロットの
---    ファイルだけを読めば済む（base の再走査を 1 回減らせる）
+--    良品フィルタが不要で、lot_id はパーティション列なので基準ロットのぶんだけ
+--    読めば済む（実測 0.02 s）
 current_spec AS (
-    SELECT td.product, td.test_category, td.sub_process, td.test_num,
-           COALESCE(td.pin_num, -1) AS pin_num,
+    SELECT td.test_num, COALESCE(td.pin_num, -1) AS pin_num,
            ANY_VALUE(td.lo_limit) AS cur_lsl,
            ANY_VALUE(td.hi_limit) AS cur_usl
-    FROM test_data_final td
-    JOIN latest_lot ll
-      ON  ll.product       = td.product
-      AND ll.test_category = td.test_category
-      AND ll.sub_process   = td.sub_process
-      AND ll.lot_id        = td.lot_id
-    WHERE td.rec_type IN ('PTR', 'MPR')
+    FROM test_data_final td CROSS JOIN params pa
+    WHERE td.product       = pa.product
+      AND td.test_category = pa.test_category
+      AND td.sub_process   = pa.sub_process
+      AND td.lot_id        = (SELECT lot_id FROM latest_lot)
+      AND td.rec_type IN ('PTR', 'MPR')
       AND td.lo_limit IS NOT NULL AND isfinite(td.lo_limit)
       AND td.hi_limit IS NOT NULL AND isfinite(td.hi_limit)
       AND td.lo_limit < td.hi_limit
     GROUP BY ALL
 ),
 
--- ④ 統計（全ロットプール）
+-- ④ 統計。σ / mean は良品ダイのみ、fail 件数は全ダイ
 stats AS (
     SELECT
-        product, test_category, sub_process, test_num, pin_num,
-        ANY_VALUE(test_name)        AS test_name,
-        ANY_VALUE(units)            AS units,
-        ANY_VALUE(pin_name)         AS pin_name,
-        COUNT(*)                    AS n,
-        -- n_lots は ⑤ lot_var 側で COUNT(*) として無料で得られるのでここでは取らない
-        -- 変更検知は MIN/MAX の不一致で判定する。COUNT(DISTINCT ...) は行ごとに
-        -- ハッシュ集合を作るため、この規模では実測で最大のコスト要因だった
-        MIN(test_name)              AS test_name_min,
-        MAX(test_name)              AS test_name_max,
-        MIN(lo_limit)               AS lo_limit_min,
-        MAX(lo_limit)               AS lo_limit_max,
-        MIN(hi_limit)               AS hi_limit_min,
-        MAX(hi_limit)               AS hi_limit_max,
-        MAX(exec_seq) + 1           AS execs_per_die,   -- >1 ならループ計測
-        AVG(result)                 AS mean,
-        STDDEV_SAMP(result)         AS sigma,
-        MIN(result)                 AS min_val,
-        MAX(result)                 AS max_val,
-        SKEWNESS(result)            AS skew,
-        QUANTILE_CONT(result, 0.00135) AS p00135,       -- 実測 -3σ 相当
-        QUANTILE_CONT(result, 0.99865) AS p99865        -- 実測 +3σ 相当
+        test_num,
+        pin_num,
+        ANY_VALUE(test_name)                       AS test_name,
+        ANY_VALUE(units)                           AS units,
+        ANY_VALUE(pin_name)                        AS pin_name,
+        COUNT(*) FILTER (WHERE is_good)            AS n,
+        COUNT(*)                                   AS n_all,
+        COUNT(*) FILTER (WHERE passed = 'F')       AS fail_n,
+        AVG(result)         FILTER (WHERE is_good) AS mean,
+        STDDEV_SAMP(result) FILTER (WHERE is_good) AS sigma,
+        MIN(result)         FILTER (WHERE is_good) AS min_val,
+        MAX(result)         FILTER (WHERE is_good) AS max_val,
+        -- リミット変更検知。COUNT(DISTINCT ...) は行ごとにハッシュ集合を作るため
+        -- 高い。MIN/MAX の不一致で等価に判定できる
+        MIN(lo_limit)                              AS lo_limit_min,
+        MAX(lo_limit)                              AS lo_limit_max,
+        MIN(hi_limit)                              AS hi_limit_min,
+        MAX(hi_limit)                              AS hi_limit_max
     FROM base
     GROUP BY ALL
-    HAVING COUNT(*) > 1
+    HAVING COUNT(*) FILTER (WHERE is_good) > 1
 ),
 
--- ⑤ ロット間 σ とロット内 σ（全ロットプールの σ 膨張が見える）＋ n_lots
---    σ は 2 点以上あるロットだけで計算するが、n_lots は全ロットを数える
-lot_var AS (
-    SELECT product, test_category, sub_process, test_num, pin_num,
-           COUNT(*)                                        AS n_lots,
-           STDDEV_SAMP(lot_mean) FILTER (WHERE cnt > 1)    AS sigma_between,
-           SQRT(AVG(lot_var)     FILTER (WHERE cnt > 1))   AS sigma_within
-    FROM (
-        SELECT product, test_category, sub_process, test_num, pin_num, lot_id,
-               COUNT(*) AS cnt, AVG(result) AS lot_mean, VAR_SAMP(result) AS lot_var
-        FROM base
-        GROUP BY ALL
-    )
-    GROUP BY ALL
-),
-
--- ⑥ 新リミット候補 = mean ± 3 × target_cpk × σ
+-- ⑤ 新リミット候補 = mean ± 3 × target_cpk × σ
+--    有効数字 3 桁へ丸め。FLOOR / CEIL なので常に「緩い側」に丸まる
+--    （丸めで意図せず厳しくならない）
 candidate AS (
     SELECT s.*, cs.cur_lsl, cs.cur_usl,
+           ll.lot_id   AS ref_lot_id,
            ll.job_name AS latest_job_name,
            ll.job_rev  AS latest_job_rev,
-           ll.lot_id   AS ref_lot_id,
            pa.target_cpk, pa.min_n,
            s.mean - 3.0 * pa.target_cpk * s.sigma AS new_lsl_exact,
            s.mean + 3.0 * pa.target_cpk * s.sigma AS new_usl_exact
     FROM stats s
-    -- params の product は落とす（stats.product と衝突して USING が曖昧になるため）
     CROSS JOIN (SELECT target_cpk, min_n FROM params) pa
-    LEFT JOIN current_spec cs
-           USING (product, test_category, sub_process, test_num, pin_num)
-    LEFT JOIN latest_lot ll USING (product, test_category, sub_process)
+    CROSS JOIN latest_lot ll
+    LEFT JOIN current_spec cs USING (test_num, pin_num)
     WHERE s.sigma IS NOT NULL AND isfinite(s.sigma) AND s.sigma > 0
 ),
-
--- ⑦ 有効数字 3 桁へ丸め。FLOOR/CEIL なので常に「緩い側」に丸まる
---    （丸めで意図せず厳しくならない）
 rounded AS (
     SELECT c.*,
            CASE WHEN new_lsl_exact = 0 THEN 0 ELSE
@@ -911,109 +886,81 @@ rounded AS (
                 CEIL(new_usl_exact / POW(10, FLOOR(LOG10(ABS(new_usl_exact))) - 2))
                      * POW(10, FLOOR(LOG10(ABS(new_usl_exact))) - 2) END AS new_usl
     FROM candidate c
-),
-
--- ⑧ 影響: 新リミットを実測に当て直して逸脱数を数える（base の 2 回目の走査）
-impact AS (
-    SELECT product, test_category, sub_process, test_num, pin_num,
-           COUNT(*) FILTER (WHERE b.result < r.new_lsl
-                               OR b.result > r.new_usl) AS n_outside_new,
-           COUNT(*) FILTER (WHERE b.result < r.cur_lsl
-                               OR b.result > r.cur_usl) AS n_outside_cur
-    FROM rounded r
-    JOIN base b USING (product, test_category, sub_process, test_num, pin_num)
-    GROUP BY ALL
 )
 
+-- ⑥ 判定
 SELECT
-    r.test_category, r.sub_process,
-    r.test_num, r.test_name, r.units,
-    CASE WHEN r.pin_num = -1 THEN NULL ELSE r.pin_num END AS pin_num,
-    NULLIF(r.pin_name, '')                                AS pin_name,
+    test_num, test_name, units,
+    CASE WHEN pin_num = -1 THEN NULL ELSE pin_num END AS pin_num,
+    NULLIF(pin_name, '')                              AS pin_name,
 
-    -- 母集団
-    r.n, lv.n_lots, r.execs_per_die,
+    -- 母集団と pass/fail
+    n, n_all, fail_n,
+    ROUND(100.0 * fail_n / NULLIF(n_all, 0), 3) AS fail_pct,
 
-    -- 分布
-    ROUND(r.mean, 6)   AS mean,
-    ROUND(r.sigma, 6)  AS sigma,
-    ROUND(r.min_val, 6) AS min_val,
-    ROUND(r.max_val, 6) AS max_val,
-    ROUND(r.skew, 2)   AS skew,
-    ROUND(r.p00135, 6) AS p00135,
-    ROUND(r.p99865, 6) AS p99865,
-    ROUND(lv.sigma_between / NULLIF(lv.sigma_within, 0), 2) AS lot_shift_ratio,
+    -- 分布（良品ダイのみ）
+    ROUND(mean, 6)    AS mean,
+    ROUND(sigma, 6)   AS sigma,
+    ROUND(min_val, 6) AS min_val,
+    ROUND(max_val, 6) AS max_val,
 
-    -- 現行スペックとその出所
-    r.ref_lot_id, r.latest_job_name, r.latest_job_rev,
-    r.cur_lsl, r.cur_usl,
-    (r.lo_limit_min <> r.lo_limit_max
-     OR r.hi_limit_min <> r.hi_limit_max) AS limits_changed,
-    ROUND((r.cur_usl - r.cur_lsl) / (6 * r.sigma), 3) AS cp_current,
-    ROUND(LEAST((r.cur_usl - r.mean) / (3 * r.sigma),
-                (r.mean - r.cur_lsl) / (3 * r.sigma)), 3) AS cpk_current,
+    -- 現行スペックとその出所（テストプログラム照合）
+    ref_lot_id, latest_job_name, latest_job_rev,
+    cur_lsl, cur_usl,
+    (lo_limit_min <> lo_limit_max
+     OR hi_limit_min <> hi_limit_max) AS limits_changed,
+    ROUND((cur_usl - cur_lsl) / (6 * sigma), 3) AS cp_current,
+    ROUND(LEAST((cur_usl - mean) / (3 * sigma),
+                (mean - cur_lsl) / (3 * sigma)), 3) AS cpk_current,
 
     -- 新スペック候補
-    ROUND(r.new_lsl, 6) AS new_lsl,
-    ROUND(r.new_usl, 6) AS new_usl,
-    ROUND((r.new_usl - r.new_lsl) / (6 * r.sigma), 3) AS cp_after,  -- ≒ target
-    ROUND(r.new_lsl - r.cur_lsl, 6) AS lsl_change,
-    ROUND(r.new_usl - r.cur_usl, 6) AS usl_change,
+    ROUND(new_lsl, 6) AS new_lsl,
+    ROUND(new_usl, 6) AS new_usl,
+    ROUND(new_lsl - cur_lsl, 6) AS lsl_change,
+    ROUND(new_usl - cur_usl, 6) AS usl_change,
 
     CASE
-        WHEN r.cur_lsl IS NULL                                  THEN 'NO_BASELINE'
-        WHEN r.new_lsl <  r.cur_lsl AND r.new_usl >  r.cur_usl   THEN 'LOOSEN'
-        WHEN r.new_lsl >  r.cur_lsl AND r.new_usl <  r.cur_usl   THEN 'TIGHTEN'
-        WHEN r.new_lsl =  r.cur_lsl AND r.new_usl =  r.cur_usl   THEN 'NO_CHANGE'
+        WHEN cur_lsl IS NULL                          THEN 'NO_BASELINE'
+        WHEN new_lsl <  cur_lsl AND new_usl >  cur_usl THEN 'LOOSEN'
+        WHEN new_lsl >  cur_lsl AND new_usl <  cur_usl THEN 'TIGHTEN'
+        WHEN new_lsl =  cur_lsl AND new_usl =  cur_usl THEN 'NO_CHANGE'
         ELSE 'MIXED'
     END AS direction,
 
-    -- 影響（締め提案の妥当性判断はここを見る）
-    i.n_outside_new,
-    ROUND(1e6 * i.n_outside_new / NULLIF(r.n, 0), 1) AS out_ppm_new,
-    i.n_outside_cur,
-
-    -- 診断フラグ
     CONCAT_WS(',',
-        CASE WHEN r.n < r.min_n              THEN 'LOW_SAMPLE'        END,
-        CASE WHEN r.cur_lsl IS NULL          THEN 'NOT_IN_LATEST_LOT' END,
-        CASE WHEN r.lo_limit_min <> r.lo_limit_max
-               OR r.hi_limit_min <> r.hi_limit_max
-                                             THEN 'LIMIT_CHANGED'     END,
-        CASE WHEN r.test_name_min <> r.test_name_max
-                                             THEN 'NAME_CHANGED'      END,
-        CASE WHEN r.execs_per_die > 1        THEN 'LOOP_TEST'         END,
-        CASE WHEN ABS(r.skew) > 1            THEN 'SKEWED'            END,
-        CASE WHEN GREATEST(ABS((r.mean - 3 * r.sigma) - r.p00135),
-                           ABS((r.mean + 3 * r.sigma) - r.p99865))
-                  > 0.5 * r.sigma            THEN 'NON_NORMAL'        END,
-        CASE WHEN lv.sigma_between > lv.sigma_within THEN 'LOT_SHIFT' END
+        CASE WHEN n < min_n                  THEN 'LOW_SAMPLE'        END,
+        CASE WHEN cur_lsl IS NULL            THEN 'NOT_IN_LATEST_LOT' END,
+        CASE WHEN lo_limit_min <> lo_limit_max
+               OR hi_limit_min <> hi_limit_max
+                                             THEN 'LIMIT_CHANGED'     END
     ) AS flags
 
-FROM rounded r
-LEFT JOIN impact  i  USING (product, test_category, sub_process, test_num, pin_num)
-LEFT JOIN lot_var lv USING (product, test_category, sub_process, test_num, pin_num)
-ORDER BY cpk_current NULLS LAST, r.test_category, r.sub_process, r.test_num, pin_num;
+FROM rounded
+-- Cpk 不足のみ。全件見るならこの 1 行を削除
+WHERE cpk_current IS NULL OR cpk_current < target_cpk
+ORDER BY cpk_current NULLS LAST, test_num, pin_num;
 ```
 
 **読み方**
 
-- `direction = 'LOOSEN'` かつ `cpk_current` が小さい行 → 緩和候補。`NON_NORMAL` /
-  `SKEWED` が立っていれば `mean ± 3σ` が実測とズレているので、`p00135` /
-  `p99865` / `min_val` / `max_val` を見て個別判断。
-- `direction = 'TIGHTEN'` → 締め候補。**`out_ppm_new` が判断材料**。良品母集団に
-  対する逸脱 ppm なので、これが大きい締めは歩留りを落とします。
-- `LIMIT_CHANGED` → そのテストのリミットは過去に変更されている。`cur_lsl` /
-  `cur_usl` は基準ロット（`ref_lot_id`）のもの。
-- `lot_shift_ratio > 1`（= `LOT_SHIFT`）→ ロット間の平均シフトがロット内ばらつきを
-  上回っており、σ が膨らんで Cpk が実力より低く出ています。
-- `n_outside_cur` は健全性チェック用です。母集団は良品ダイなので通常は 0 になります。
-  0 でない場合は、リミット変更・ガードバンド・別プログラム混在のいずれかを疑います。
+- `cpk_current` が小さい順に並びます。`NULL`（= `NO_BASELINE`）は基準ロットに
+  そのテストが無く、現行スペックと比較できないものです。
+- `direction = 'LOOSEN'` → 緩和候補。`min_val` / `max_val` と `new_lsl` / `new_usl` を
+  見比べて、実測レンジに対して妥当な広げ方かを確認します。
+- `direction = 'TIGHTEN'` → 締め候補。母集団は良品ダイなので、`min_val` / `max_val` が
+  新リミットの内側に収まっているかが歯止めになります。
+- `fail_n` / `fail_pct` は**全ダイ基準**のそのテストの fail 件数です。`n`（良品ダイ数）
+  と `n_all`（全測定数）の差が大きいテストは、他テストでの不良が多いことを意味します。
+- `LIMIT_CHANGED` → そのテストのリミットは過去に変更されています。`cur_lsl` /
+  `cur_usl` は基準ロット（`ref_lot_id`、プログラム版は `latest_job_rev`）のものです。
 
 **既知の限界**
 
 - 全ロットプールの σ なので、厳密には Cpk ではなく **Ppk（overall performance）**
   相当です。ロット間シフトが σ に乗るため、緩和側は広めに、締め側は保守的に出ます。
+- `mean ± 3σ` は正規分布を前提にしています。リーク電流のように対数正規・片側裾を
+  引く分布では新リミット候補が実測とかけ離れるので、`min_val` / `max_val` と必ず
+  突き合わせてください。
 - `lots` は lot_id ごとに 1 ファイルを上書きするため（`storage.py`）、同一ロットを
   複数回 ingest すると **最後に ingest したファイル**の `job_name` / `job_rev` が
   残ります。ingest 順であって時刻順ではないので、ロット内でプログラムが変わった
@@ -1031,34 +978,22 @@ ORDER BY cpk_current NULLS LAST, r.test_category, r.sub_process, r.test_num, pin
 12 分問題と同じパターンです。
 
 ⓪ は `views.py` の `_DEDUP_UNIT` と同じキー・同じ `ORDER BY retest_num DESC` なので、
-**結果は `parts_final` と同一**です（`parts_final` 版と出力 35 列の完全一致を確認済み）。
-`parts_final` 側を直せば全クエリが速くなりますが、`PARTITION BY` を変えると同一ロット・
-同一ダイが複数 `sub_process` にある場合の dedup 挙動、ひいては `wafer_yield_final` の
-母数が変わるため、ここでは 8-2 の内側に閉じた回避策をとっています。
+良品ダイの集合は `parts_final` と同一です。`parts_final` 側を直せば全クエリが速く
+なりますが、`PARTITION BY` を変えると同一ロット・同一ダイが複数 `sub_process` に
+ある場合の dedup 挙動、ひいては `wafer_yield_final` の母数が変わるため、ここでは
+8-2 の内側に閉じた回避策をとっています。
 
-合成データ（2 製品 × 20 ロット、`test_data` 800 万行 / `parts` 50 万行）での実測:
+合成データ（`test_data` 800 万行 / `parts` 50 万行）で測った、重い要素の単価
+（`base` 3.8M 行に対する追加時間）:
 
-| | 実行時間（中央値） |
-|---|---|
-| ⓪ 導入前 | 1.96 s |
-| ⓪ + 下記の見直し後 | 1.66 s |
-
-`parts` の読み込みファイル数は 48/48 → 20/48 に減りますが、**壁時計への効きは
-ストアの構成比で決まります**。この合成データは `parts` が `test_data` の 1/16 しか
-ないため 1 割程度ですが、製品数・過去ロット数が多いほど効きます。
-
-同じ実測で判明した他のコスト要因（`base` 3.8M 行に対する追加時間）:
-
-- `COUNT(DISTINCT ...)` × 3 → **+0.44 s**。行ごとにハッシュ集合を作るため、単体では
-  最大の追加コストだった。リミット／テスト名の変更検知は `MIN`/`MAX` の不一致で
-  等価に判定できるので置換済み。`n_lots` も ⑤ `lot_var` の `COUNT(*)` で代替
-- ⑧ `impact` の `base` 2 周目 → **+0.48 s**（ほぼ倍増）。新リミットは集約結果に
-  依存するため 1 パスにはできない。製品全体が重い場合は `base` に
-  `AND td.test_category = 'CP'` を足して工程ごとに流してください
-- `QUANTILE_CONT` → +0.24 s。ただし `memory_limit` を 100 MB に絞っても劣化せず、
-  分位点を 3 つに増やしても時間が変わらなかった（内部バッファを共有するため）。
-  `APPROX_QUANTILE` への置換はしていません
-- ③ `current_spec` は `base` の再走査をやめ、基準ロットのパーティションだけを読む
+| 要素 | 追加時間 | 本クエリでの扱い |
+|---|---|---|
+| 良品ダイ join | +0.24 s | **採用**（母集団の定義そのもの） |
+| 分位点 / skewness | +0.34 s | 不採用 |
+| `COUNT(DISTINCT ...)` × 3 | +0.44 s | 不採用（`MIN`/`MAX` で等価判定） |
+| パーティション列を集約キーに含める | +0.27 s | 不採用（工程を指定して回避） |
+| 逸脱 ppm の再走査 | +0.09 s | 不採用 |
+| ロット間 σ | +0.02 s | 不採用 |
 
 ---
 
