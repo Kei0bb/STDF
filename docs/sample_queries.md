@@ -678,15 +678,15 @@ ORDER BY cpk;
 
 | | 8-1 | 8-2 |
 |---|---|---|
-| 母集団 | 1 ロット・全ダイ | 全ロット・**良品ダイのみ**（`parts_final.passed`）|
+| 母集団 | 1 ロット・全ダイ | 全ロット・**良品ダイのみ**（`parts.passed`）|
 | 現行スペック | 行が持つリミットで `GROUP BY` | **基準ロット**（工程ごとに `start_time` 最大）のリミット |
 | 出力 | Cp / Cpk | 新リミット候補 + 逸脱 ppm + 診断フラグ |
 
 **このクエリが答える 2 つの問い**
 
 - *「そのスペックは最新か」* — リミットは STDF の PTR/MPR にロット（＝ファイル）
-  ごとに記録されています。基準ロットのリミットを「現行」とし、全ロットで何種類の
-  リミットが使われていたかを `n_distinct_limits` / `LIMIT_CHANGED` で示します。
+  ごとに記録されています。基準ロットのリミットを「現行」とし、全ロットを通して
+  リミットが変わっているかを `limits_changed` / `LIMIT_CHANGED` で示します。
 - *「どのテストプログラムか」* — `lots.job_name` / `job_rev` を join し、基準ロット
   の版を `latest_job_name` / `latest_job_rev` に出します。
 
@@ -695,20 +695,22 @@ ORDER BY cpk;
 ```mermaid
 flowchart TD
     TD["test_data_final<br/>retest_flag = 0<br/>（最新 run のみ）"]
-    PF["parts_final<br/>passed = TRUE<br/>（良品ダイのみ）"]
+    PA["parts<br/>（生テーブル）"]
     LO["lots<br/>job_name / job_rev / start_time"]
 
+    PA --> GD["⓪ good_die<br/>product で絞ってから<br/>parts_final と同じ dedup<br/>passed = TRUE のみ残す"]
+
     TD -->|"_DEDUP_UNIT で join<br/>CP: wafer_id + x/y<br/>FT: part_txt"| BASE
-    PF --> BASE
+    GD --> BASE
 
     BASE["① base（母集団）<br/>product 指定・全ロット<br/>rec_type = PTR / MPR<br/>lo_limit &lt; hi_limit<br/>units = V / A 系<br/>result が有限"]
 
     LO --> LL["② latest_lot<br/>工程ごとに start_time 最大の 1 本<br/>= 基準ロット"]
     LL --> CS["③ current_spec<br/>基準ロットが持つ lo/hi_limit<br/>= 現行スペック"]
-    BASE --> CS
+    TD -->|"基準ロットの<br/>パーティションのみ読む"| CS
 
     BASE --> ST["④ stats<br/>キー: test_category, sub_process,<br/>test_num, pin_num<br/>n / mean / σ / skew / 分位点"]
-    BASE --> LV["⑤ lot_var<br/>σ_between / σ_within"]
+    BASE --> LV["⑤ lot_var<br/>n_lots<br/>σ_between / σ_within"]
 
     ST --> CAND["⑥ 新スペック候補<br/>mean ± 3 × target_cpk × σ"]
     CAND --> RND["⑦ 有効数字 3 桁・常に緩い側へ丸め"]
@@ -746,7 +748,23 @@ WITH params AS (
            CAST(NULL AS VARCHAR)  AS exclude_lot_pattern
 ),
 
--- ① 母集団: 最新 run（test_data_final）× 良品ダイ（parts_final.passed）
+-- ⓪ 良品ダイ: parts_final と同一セマンティクスの dedup を product 指定の内側で行う
+--    （parts_final をそのまま join すると全製品を読む。理由は後述「性能上の注意」）
+good_die AS (
+    SELECT lot_id, wafer_id, x_coord, y_coord, part_txt
+    FROM (
+        SELECT p.lot_id, p.wafer_id, p.x_coord, p.y_coord, p.part_txt, p.passed,
+               ROW_NUMBER() OVER (
+                   PARTITION BY p.lot_id, p.wafer_id, p.x_coord, p.y_coord,
+                       CASE WHEN p.x_coord = -32768 AND p.y_coord = -32768
+                            THEN p.part_txt ELSE '' END
+                   ORDER BY p.retest_num DESC) AS rn
+        FROM parts p CROSS JOIN params pa
+        WHERE p.product = pa.product
+    ) WHERE rn = 1 AND passed
+),
+
+-- ① 母集団: 最新 run（test_data_final）× 良品ダイ（⓪ good_die）
 --    join キーは views.py の _DEDUP_UNIT と同一（CP=ウェーハ+座標 / FT=part_txt）
 --    pin_num は PTR で NULL のため -1 に畳む（NULL は join で一致しないため）
 base AS (
@@ -757,7 +775,7 @@ base AS (
         COALESCE(td.pin_name, '') AS pin_name,
         td.lo_limit, td.hi_limit, td.result, td.exec_seq
     FROM test_data_final td
-    JOIN parts_final p
+    JOIN good_die p
       ON  p.lot_id   = td.lot_id
       AND p.wafer_id = td.wafer_id
       AND p.x_coord  = td.x_coord
@@ -768,7 +786,6 @@ base AS (
                 THEN p.part_txt  ELSE '' END)
     CROSS JOIN params pa
     WHERE td.product = pa.product
-      AND p.passed
       AND td.rec_type IN ('PTR', 'MPR')
       AND (pa.exclude_lot_pattern IS NULL
            OR td.lot_id NOT LIKE pa.exclude_lot_pattern)
@@ -787,7 +804,9 @@ latest_lot AS (
     FROM (
         SELECT l.*, ROW_NUMBER() OVER (
                    PARTITION BY l.product, l.test_category, l.sub_process
-                   ORDER BY l.start_time DESC) AS rn
+                   -- lot_id はタイブレーク。start_time が同値のロットがあると
+                   -- 基準ロットが実行ごとに変わり、現行スペックが揺れるため
+                   ORDER BY l.start_time DESC, l.lot_id DESC) AS rn
         FROM lots l CROSS JOIN params pa
         WHERE l.product = pa.product
           AND (pa.exclude_lot_pattern IS NULL
@@ -796,12 +815,24 @@ latest_lot AS (
 ),
 
 -- ③ 現行スペック = 基準ロットが持っていたリミット
+--    base ではなく test_data_final から直接引く。リミットはダイに依存しないので
+--    良品フィルタが不要で、lot_id はパーティション列なので基準ロットの
+--    ファイルだけを読めば済む（base の再走査を 1 回減らせる）
 current_spec AS (
-    SELECT b.product, b.test_category, b.sub_process, b.test_num, b.pin_num,
-           ANY_VALUE(b.lo_limit) AS cur_lsl,
-           ANY_VALUE(b.hi_limit) AS cur_usl
-    FROM base b
-    JOIN latest_lot ll USING (product, test_category, sub_process, lot_id)
+    SELECT td.product, td.test_category, td.sub_process, td.test_num,
+           COALESCE(td.pin_num, -1) AS pin_num,
+           ANY_VALUE(td.lo_limit) AS cur_lsl,
+           ANY_VALUE(td.hi_limit) AS cur_usl
+    FROM test_data_final td
+    JOIN latest_lot ll
+      ON  ll.product       = td.product
+      AND ll.test_category = td.test_category
+      AND ll.sub_process   = td.sub_process
+      AND ll.lot_id        = td.lot_id
+    WHERE td.rec_type IN ('PTR', 'MPR')
+      AND td.lo_limit IS NOT NULL AND isfinite(td.lo_limit)
+      AND td.hi_limit IS NOT NULL AND isfinite(td.hi_limit)
+      AND td.lo_limit < td.hi_limit
     GROUP BY ALL
 ),
 
@@ -810,13 +841,18 @@ stats AS (
     SELECT
         product, test_category, sub_process, test_num, pin_num,
         ANY_VALUE(test_name)        AS test_name,
-        COUNT(DISTINCT test_name)   AS n_test_names,
         ANY_VALUE(units)            AS units,
         ANY_VALUE(pin_name)         AS pin_name,
         COUNT(*)                    AS n,
-        COUNT(DISTINCT lot_id)      AS n_lots,
-        COUNT(DISTINCT CAST(lo_limit AS VARCHAR) || '|'
-                    || CAST(hi_limit AS VARCHAR)) AS n_distinct_limits,
+        -- n_lots は ⑤ lot_var 側で COUNT(*) として無料で得られるのでここでは取らない
+        -- 変更検知は MIN/MAX の不一致で判定する。COUNT(DISTINCT ...) は行ごとに
+        -- ハッシュ集合を作るため、この規模では実測で最大のコスト要因だった
+        MIN(test_name)              AS test_name_min,
+        MAX(test_name)              AS test_name_max,
+        MIN(lo_limit)               AS lo_limit_min,
+        MAX(lo_limit)               AS lo_limit_max,
+        MIN(hi_limit)               AS hi_limit_min,
+        MAX(hi_limit)               AS hi_limit_max,
         MAX(exec_seq) + 1           AS execs_per_die,   -- >1 ならループ計測
         AVG(result)                 AS mean,
         STDDEV_SAMP(result)         AS sigma,
@@ -824,24 +860,24 @@ stats AS (
         MAX(result)                 AS max_val,
         SKEWNESS(result)            AS skew,
         QUANTILE_CONT(result, 0.00135) AS p00135,       -- 実測 -3σ 相当
-        MEDIAN(result)                 AS p50,
         QUANTILE_CONT(result, 0.99865) AS p99865        -- 実測 +3σ 相当
     FROM base
     GROUP BY ALL
     HAVING COUNT(*) > 1
 ),
 
--- ⑤ ロット間 σ とロット内 σ（全ロットプールの σ 膨張が見える）
+-- ⑤ ロット間 σ とロット内 σ（全ロットプールの σ 膨張が見える）＋ n_lots
+--    σ は 2 点以上あるロットだけで計算するが、n_lots は全ロットを数える
 lot_var AS (
     SELECT product, test_category, sub_process, test_num, pin_num,
-           STDDEV_SAMP(lot_mean) AS sigma_between,
-           SQRT(AVG(lot_var))    AS sigma_within
+           COUNT(*)                                        AS n_lots,
+           STDDEV_SAMP(lot_mean) FILTER (WHERE cnt > 1)    AS sigma_between,
+           SQRT(AVG(lot_var)     FILTER (WHERE cnt > 1))   AS sigma_within
     FROM (
         SELECT product, test_category, sub_process, test_num, pin_num, lot_id,
-               AVG(result) AS lot_mean, VAR_SAMP(result) AS lot_var
+               COUNT(*) AS cnt, AVG(result) AS lot_mean, VAR_SAMP(result) AS lot_var
         FROM base
         GROUP BY ALL
-        HAVING COUNT(*) > 1
     )
     GROUP BY ALL
 ),
@@ -896,7 +932,7 @@ SELECT
     NULLIF(r.pin_name, '')                                AS pin_name,
 
     -- 母集団
-    r.n, r.n_lots, r.execs_per_die,
+    r.n, lv.n_lots, r.execs_per_die,
 
     -- 分布
     ROUND(r.mean, 6)   AS mean,
@@ -911,7 +947,8 @@ SELECT
     -- 現行スペックとその出所
     r.ref_lot_id, r.latest_job_name, r.latest_job_rev,
     r.cur_lsl, r.cur_usl,
-    r.n_distinct_limits,
+    (r.lo_limit_min <> r.lo_limit_max
+     OR r.hi_limit_min <> r.hi_limit_max) AS limits_changed,
     ROUND((r.cur_usl - r.cur_lsl) / (6 * r.sigma), 3) AS cp_current,
     ROUND(LEAST((r.cur_usl - r.mean) / (3 * r.sigma),
                 (r.mean - r.cur_lsl) / (3 * r.sigma)), 3) AS cpk_current,
@@ -940,8 +977,11 @@ SELECT
     CONCAT_WS(',',
         CASE WHEN r.n < r.min_n              THEN 'LOW_SAMPLE'        END,
         CASE WHEN r.cur_lsl IS NULL          THEN 'NOT_IN_LATEST_LOT' END,
-        CASE WHEN r.n_distinct_limits > 1    THEN 'LIMIT_CHANGED'     END,
-        CASE WHEN r.n_test_names > 1         THEN 'NAME_CHANGED'      END,
+        CASE WHEN r.lo_limit_min <> r.lo_limit_max
+               OR r.hi_limit_min <> r.hi_limit_max
+                                             THEN 'LIMIT_CHANGED'     END,
+        CASE WHEN r.test_name_min <> r.test_name_max
+                                             THEN 'NAME_CHANGED'      END,
         CASE WHEN r.execs_per_die > 1        THEN 'LOOP_TEST'         END,
         CASE WHEN ABS(r.skew) > 1            THEN 'SKEWED'            END,
         CASE WHEN GREATEST(ABS((r.mean - 3 * r.sigma) - r.p00135),
@@ -981,9 +1021,44 @@ ORDER BY cpk_current NULLS LAST, r.test_category, r.sub_process, r.test_num, pin
 - パーサは PTR の `OPT_FLAG` を解釈せずリミット領域を読むため（`parser.py`）、
   リミット未定義のテストに 0 等が入り得ます。`lo_limit < hi_limit` で大半は
   落ちますが、`min_val` / `max_val` と突き合わせて確認してください。
-- ⑧ の逸脱集計で `base` を 2 回走査します。製品全体が重い場合は `params` の
-  `product` に加えて `base` に `AND td.test_category = 'CP'` を足して工程ごとに
-  流してください。
+
+**性能上の注意 — なぜ `parts_final` を使わず ⓪ `good_die` を書いているか**
+
+`parts_final` は `ROW_NUMBER() OVER (PARTITION BY lot_id, ...)` のウィンドウで、
+**`product` が PARTITION BY に入っていません**。そのため `WHERE product = ...` を
+ウィンドウより下へ押し込めず、DuckDB は**全製品・全ロットの `parts` を読んで
+ウィンドウを回してから**絞ります。CLAUDE.md に記録されている `test_data_final` の
+12 分問題と同じパターンです。
+
+⓪ は `views.py` の `_DEDUP_UNIT` と同じキー・同じ `ORDER BY retest_num DESC` なので、
+**結果は `parts_final` と同一**です（`parts_final` 版と出力 35 列の完全一致を確認済み）。
+`parts_final` 側を直せば全クエリが速くなりますが、`PARTITION BY` を変えると同一ロット・
+同一ダイが複数 `sub_process` にある場合の dedup 挙動、ひいては `wafer_yield_final` の
+母数が変わるため、ここでは 8-2 の内側に閉じた回避策をとっています。
+
+合成データ（2 製品 × 20 ロット、`test_data` 800 万行 / `parts` 50 万行）での実測:
+
+| | 実行時間（中央値） |
+|---|---|
+| ⓪ 導入前 | 1.96 s |
+| ⓪ + 下記の見直し後 | 1.66 s |
+
+`parts` の読み込みファイル数は 48/48 → 20/48 に減りますが、**壁時計への効きは
+ストアの構成比で決まります**。この合成データは `parts` が `test_data` の 1/16 しか
+ないため 1 割程度ですが、製品数・過去ロット数が多いほど効きます。
+
+同じ実測で判明した他のコスト要因（`base` 3.8M 行に対する追加時間）:
+
+- `COUNT(DISTINCT ...)` × 3 → **+0.44 s**。行ごとにハッシュ集合を作るため、単体では
+  最大の追加コストだった。リミット／テスト名の変更検知は `MIN`/`MAX` の不一致で
+  等価に判定できるので置換済み。`n_lots` も ⑤ `lot_var` の `COUNT(*)` で代替
+- ⑧ `impact` の `base` 2 周目 → **+0.48 s**（ほぼ倍増）。新リミットは集約結果に
+  依存するため 1 パスにはできない。製品全体が重い場合は `base` に
+  `AND td.test_category = 'CP'` を足して工程ごとに流してください
+- `QUANTILE_CONT` → +0.24 s。ただし `memory_limit` を 100 MB に絞っても劣化せず、
+  分位点を 3 つに増やしても時間が変わらなかった（内部バッファを共有するため）。
+  `APPROX_QUANTILE` への置換はしていません
+- ③ `current_spec` は `base` の再走査をやめ、基準ロットのパーティションだけを読む
 
 ---
 
