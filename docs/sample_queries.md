@@ -1015,6 +1015,129 @@ ORDER BY cpk_current NULLS LAST, test_num;
 | 逸脱 ppm の再走査 | +0.09 s | 不採用 |
 | ロット間 σ | +0.02 s | 不採用 |
 
+### 8-3. 確認用 — 8-2 と同じ母集団の生データ取得
+
+8-2 の集計値（`n` / `mean` / `sigma` / `fail_n`）を手元で検算するための、**行レベルの
+ダンプ**です。`params` / `target_lots` / `good_die` / `base` は 8-2 と**一字一句同じ**なので、
+同じパラメータを入れれば必ず同じ母集団になります。
+
+> [!WARNING]
+> 母集団は測定 1 行 = 1 レコードです。工程まるごとだと数千万行になり得るので、
+> **`test_nums` に確認したいテストだけを入れてください**（`NULL` にすると全テストが
+> 出ます）。件数が多いときは `COPY (...) TO 'check.csv' (HEADER)` で CSV に落とします。
+
+```sql
+WITH params AS (
+    SELECT 'YOUR_PRODUCT'         AS product,
+           'CP'                   AS test_category,
+           'CP1'                  AS sub_process,
+           -- 確認したいテスト。8-2 の test_num 列から拾う。NULL で全テスト（重い）
+           CAST([1001, 1002] AS BIGINT[]) AS test_nums,
+           CAST(NULL AS VARCHAR)  AS job_name,
+           CAST(NULL AS VARCHAR)  AS job_rev,
+           CAST(NULL AS VARCHAR)  AS exclude_lot_pattern
+),
+
+-- ⓪a 対象ロット（8-2 と同じ）
+target_lots AS (
+    SELECT l.lot_id, l.job_name, l.job_rev, l.start_time
+    FROM lots l CROSS JOIN params pa
+    WHERE l.product       = pa.product
+      AND l.test_category = pa.test_category
+      AND l.sub_process   = pa.sub_process
+      AND (pa.job_name IS NULL OR l.job_name = pa.job_name)
+      AND (pa.job_rev  IS NULL OR l.job_rev  = pa.job_rev)
+      AND (pa.exclude_lot_pattern IS NULL
+           OR l.lot_id NOT LIKE pa.exclude_lot_pattern)
+),
+
+-- ⓪b 良品ダイ（8-2 と同じ）
+good_die AS (
+    SELECT lot_id, wafer_id, x_coord, y_coord, part_txt
+    FROM (
+        SELECT p.lot_id, p.wafer_id, p.x_coord, p.y_coord, p.part_txt, p.passed,
+               ROW_NUMBER() OVER (
+                   PARTITION BY p.lot_id, p.wafer_id, p.x_coord, p.y_coord,
+                       CASE WHEN p.x_coord = -32768 AND p.y_coord = -32768
+                            THEN p.part_txt ELSE '' END
+                   ORDER BY p.retest_num DESC) AS rn
+        FROM parts p CROSS JOIN params pa
+        WHERE p.product       = pa.product
+          AND p.test_category = pa.test_category
+          AND p.sub_process   = pa.sub_process
+          AND p.lot_id IN (SELECT lot_id FROM target_lots)
+    ) WHERE rn = 1 AND passed
+)
+
+-- ① 母集団（8-2 の base と同じ条件 + test_nums 絞り込み）
+SELECT
+    td.lot_id,
+    td.wafer_id,
+    td.x_coord,
+    td.y_coord,
+    td.part_txt,
+    tl.job_name,
+    tl.job_rev,
+    td.test_num,
+    td.test_name,
+    td.units,
+    td.rec_type,
+    td.exec_seq,                        -- ループ計測の識別（同一ダイ・同一 test_num で複数行）
+    td.result,
+    td.lo_limit,
+    td.hi_limit,
+    td.passed              AS test_passed,   -- そのテスト単体の合否（fail_n の元）
+    (p.lot_id IS NOT NULL) AS is_good        -- ダイの最終合否（n / mean / sigma の母集団）
+FROM test_data_final td
+LEFT JOIN good_die p
+  ON  p.lot_id   = td.lot_id
+  AND p.wafer_id = td.wafer_id
+  AND p.x_coord  = td.x_coord
+  AND p.y_coord  = td.y_coord
+  AND (CASE WHEN td.x_coord = -32768 AND td.y_coord = -32768
+            THEN td.part_txt ELSE '' END)
+    = (CASE WHEN p.x_coord  = -32768 AND p.y_coord  = -32768
+            THEN p.part_txt  ELSE '' END)
+JOIN target_lots tl ON tl.lot_id = td.lot_id
+CROSS JOIN params pa
+WHERE td.product       = pa.product
+  AND td.test_category = pa.test_category
+  AND td.sub_process   = pa.sub_process
+  AND td.rec_type IN ('PTR', 'MPR')
+  AND (pa.test_nums IS NULL OR list_contains(pa.test_nums, td.test_num))
+  AND td.result IS NOT NULL   AND isfinite(td.result)
+  AND td.lo_limit IS NOT NULL AND isfinite(td.lo_limit)
+  AND td.hi_limit IS NOT NULL AND isfinite(td.hi_limit)
+  AND td.lo_limit < td.hi_limit
+  AND regexp_matches(UPPER(TRIM(td.units)), '^.?[VA]$')
+ORDER BY td.test_num, td.lot_id, td.wafer_id, td.x_coord, td.y_coord, td.exec_seq;
+```
+
+**8-2 の集計値との突合**
+
+上のクエリを `dump` として、次を回すと 8-2 の `n` / `mean` / `sigma` / `n_all` /
+`fail_n` が再現します。値が合わなければ、どちらかのパラメータがずれています。
+**貼り付けるときは末尾の `;` を外してください**（サブクエリ内では構文エラーになります）。
+
+```sql
+SELECT
+    test_num,
+    COUNT(*) FILTER (WHERE is_good)                  AS n,
+    COUNT(*)                                         AS n_all,
+    COUNT(*) FILTER (WHERE test_passed = 'F')        AS fail_n,
+    ROUND(AVG(result)         FILTER (WHERE is_good), 6) AS mean,
+    ROUND(STDDEV_SAMP(result) FILTER (WHERE is_good), 6) AS sigma
+FROM (/* ↑ 8-3 のクエリをそのまま貼る */) dump
+GROUP BY test_num
+ORDER BY test_num;
+```
+
+**CSV に落とす**
+
+```sql
+COPY (/* ↑ 8-3 のクエリをそのまま貼る */) TO 'check.csv' (HEADER, DELIMITER ',');
+```
+
 ---
 
 ## 9. ChipID トレーサビリティ（EN-S0-CHIPID_R / TSMC）
