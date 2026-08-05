@@ -624,7 +624,7 @@ ORDER BY yield_pct;
 
 ```sql
 WITH fail AS (
-    SELECT p.hard_bin, p.soft_bin, td.test_num, td.test_name,
+    SELECT p.wafer_id, p.hard_bin, p.soft_bin, td.test_num, td.test_name,
            -- ダイ識別は views.py の _DEDUP_UNIT と同じ（CP=ウェーハ+座標 / FT=part_txt）。
            -- part_id はリテストファイルで振り直される可能性があるため使わない
            CONCAT_WS('|', p.wafer_id, p.x_coord, p.y_coord,
@@ -648,22 +648,27 @@ die AS (   -- ダイごとの fail テスト数
     SELECT die_key, COUNT(DISTINCT test_num) AS n_fail_tests
     FROM fail GROUP BY die_key
 ),
-bin_total AS (   -- bin ごとの不良ダイ数（シェアの分母）
-    SELECT soft_bin, COUNT(DISTINCT die_key) AS bin_fail_dies
-    FROM fail GROUP BY soft_bin
+bin_total AS (   -- ウェーハ × bin ごとの不良ダイ数（シェアの分母）
+    SELECT wafer_id, soft_bin, COUNT(DISTINCT die_key) AS bin_fail_dies
+    FROM fail GROUP BY wafer_id, soft_bin
 )
 SELECT
-    f.hard_bin, f.soft_bin, f.test_num, f.test_name,
+    f.wafer_id, f.hard_bin, f.soft_bin, f.test_num, f.test_name,
     COUNT(DISTINCT f.die_key)                                   AS fail_dies,
     COUNT(DISTINCT f.die_key) FILTER (WHERE d.n_fail_tests = 1) AS sole_fail_dies,
     ROUND(100.0 * COUNT(DISTINCT f.die_key)
           / ANY_VALUE(b.bin_fail_dies), 1)                      AS pct_of_bin
 FROM fail f
 JOIN die d USING (die_key)
-JOIN bin_total b ON b.soft_bin = f.soft_bin
-GROUP BY f.hard_bin, f.soft_bin, f.test_num, f.test_name
-ORDER BY f.soft_bin, fail_dies DESC;
+JOIN bin_total b ON b.wafer_id = f.wafer_id AND b.soft_bin = f.soft_bin
+GROUP BY f.wafer_id, f.hard_bin, f.soft_bin, f.test_num, f.test_name
+ORDER BY f.wafer_id, f.soft_bin, fail_dies DESC;
 ```
+
+> **ロット全体でまとめて見たいとき**は `wafer_id` を 3 箇所（`SELECT` の並び / `bin_total`
+> の `GROUP BY` と join 条件 / 最終の `GROUP BY`）から外してください。`pct_of_bin` の
+> 分母がロット単位の不良ダイ数になります。FT データ（`wafer_id = ''`）はもともと
+> 1 グループにまとまるので、外しても結果は変わりません。
 
 > **原理的な限界**: fail-nonstop で bin を決めるのは通常「**最初に**落ちたテスト」ですが、
 > これは現在のスキーマでは復元できません。`test_data` に実行順の列がないためです
