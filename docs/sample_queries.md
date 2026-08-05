@@ -679,7 +679,7 @@ ORDER BY cpk;
 
 | | 8-1 | 8-2 |
 |---|---|---|
-| 母集団 | 1 ロット・全ダイ | 工程内の全ロット・**良品ダイのみ**（`parts.passed`）|
+| 母集団 | 1 ロット・全ダイ | 工程 × 試験プログラムで絞ったロット・**良品ダイのみ**（`parts.passed`）|
 | 現行スペック | 行が持つリミットで `GROUP BY` | **基準ロット**（`start_time` 最大）のリミット |
 | 出力 | Cp / Cpk | + 新リミット候補 / fail 件数 / プログラム版 |
 
@@ -696,18 +696,25 @@ ORDER BY cpk;
   記録されています。基準ロットのリミットを「現行」とし、全ロットを通してリミットが
   変わっているかを `limits_changed` / `LIMIT_CHANGED` で示します。
 - *「どのテストプログラムか」* — `lots.job_name` / `job_rev` を join し、基準ロットの版を
-  `ref_lot_id` / `latest_job_name` / `latest_job_rev` に出します。
+  `ref_lot_id` / `latest_job_name` / `latest_job_rev` に出します。逆に**特定の
+  プログラム版だけを対象にしたい場合は `params` の `job_name` / `job_rev` に値を
+  入れます**（`NULL` なら工程内の全版が対象）。指定するとロット集合・基準ロット・
+  良品ダイのすべてがその版に揃うので、プログラム改版をまたいだ母集団の混在を
+  避けられます。使える値は 1-1 / 1-2 のクエリで確認してください。
 
 **データの流れ**（丸数字は SQL 中の CTE コメントに対応）
 
 ```mermaid
 flowchart TD
-    PA["parts"] --> GD["⓪ good_die<br/>工程で絞ってから<br/>parts_final と同じ dedup<br/>passed = TRUE のみ"]
+    PA["parts"] --> GD["⓪b good_die<br/>対象ロットで絞ってから<br/>parts_final と同じ dedup<br/>passed = TRUE のみ"]
     TD["test_data_final<br/>retest_flag = 0"] --> BASE
     GD -->|"LEFT JOIN<br/>CP: wafer_id + x/y<br/>FT: part_txt"| BASE
-    BASE["① base<br/>工程内・全ロット<br/>rec_type = PTR / MPR<br/>lo_limit &lt; hi_limit<br/>units = V / A 系<br/>is_good = 良品ダイか"]
+    BASE["① base<br/>対象ロットの全測定<br/>rec_type = PTR / MPR<br/>lo_limit &lt; hi_limit<br/>units = V / A 系<br/>is_good = 良品ダイか"]
 
-    LO["lots"] --> LL["② latest_lot<br/>start_time 最大の 1 本<br/>= 基準ロット"]
+    LO["lots"] --> TL["⓪a target_lots<br/>工程 + 試験プログラム<br/>job_name / job_rev で絞る"]
+    TL --> GD
+    TL --> BASE
+    TL --> LL["② latest_lot<br/>対象ロット内で<br/>start_time 最大の 1 本<br/>= 基準ロット"]
     LL --> CS["③ current_spec<br/>基準ロットのリミット<br/>= 現行スペック"]
     TD -->|"基準ロットのぶんだけ"| CS
 
@@ -739,11 +746,29 @@ WITH params AS (
            'CP1'                  AS sub_process,     -- 必ず指定
            CAST(1.33 AS DOUBLE)   AS target_cpk,
            30                     AS min_n,             -- これ未満は LOW_SAMPLE
+           -- 試験プログラムで絞る。NULL なら工程内の全プログラム版が対象。
+           -- 使える値は 1-1 / 1-2 のクエリで確認できる
+           CAST(NULL AS VARCHAR)  AS job_name,          -- 例 'PROG_A'
+           CAST(NULL AS VARCHAR)  AS job_rev,           -- 例 'Rev04'
            -- 除外ロット。例 CAST('2620%' AS VARCHAR) / 不要なら NULL のまま
            CAST(NULL AS VARCHAR)  AS exclude_lot_pattern
 ),
 
--- ⓪ 良品ダイ: parts_final と同一セマンティクスの dedup を工程指定の内側で行う
+-- ⓪a 対象ロット: 工程 + 試験プログラム + 除外パターンで確定させる。
+--     以降の good_die / base / latest_lot は必ずこの集合に揃える
+target_lots AS (
+    SELECT l.lot_id, l.job_name, l.job_rev, l.start_time
+    FROM lots l CROSS JOIN params pa
+    WHERE l.product       = pa.product
+      AND l.test_category = pa.test_category
+      AND l.sub_process   = pa.sub_process
+      AND (pa.job_name IS NULL OR l.job_name = pa.job_name)
+      AND (pa.job_rev  IS NULL OR l.job_rev  = pa.job_rev)
+      AND (pa.exclude_lot_pattern IS NULL
+           OR l.lot_id NOT LIKE pa.exclude_lot_pattern)
+),
+
+-- ⓪b 良品ダイ: parts_final と同一セマンティクスの dedup を対象ロットの内側で行う
 --    （parts_final をそのまま join すると全製品を読む。理由は後述「性能上の注意」）
 good_die AS (
     SELECT lot_id, wafer_id, x_coord, y_coord, part_txt
@@ -758,6 +783,7 @@ good_die AS (
         WHERE p.product       = pa.product
           AND p.test_category = pa.test_category
           AND p.sub_process   = pa.sub_process
+          AND p.lot_id IN (SELECT lot_id FROM target_lots)
     ) WHERE rn = 1 AND passed
 ),
 
@@ -784,8 +810,7 @@ base AS (
       AND td.test_category = pa.test_category
       AND td.sub_process   = pa.sub_process
       AND td.rec_type IN ('PTR', 'MPR')
-      AND (pa.exclude_lot_pattern IS NULL
-           OR td.lot_id NOT LIKE pa.exclude_lot_pattern)
+      AND td.lot_id IN (SELECT lot_id FROM target_lots)
       AND td.result IS NOT NULL   AND isfinite(td.result)
       AND td.lo_limit IS NOT NULL AND isfinite(td.lo_limit)
       AND td.hi_limit IS NOT NULL AND isfinite(td.hi_limit)
@@ -803,12 +828,7 @@ latest_lot AS (
     FROM (
         SELECT l.*, ROW_NUMBER() OVER (
                    ORDER BY l.start_time DESC, l.lot_id DESC) AS rn
-        FROM lots l CROSS JOIN params pa
-        WHERE l.product       = pa.product
-          AND l.test_category = pa.test_category
-          AND l.sub_process   = pa.sub_process
-          AND (pa.exclude_lot_pattern IS NULL
-               OR l.lot_id NOT LIKE pa.exclude_lot_pattern)
+        FROM target_lots l
     ) WHERE rn = 1
 ),
 
