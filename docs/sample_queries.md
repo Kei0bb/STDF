@@ -679,7 +679,7 @@ ORDER BY cpk;
 
 | | 8-1 | 8-2 |
 |---|---|---|
-| 母集団 | 1 ロット・全ダイ | 工程 × 試験プログラムで絞ったロット・**良品ダイのみ**（`parts.passed`）|
+| 母集団 | 1 ロット | 工程 × 試験プログラムで絞ったロット全部 |
 | 現行スペック | 行が持つリミットで `GROUP BY` | **基準ロット**（`start_time` 最大）のリミット |
 | 出力 | Cp / Cpk | + 新リミット候補 / fail 件数 / プログラム版 |
 
@@ -698,27 +698,24 @@ ORDER BY cpk;
 - *「どのテストプログラムか」* — `lots.job_name` / `job_rev` を join し、基準ロットの版を
   `ref_lot_id` / `latest_job_name` / `latest_job_rev` に出します。逆に**特定の
   プログラム版だけを対象にしたい場合は `params` の `job_name` / `job_rev` に値を
-  入れます**（`NULL` なら工程内の全版が対象）。指定するとロット集合・基準ロット・
-  良品ダイのすべてがその版に揃うので、プログラム改版をまたいだ母集団の混在を
-  避けられます。使える値は 1-1 / 1-2 のクエリで確認してください。
+  入れます**（`NULL` なら工程内の全版が対象）。指定するとロット集合・基準ロットの
+  両方がその版に揃うので、プログラム改版をまたいだ母集団の混在を避けられます。
+  使える値は 1-1 / 1-2 のクエリで確認してください。
 
 **データの流れ**（丸数字は SQL 中の CTE コメントに対応）
 
 ```mermaid
 flowchart TD
-    PA["parts"] --> GD["⓪b good_die<br/>対象ロットで絞ってから<br/>parts_final と同じ dedup<br/>passed = TRUE のみ"]
+    LO["lots"] --> TL["⓪ target_lots<br/>工程 + 試験プログラム<br/>job_name / job_rev で絞る"]
     TD["test_data_final<br/>retest_flag = 0"] --> BASE
-    GD -->|"LEFT JOIN<br/>CP: wafer_id + x/y<br/>FT: part_txt"| BASE
-    BASE["① base<br/>対象ロットの全測定<br/>rec_type = PTR / MPR<br/>test_name ILIKE（任意）<br/>lo_limit &lt; hi_limit<br/>units = V / A 系<br/>is_good = 良品ダイか"]
-
-    LO["lots"] --> TL["⓪a target_lots<br/>工程 + 試験プログラム<br/>job_name / job_rev で絞る"]
-    TL --> GD
     TL --> BASE
+    BASE["① base<br/>対象ロットの全測定<br/>rec_type = PTR / MPR<br/>test_name ILIKE（任意）<br/>lo_limit &lt; hi_limit<br/>units = V / A 系"]
+
     TL --> LL["② latest_lot<br/>対象ロット内で<br/>start_time 最大の 1 本<br/>= 基準ロット"]
     LL --> CS["③ current_spec<br/>基準ロットのリミット<br/>= 現行スペック"]
     TD -->|"基準ロットのぶんだけ"| CS
 
-    BASE --> ST["④ stats<br/>キー: test_num<br/>統計は is_good のみ<br/>fail 件数は全ダイ"]
+    BASE --> ST["④ stats<br/>キー: test_num<br/>n / mean / σ / fail 件数"]
     ST --> CAND["⑤ 新リミット候補<br/>mean ± 3 × target_cpk × σ<br/>有効数字 3 桁・緩い側へ丸め"]
     CS --> JUDGE["⑥ Cpk 判定・direction・フラグ"]
     CAND --> JUDGE
@@ -757,8 +754,8 @@ WITH params AS (
            CAST(NULL AS VARCHAR)  AS exclude_lot_pattern
 ),
 
--- ⓪a 対象ロット: 工程 + 試験プログラム + 除外パターンで確定させる。
---     以降の good_die / base / latest_lot は必ずこの集合に揃える
+-- ⓪ 対象ロット: 工程 + 試験プログラム + 除外パターンで確定させる。
+--    以降の base / latest_lot は必ずこの集合に揃える
 target_lots AS (
     SELECT l.lot_id, l.job_name, l.job_rev, l.start_time
     FROM lots l CROSS JOIN params pa
@@ -771,44 +768,11 @@ target_lots AS (
            OR l.lot_id NOT LIKE pa.exclude_lot_pattern)
 ),
 
--- ⓪b 良品ダイ: parts_final と同一セマンティクスの dedup を対象ロットの内側で行う
---    （parts_final をそのまま join すると全製品を読む。理由は後述「性能上の注意」）
-good_die AS (
-    SELECT lot_id, wafer_id, x_coord, y_coord, part_txt
-    FROM (
-        SELECT p.lot_id, p.wafer_id, p.x_coord, p.y_coord, p.part_txt, p.passed,
-               ROW_NUMBER() OVER (
-                   PARTITION BY p.lot_id, p.wafer_id, p.x_coord, p.y_coord,
-                       CASE WHEN p.x_coord = -32768 AND p.y_coord = -32768
-                            THEN p.part_txt ELSE '' END
-                   ORDER BY p.retest_num DESC) AS rn
-        FROM parts p CROSS JOIN params pa
-        WHERE p.product       = pa.product
-          AND p.test_category = pa.test_category
-          AND p.sub_process   = pa.sub_process
-          AND p.lot_id IN (SELECT lot_id FROM target_lots)
-    ) WHERE rn = 1 AND passed
-),
-
--- ① 母集団: 最新 run（test_data_final）に良品ダイを LEFT JOIN する。
---    統計は is_good の行だけで取り、pass/fail 件数は全ダイで数えるため、
---    INNER ではなく LEFT にして 1 パスで両方まかなう。
---    join キーは views.py の _DEDUP_UNIT と同一（CP=ウェーハ+座標 / FT=part_txt）
+-- ① 母集団: 対象ロットの全測定（最新 run のみ = test_data_final）
 base AS (
     SELECT td.test_num, td.test_name, td.units,
-           td.lo_limit, td.hi_limit, td.result, td.passed,
-           (p.lot_id IS NOT NULL) AS is_good
-    FROM test_data_final td
-    LEFT JOIN good_die p
-      ON  p.lot_id   = td.lot_id
-      AND p.wafer_id = td.wafer_id
-      AND p.x_coord  = td.x_coord
-      AND p.y_coord  = td.y_coord
-      AND (CASE WHEN td.x_coord = -32768 AND td.y_coord = -32768
-                THEN td.part_txt ELSE '' END)
-        = (CASE WHEN p.x_coord  = -32768 AND p.y_coord  = -32768
-                THEN p.part_txt  ELSE '' END)
-    CROSS JOIN params pa
+           td.lo_limit, td.hi_limit, td.result, td.passed
+    FROM test_data_final td CROSS JOIN params pa
     WHERE td.product       = pa.product
       AND td.test_category = pa.test_category
       AND td.sub_process   = pa.sub_process
@@ -824,7 +788,7 @@ base AS (
       AND regexp_matches(UPPER(TRIM(td.units)), '^.?[VA]$')
 ),
 
--- ② 基準ロット: 工程内で start_time 最大の 1 本
+-- ② 基準ロット: 対象ロット内で start_time 最大の 1 本
 --    lot_id はタイブレーク。start_time が同値のロットがあると基準ロットが
 --    実行ごとに変わり、現行スペックが揺れるため
 latest_lot AS (
@@ -837,9 +801,7 @@ latest_lot AS (
 ),
 
 -- ③ 現行スペック = 基準ロットが持っていたリミット
---    base ではなく test_data_final から直接引く。リミットはダイに依存しないので
---    良品フィルタが不要で、lot_id はパーティション列なので基準ロットのぶんだけ
---    読めば済む（実測 0.02 s）
+--    lot_id はパーティション列なので、基準ロットのぶんだけ読めば済む（実測 0.02 s）
 current_spec AS (
     SELECT td.test_num,
            ANY_VALUE(td.lo_limit) AS cur_lsl,
@@ -856,28 +818,27 @@ current_spec AS (
     GROUP BY ALL
 ),
 
--- ④ 統計。σ / mean は良品ダイのみ、fail 件数は全ダイ
+-- ④ 統計
 stats AS (
     SELECT
         test_num,
-        ANY_VALUE(test_name)                       AS test_name,
-        ANY_VALUE(units)                           AS units,
-        COUNT(*) FILTER (WHERE is_good)            AS n,
-        COUNT(*)                                   AS n_all,
-        COUNT(*) FILTER (WHERE passed = 'F')       AS fail_n,
-        AVG(result)         FILTER (WHERE is_good) AS mean,
-        STDDEV_SAMP(result) FILTER (WHERE is_good) AS sigma,
-        MIN(result)         FILTER (WHERE is_good) AS min_val,
-        MAX(result)         FILTER (WHERE is_good) AS max_val,
+        ANY_VALUE(test_name)                 AS test_name,
+        ANY_VALUE(units)                     AS units,
+        COUNT(*)                             AS n,
+        COUNT(*) FILTER (WHERE passed = 'F') AS fail_n,
+        AVG(result)                          AS mean,
+        STDDEV_SAMP(result)                  AS sigma,
+        MIN(result)                          AS min_val,
+        MAX(result)                          AS max_val,
         -- リミット変更検知。COUNT(DISTINCT ...) は行ごとにハッシュ集合を作るため
         -- 高い。MIN/MAX の不一致で等価に判定できる
-        MIN(lo_limit)                              AS lo_limit_min,
-        MAX(lo_limit)                              AS lo_limit_max,
-        MIN(hi_limit)                              AS hi_limit_min,
-        MAX(hi_limit)                              AS hi_limit_max
+        MIN(lo_limit)                        AS lo_limit_min,
+        MAX(lo_limit)                        AS lo_limit_max,
+        MIN(hi_limit)                        AS hi_limit_min,
+        MAX(hi_limit)                        AS hi_limit_max
     FROM base
     GROUP BY ALL
-    HAVING COUNT(*) FILTER (WHERE is_good) > 1
+    HAVING COUNT(*) > 1
 ),
 
 -- ⑤ 新リミット候補 = mean ± 3 × target_cpk × σ
@@ -913,10 +874,10 @@ SELECT
     test_num, test_name, units,
 
     -- 母集団と pass/fail
-    n, n_all, fail_n,
-    ROUND(100.0 * fail_n / NULLIF(n_all, 0), 3) AS fail_pct,
+    n, fail_n,
+    ROUND(100.0 * fail_n / NULLIF(n, 0), 3) AS fail_pct,
 
-    -- 分布（良品ダイのみ）
+    -- 分布
     ROUND(mean, 6)    AS mean,
     ROUND(sigma, 6)   AS sigma,
     ROUND(min_val, 6) AS min_val,
@@ -965,17 +926,19 @@ ORDER BY cpk_current NULLS LAST, test_num;
   そのテストが無く、現行スペックと比較できないものです。
 - `direction = 'LOOSEN'` → 緩和候補。`min_val` / `max_val` と `new_lsl` / `new_usl` を
   見比べて、実測レンジに対して妥当な広げ方かを確認します。
-- `direction = 'TIGHTEN'` → 締め候補。母集団は良品ダイなので、`min_val` / `max_val` が
-  新リミットの内側に収まっているかが歯止めになります。
-- `fail_n` / `fail_pct` は**全ダイ基準**のそのテストの fail 件数です。`n`（良品ダイ数）
-  と `n_all`（全測定数）の差が大きいテストは、他テストでの不良が多いことを意味します。
+- `direction = 'TIGHTEN'` → 締め候補。`min_val` / `max_val` が新リミットの内側に
+  収まっているかが歯止めになります。
+- `fail_n` / `fail_pct` はそのテスト単体の fail 件数・率です（`test_data.passed`）。
 - `LIMIT_CHANGED` → そのテストのリミットは過去に変更されています。`cur_lsl` /
   `cur_usl` は基準ロット（`ref_lot_id`、プログラム版は `latest_job_rev`）のものです。
 
 **既知の限界**
 
+- **母集団は全ダイです**（良品ダイの選別はしていません）。他テストで不良になった
+  ダイの測定値も σ に乗るため、Cpk は実力より**低め＝保守的**に出ます。そのテスト
+  自体の不良は `fail_n` / `fail_pct` で確認できます。
 - 全ロットプールの σ なので、厳密には Cpk ではなく **Ppk（overall performance）**
-  相当です。ロット間シフトが σ に乗るため、緩和側は広めに、締め側は保守的に出ます。
+  相当です。ロット間シフトも σ に乗ります。
 - `mean ± 3σ` は正規分布を前提にしています。リーク電流のように対数正規・片側裾を
   引く分布では新リミット候補が実測とかけ離れるので、`min_val` / `max_val` と必ず
   突き合わせてください。
@@ -993,59 +956,44 @@ ORDER BY cpk_current NULLS LAST, test_num;
   対象データに MPR があるかは `SELECT COUNT(*) FROM test_data_final WHERE
   rec_type = 'MPR'` で確認できます。
 
-**性能上の注意 — なぜ `parts_final` を使わず ⓪ `good_die` を書いているか**
+**性能上の注意**
 
-`parts_final` は `ROW_NUMBER() OVER (PARTITION BY lot_id, ...)` のウィンドウで、
-**`product` が PARTITION BY に入っていません**。そのため `WHERE product = ...` を
-ウィンドウより下へ押し込めず、DuckDB は**全製品・全ロットの `parts` を読んで
-ウィンドウを回してから**絞ります。CLAUDE.md に記録されている `test_data_final` の
-12 分問題と同じパターンです。
-
-⓪ は `views.py` の `_DEDUP_UNIT` と同じキー・同じ `ORDER BY retest_num DESC` なので、
-良品ダイの集合は `parts_final` と同一です。`parts_final` 側を直せば全クエリが速く
-なりますが、`PARTITION BY` を変えると同一ロット・同一ダイが複数 `sub_process` に
-ある場合の dedup 挙動、ひいては `wafer_yield_final` の母数が変わるため、ここでは
-8-2 の内側に閉じた回避策をとっています。
-
-合成データ（`test_data` 800 万行 / `parts` 50 万行）で測った、重い要素の単価
-（`base` 3.8M 行に対する追加時間）:
+合成データ（`test_data` 800 万行）で測った、重い要素の単価です。本クエリは
+`test_data` を 1 パス走査するだけなので、複数回参照によるマテリアライズも起きません
+（メモリ量に依存しない）。
 
 | 要素 | 追加時間 | 本クエリでの扱い |
 |---|---|---|
-| 良品ダイ join | +0.24 s | **採用**（母集団の定義そのもの） |
-| 分位点 / skewness | +0.34 s | 不採用 |
-| `COUNT(DISTINCT ...)` × 3 | +0.44 s | 不採用（`MIN`/`MAX` で等価判定） |
 | パーティション列を集約キーに含める | +0.27 s | 不採用（工程を指定して回避） |
+| `COUNT(DISTINCT ...)` × 3 | +0.44 s | 不採用（`MIN`/`MAX` で等価判定） |
+| 分位点 / skewness | +0.34 s | 不採用 |
+| 良品ダイ選別（`parts` との join） | +0.24 s | 不採用 |
 | 逸脱 ppm の再走査 | +0.09 s | 不採用 |
-| ロット間 σ | +0.02 s | 不採用 |
 
 ### 8-3. 確認用 — 8-2 と同じ母集団の生データ取得
 
 8-2 の集計値（`n` / `mean` / `sigma` / `fail_n`）を手元で検算するための、**行レベルの
-ダンプ**です。`params` / `target_lots` / `good_die` / `base` は 8-2 と**一字一句同じ**なので、
+ダンプ**です。`params` / `target_lots` と `base` の条件は 8-2 と**一字一句同じ**なので、
 同じパラメータを入れれば必ず同じ母集団になります。
 
 > [!WARNING]
 > 母集団は測定 1 行 = 1 レコードです。工程まるごとだと数千万行になり得るので、
-> **`test_nums` に確認したいテストだけを入れてください**（`NULL` にすると全テストが
-> 出ます）。件数が多いときは `COPY (...) TO 'check.csv' (HEADER)` で CSV に落とします。
+> **`test_name_like` で対象を絞ってください**。件数が多いときは
+> `COPY (...) TO 'check.csv' (HEADER)` で CSV に落とします。
 
 ```sql
 WITH params AS (
     SELECT 'YOUR_PRODUCT'         AS product,
            'CP'                   AS test_category,
            'CP1'                  AS sub_process,
-           -- 確認したいテスト。8-2 の test_num 列から拾う。NULL で全テスト（重い）
-           CAST([1001, 1002] AS BIGINT[]) AS test_nums,
-           -- テスト名のあいまい検索。ILIKE なので大文字小文字を区別しない。
-           -- 例 CAST('%IDD%' AS VARCHAR) / NULL なら全テスト
-           CAST(NULL AS VARCHAR)  AS test_name_like,
+           -- 確認したいテスト。8-2 の test_name 列から拾う。NULL で全テスト（重い）
+           CAST('%VTH%' AS VARCHAR) AS test_name_like,
            CAST(NULL AS VARCHAR)  AS job_name,
            CAST(NULL AS VARCHAR)  AS job_rev,
            CAST(NULL AS VARCHAR)  AS exclude_lot_pattern
 ),
 
--- ⓪a 対象ロット（8-2 と同じ）
+-- ⓪ 対象ロット（8-2 と同じ）
 target_lots AS (
     SELECT l.lot_id, l.job_name, l.job_rev, l.start_time
     FROM lots l CROSS JOIN params pa
@@ -1056,27 +1004,9 @@ target_lots AS (
       AND (pa.job_rev  IS NULL OR l.job_rev  = pa.job_rev)
       AND (pa.exclude_lot_pattern IS NULL
            OR l.lot_id NOT LIKE pa.exclude_lot_pattern)
-),
-
--- ⓪b 良品ダイ（8-2 と同じ）
-good_die AS (
-    SELECT lot_id, wafer_id, x_coord, y_coord, part_txt
-    FROM (
-        SELECT p.lot_id, p.wafer_id, p.x_coord, p.y_coord, p.part_txt, p.passed,
-               ROW_NUMBER() OVER (
-                   PARTITION BY p.lot_id, p.wafer_id, p.x_coord, p.y_coord,
-                       CASE WHEN p.x_coord = -32768 AND p.y_coord = -32768
-                            THEN p.part_txt ELSE '' END
-                   ORDER BY p.retest_num DESC) AS rn
-        FROM parts p CROSS JOIN params pa
-        WHERE p.product       = pa.product
-          AND p.test_category = pa.test_category
-          AND p.sub_process   = pa.sub_process
-          AND p.lot_id IN (SELECT lot_id FROM target_lots)
-    ) WHERE rn = 1 AND passed
 )
 
--- ① 母集団（8-2 の base と同じ条件 + test_nums 絞り込み）
+-- ① 母集団（8-2 の base と同じ条件）
 SELECT
     td.lot_id,
     td.wafer_id,
@@ -1089,29 +1019,18 @@ SELECT
     td.test_name,
     td.units,
     td.rec_type,
-    td.exec_seq,                        -- ループ計測の識別（同一ダイ・同一 test_num で複数行）
+    td.exec_seq,          -- ループ計測の識別（同一ダイ・同一 test_num で複数行）
     td.result,
     td.lo_limit,
     td.hi_limit,
-    td.passed              AS test_passed,   -- そのテスト単体の合否（fail_n の元）
-    (p.lot_id IS NOT NULL) AS is_good        -- ダイの最終合否（n / mean / sigma の母集団）
+    td.passed AS test_passed
 FROM test_data_final td
-LEFT JOIN good_die p
-  ON  p.lot_id   = td.lot_id
-  AND p.wafer_id = td.wafer_id
-  AND p.x_coord  = td.x_coord
-  AND p.y_coord  = td.y_coord
-  AND (CASE WHEN td.x_coord = -32768 AND td.y_coord = -32768
-            THEN td.part_txt ELSE '' END)
-    = (CASE WHEN p.x_coord  = -32768 AND p.y_coord  = -32768
-            THEN p.part_txt  ELSE '' END)
 JOIN target_lots tl ON tl.lot_id = td.lot_id
 CROSS JOIN params pa
 WHERE td.product       = pa.product
   AND td.test_category = pa.test_category
   AND td.sub_process   = pa.sub_process
   AND td.rec_type IN ('PTR', 'MPR')
-  AND (pa.test_nums IS NULL OR list_contains(pa.test_nums, td.test_num))
   AND (pa.test_name_like IS NULL OR td.test_name ILIKE pa.test_name_like)
   AND td.result IS NOT NULL   AND isfinite(td.result)
   AND td.lo_limit IS NOT NULL AND isfinite(td.lo_limit)
@@ -1123,18 +1042,17 @@ ORDER BY td.test_num, td.lot_id, td.wafer_id, td.x_coord, td.y_coord, td.exec_se
 
 **8-2 の集計値との突合**
 
-上のクエリを `dump` として、次を回すと 8-2 の `n` / `mean` / `sigma` / `n_all` /
-`fail_n` が再現します。値が合わなければ、どちらかのパラメータがずれています。
+上のクエリを `dump` として、次を回すと 8-2 の `n` / `mean` / `sigma` / `fail_n` が
+再現します。値が合わなければ、どちらかのパラメータがずれています。
 **貼り付けるときは末尾の `;` を外してください**（サブクエリ内では構文エラーになります）。
 
 ```sql
 SELECT
     test_num,
-    COUNT(*) FILTER (WHERE is_good)                  AS n,
-    COUNT(*)                                         AS n_all,
-    COUNT(*) FILTER (WHERE test_passed = 'F')        AS fail_n,
-    ROUND(AVG(result)         FILTER (WHERE is_good), 6) AS mean,
-    ROUND(STDDEV_SAMP(result) FILTER (WHERE is_good), 6) AS sigma
+    COUNT(*)                                  AS n,
+    COUNT(*) FILTER (WHERE test_passed = 'F') AS fail_n,
+    ROUND(AVG(result), 6)                     AS mean,
+    ROUND(STDDEV_SAMP(result), 6)             AS sigma
 FROM (/* ↑ 8-3 のクエリをそのまま貼る */) dump
 GROUP BY test_num
 ORDER BY test_num;
