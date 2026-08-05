@@ -612,20 +612,108 @@ GROUP BY l.tester_type, l.operator
 ORDER BY yield_pct;
 ```
 
-### 7-3. Fail ビンとテスト項目の紐付け
+### 7-3. Fail ビンとテスト項目の紐付け（fail-nonstop 対応）
+
+> [!IMPORTANT]
+> **fail してもテストを続行する設定（fail-nonstop / continue-on-fail）では、1 ダイが
+> 複数のテストで落ちます。** 単純に `COUNT(*)` すると同じダイが各テストに計上され、
+> 合計が不良ダイ数を超えます（合成データでは不良ダイ 79 個に対し 101 件）。
+> 下のクエリは `COUNT(DISTINCT ダイ)` で数え、**`sole_fail_dies`（他は全部通っていて
+> そのテストだけで落ちたダイ数）** を併記します。派生的に落ちたテストと原因テストを
+> 切り分けるには、`fail_dies` より `sole_fail_dies` を見てください。
+
+```sql
+WITH fail AS (
+    SELECT p.hard_bin, p.soft_bin, td.test_num, td.test_name,
+           -- ダイ識別は views.py の _DEDUP_UNIT と同じ（CP=ウェーハ+座標 / FT=part_txt）。
+           -- part_id はリテストファイルで振り直される可能性があるため使わない
+           CONCAT_WS('|', p.wafer_id, p.x_coord, p.y_coord,
+                     CASE WHEN p.x_coord = -32768 AND p.y_coord = -32768
+                          THEN p.part_txt ELSE '' END) AS die_key
+    FROM parts_final p
+    JOIN test_data_final td
+      ON  td.lot_id   = p.lot_id
+      AND td.wafer_id = p.wafer_id
+      AND td.x_coord  = p.x_coord
+      AND td.y_coord  = p.y_coord
+      AND (CASE WHEN p.x_coord  = -32768 AND p.y_coord  = -32768
+                THEN p.part_txt  ELSE '' END)
+        = (CASE WHEN td.x_coord = -32768 AND td.y_coord = -32768
+                THEN td.part_txt ELSE '' END)
+    WHERE p.lot_id = 'YOUR_LOT_ID'
+      AND p.passed = FALSE
+      AND td.passed = 'F'
+),
+die AS (   -- ダイごとの fail テスト数
+    SELECT die_key, COUNT(DISTINCT test_num) AS n_fail_tests
+    FROM fail GROUP BY die_key
+),
+bin_total AS (   -- bin ごとの不良ダイ数（シェアの分母）
+    SELECT soft_bin, COUNT(DISTINCT die_key) AS bin_fail_dies
+    FROM fail GROUP BY soft_bin
+)
+SELECT
+    f.hard_bin, f.soft_bin, f.test_num, f.test_name,
+    COUNT(DISTINCT f.die_key)                                   AS fail_dies,
+    COUNT(DISTINCT f.die_key) FILTER (WHERE d.n_fail_tests = 1) AS sole_fail_dies,
+    ROUND(100.0 * COUNT(DISTINCT f.die_key)
+          / ANY_VALUE(b.bin_fail_dies), 1)                      AS pct_of_bin
+FROM fail f
+JOIN die d USING (die_key)
+JOIN bin_total b ON b.soft_bin = f.soft_bin
+GROUP BY f.hard_bin, f.soft_bin, f.test_num, f.test_name
+ORDER BY f.soft_bin, fail_dies DESC;
+```
+
+> **原理的な限界**: fail-nonstop で bin を決めるのは通常「**最初に**落ちたテスト」ですが、
+> これは現在のスキーマでは復元できません。`test_data` に実行順の列がないためです
+> （`exec_seq` は同一 `test_num` 内の出現順であって、テスト間の順序ではありません）。
+> Parquet の物理行順は保存されていますが、DuckDB の並列スキャンで順序は保証されません。
+> `test_num` の昇順が実行順と一致する運用なら `MIN(test_num)` で代用できます。
+
+### 7-4. Fail 行の全件取得（bin 付き）
+
+7-3 の集計の素データです。`passed = 'F'` の測定を 1 行も落とさずに取り出します。
 
 ```sql
 SELECT
-    p.hard_bin, p.soft_bin, td.test_num, td.test_name,
-    COUNT(*) AS fail_count
-FROM parts_final p
-JOIN test_data_final td ON p.lot_id = td.lot_id AND p.part_id = td.part_id
-WHERE p.lot_id = 'YOUR_LOT_ID' AND p.passed = FALSE AND td.passed = 'F'
-GROUP BY p.hard_bin, p.soft_bin, td.test_num, td.test_name
-ORDER BY fail_count DESC;
+    td.lot_id, td.wafer_id, td.x_coord, td.y_coord, td.part_txt,
+    p.hard_bin, p.soft_bin, p.passed AS die_passed,
+    td.test_num, td.test_name, td.rec_type, td.exec_seq,
+    td.result, td.lo_limit, td.hi_limit, td.units
+FROM test_data_final td
+LEFT JOIN parts_final p
+  ON  p.lot_id   = td.lot_id
+  AND p.wafer_id = td.wafer_id
+  AND p.x_coord  = td.x_coord
+  AND p.y_coord  = td.y_coord
+  AND (CASE WHEN td.x_coord = -32768 AND td.y_coord = -32768
+            THEN td.part_txt ELSE '' END)
+    = (CASE WHEN p.x_coord  = -32768 AND p.y_coord  = -32768
+            THEN p.part_txt  ELSE '' END)
+WHERE td.lot_id = 'YOUR_LOT_ID'
+  AND td.passed = 'F'
+ORDER BY p.soft_bin, td.wafer_id, td.x_coord, td.y_coord, td.test_num, td.exec_seq;
 ```
 
-### 7-4. 複数ロットの歩留り比較
+**設計上のポイント**
+
+- **`LEFT JOIN`** — bin が引けない行があっても fail 行を落としません。`soft_bin` が
+  NULL で出たら `parts` 側の欠損を疑ってください。
+- **`p.passed = FALSE` を条件にしていない** — リテストで復活したダイの fail も残ります。
+  `die_passed` 列で区別してください。条件に入れると「最終的に良品になったダイの fail」が
+  消えます。
+- **`rec_type` を出力** — **FTR（機能試験）は `result` が NULL でも `passed = 'F'` で
+  入ります**。bin の原因は FTR であることも多いので、`rec_type IN ('PTR','MPR')` で
+  絞らないでください（8-2 は Cpk 計算用なので絞っていますが、fail 解析では別です）。
+- **`exec_seq`** — ループ計測で同一ダイ・同一 `test_num` の複数行を区別できます。
+
+> **リテスト前の fail も見たい場合**: `test_data_final` は最新 run のみです。過去 run で
+> 落ちたが再測定で通ったテストは含まれません。全 run を見るには `test_data_final` を
+> 生の `test_data` に置き換え、出力に `td.retest_flag`（0 = 最新 run / 1 以上 = 過去 run）
+> を追加してください。
+
+### 7-5. 複数ロットの歩留り比較
 
 ```sql
 SELECT
@@ -1278,8 +1366,9 @@ ORDER BY td.test_num, c.origin_lot, c.origin_wafer, c.origin_x, c.origin_y;
 **ウェーハ面の分布に落とす**
 
 出自ウェーハ × 座標ごとに集約すると、そのままウェーハマップの素データになります。
-同じ die 位置に複数パッケージが乗ることは無い想定ですが、リテストやループ計測で
-複数行になり得るので平均を取っています。
+リテストは `test_data_final` / `chipid_final` の時点で最新のみに絞られていますが、
+**ループ計測**（1 test_num に複数回書かれる測定。`exec_seq` で区別）があると同じ
+die 位置に複数行残るため、平均を取っています。
 
 ```sql
 SELECT
