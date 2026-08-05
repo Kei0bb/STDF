@@ -709,7 +709,7 @@ flowchart TD
     PA["parts"] --> GD["⓪b good_die<br/>対象ロットで絞ってから<br/>parts_final と同じ dedup<br/>passed = TRUE のみ"]
     TD["test_data_final<br/>retest_flag = 0"] --> BASE
     GD -->|"LEFT JOIN<br/>CP: wafer_id + x/y<br/>FT: part_txt"| BASE
-    BASE["① base<br/>対象ロットの全測定<br/>rec_type = PTR / MPR<br/>lo_limit &lt; hi_limit<br/>units = V / A 系<br/>is_good = 良品ダイか"]
+    BASE["① base<br/>対象ロットの全測定<br/>rec_type = PTR / MPR<br/>test_name ILIKE（任意）<br/>lo_limit &lt; hi_limit<br/>units = V / A 系<br/>is_good = 良品ダイか"]
 
     LO["lots"] --> TL["⓪a target_lots<br/>工程 + 試験プログラム<br/>job_name / job_rev で絞る"]
     TL --> GD
@@ -746,6 +746,9 @@ WITH params AS (
            'CP1'                  AS sub_process,     -- 必ず指定
            CAST(1.33 AS DOUBLE)   AS target_cpk,
            30                     AS min_n,             -- これ未満は LOW_SAMPLE
+           -- テスト名のあいまい検索。ILIKE なので大文字小文字を区別しない。
+           -- 例 CAST('%IDD%' AS VARCHAR) / NULL なら全テスト
+           CAST(NULL AS VARCHAR)  AS test_name_like,
            -- 試験プログラムで絞る。NULL なら工程内の全プログラム版が対象。
            -- 使える値は 1-1 / 1-2 のクエリで確認できる
            CAST(NULL AS VARCHAR)  AS job_name,          -- 例 'PROG_A'
@@ -811,6 +814,7 @@ base AS (
       AND td.sub_process   = pa.sub_process
       AND td.rec_type IN ('PTR', 'MPR')
       AND td.lot_id IN (SELECT lot_id FROM target_lots)
+      AND (pa.test_name_like IS NULL OR td.test_name ILIKE pa.test_name_like)
       AND td.result IS NOT NULL   AND isfinite(td.result)
       AND td.lo_limit IS NOT NULL AND isfinite(td.lo_limit)
       AND td.hi_limit IS NOT NULL AND isfinite(td.hi_limit)
@@ -1033,6 +1037,9 @@ WITH params AS (
            'CP1'                  AS sub_process,
            -- 確認したいテスト。8-2 の test_num 列から拾う。NULL で全テスト（重い）
            CAST([1001, 1002] AS BIGINT[]) AS test_nums,
+           -- テスト名のあいまい検索。ILIKE なので大文字小文字を区別しない。
+           -- 例 CAST('%IDD%' AS VARCHAR) / NULL なら全テスト
+           CAST(NULL AS VARCHAR)  AS test_name_like,
            CAST(NULL AS VARCHAR)  AS job_name,
            CAST(NULL AS VARCHAR)  AS job_rev,
            CAST(NULL AS VARCHAR)  AS exclude_lot_pattern
@@ -1105,6 +1112,7 @@ WHERE td.product       = pa.product
   AND td.sub_process   = pa.sub_process
   AND td.rec_type IN ('PTR', 'MPR')
   AND (pa.test_nums IS NULL OR list_contains(pa.test_nums, td.test_num))
+  AND (pa.test_name_like IS NULL OR td.test_name ILIKE pa.test_name_like)
   AND td.result IS NOT NULL   AND isfinite(td.result)
   AND td.lo_limit IS NOT NULL AND isfinite(td.lo_limit)
   AND td.hi_limit IS NOT NULL AND isfinite(td.hi_limit)
