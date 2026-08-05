@@ -1217,6 +1217,91 @@ WHERE lot_id = 'YOUR_FT_LOT';
 > **注**: `chipid` は FT のみ。CP では die 出自＝プローブ座標（`parts` の
 > `wafer_id` / `x_coord` / `y_coord`）で取得できるため生成されません。
 
+### 9-10. FT 測定値 × CP 出自座標（分布・ウェーハマップ用の生データ）
+
+FT には座標がない（`wafer_id = ''` / `x_coord = y_coord = -32768`）ので、xy は
+**ChipID からデコードした CP 側の出自座標**（`origin_wafer` / `origin_x` /
+`origin_y`）を使います。特定のテスト項目の測定値を die 位置つきで取り出し、
+値の分布やウェーハ面の傾向を見るための生データです。
+
+> [!WARNING]
+> **chiplet 製品は 1 パッケージ = 2 die** なので、FT の測定値 1 つに対して出自座標が
+> 2 行出ます（`chip_occurrence_index` = 0 / 1）。測定値はパッケージ単位なので、
+> どちらの die のものかは原理的に決まりません。
+> **値のヒストグラムを描くときは `chip_occurrence_index = 0` に絞ってください**
+> （絞らないと全数が 2 倍に二重計上されます）。ウェーハマップに載せる場合は
+> 両方出したままで構いません（同じ値が 2 箇所にプロットされます）。
+
+```sql
+WITH params AS (
+    SELECT 'YOUR_PRODUCT'           AS product,
+           'FT1'                    AS sub_process,      -- FT の工程
+           -- 特定ロットだけ見るなら値を入れる。NULL で工程内の全 FT ロット
+           CAST(NULL AS VARCHAR)    AS lot_id,
+           -- テスト名のあいまい検索。ILIKE なので大文字小文字を区別しない
+           CAST('%VTH%' AS VARCHAR) AS test_name_like
+)
+SELECT
+    td.lot_id,
+    td.part_txt,                       -- パッケージ（2D バーコード）
+    c.chip_occurrence_index,           -- パッケージ内の die 番号（0 / 1）
+    c.origin_fab,
+    c.origin_lot,
+    c.origin_wafer,
+    c.origin_x,
+    c.origin_y,
+    td.test_num,
+    td.test_name,
+    td.units,
+    td.exec_seq,                       -- ループ計測の識別
+    td.result,
+    td.lo_limit,
+    td.hi_limit,
+    td.passed AS test_passed
+FROM test_data_final td
+JOIN chipid_final c
+  ON  c.lot_id   = td.lot_id
+  AND c.part_txt = td.part_txt
+CROSS JOIN params pa
+WHERE td.product       = pa.product
+  AND td.test_category = 'FT'
+  AND td.sub_process   = pa.sub_process
+  AND (pa.lot_id IS NULL OR td.lot_id = pa.lot_id)
+  AND (pa.test_name_like IS NULL OR td.test_name ILIKE pa.test_name_like)
+  AND td.rec_type IN ('PTR', 'MPR')
+  AND td.part_txt <> ''                -- 空バーコードは die を特定できない
+  AND td.result IS NOT NULL AND isfinite(td.result)
+  AND c.valid                          -- デコードできた die のみ
+ORDER BY td.test_num, c.origin_lot, c.origin_wafer, c.origin_x, c.origin_y;
+```
+
+**ウェーハ面の分布に落とす**
+
+出自ウェーハ × 座標ごとに集約すると、そのままウェーハマップの素データになります。
+同じ die 位置に複数パッケージが乗ることは無い想定ですが、リテストやループ計測で
+複数行になり得るので平均を取っています。
+
+```sql
+SELECT
+    origin_lot, origin_wafer, origin_x, origin_y,
+    COUNT(*)              AS n,
+    ROUND(AVG(result), 6) AS mean_result,
+    MIN(result)           AS min_result,
+    MAX(result)           AS max_result
+FROM (/* ↑ 9-10 のクエリをそのまま貼る。末尾の ; は外す */) d
+GROUP BY origin_lot, origin_wafer, origin_x, origin_y
+ORDER BY origin_lot, origin_wafer, origin_y, origin_x;
+```
+
+**注意点**
+
+- `c.valid` で**デコードできた die だけ**に絞っています。取りこぼしの量は 9-9 の
+  健全性チェックで確認してください。
+- 出自座標は CP のプローブ座標系です。CP 側の実測値と重ねたい場合は 9-8 を使うと
+  同じ die の CP 結果に突き合わせられます。
+- `part_txt` が空のロット（2D バーコードを打っていない FT データ）はこのクエリでは
+  何も返りません。die の identity が取れないため原理的に紐づけ不可です。
+
 ---
 
 ## 注意事項
