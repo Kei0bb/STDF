@@ -711,7 +711,7 @@ flowchart TD
     LL --> CS["③ current_spec<br/>基準ロットのリミット<br/>= 現行スペック"]
     TD -->|"基準ロットのぶんだけ"| CS
 
-    BASE --> ST["④ stats<br/>キー: test_num, pin_num<br/>統計は is_good のみ<br/>fail 件数は全ダイ"]
+    BASE --> ST["④ stats<br/>キー: test_num<br/>統計は is_good のみ<br/>fail 件数は全ダイ"]
     ST --> CAND["⑤ 新リミット候補<br/>mean ± 3 × target_cpk × σ<br/>有効数字 3 桁・緩い側へ丸め"]
     CS --> JUDGE["⑥ Cpk 判定・direction・フラグ"]
     CAND --> JUDGE
@@ -765,10 +765,8 @@ good_die AS (
 --    統計は is_good の行だけで取り、pass/fail 件数は全ダイで数えるため、
 --    INNER ではなく LEFT にして 1 パスで両方まかなう。
 --    join キーは views.py の _DEDUP_UNIT と同一（CP=ウェーハ+座標 / FT=part_txt）
---    pin_num は PTR で NULL のため -1 に畳む（NULL は join で一致しないため）
 base AS (
-    SELECT td.test_num, COALESCE(td.pin_num, -1) AS pin_num,
-           td.test_name, td.units, COALESCE(td.pin_name, '') AS pin_name,
+    SELECT td.test_num, td.test_name, td.units,
            td.lo_limit, td.hi_limit, td.result, td.passed,
            (p.lot_id IS NOT NULL) AS is_good
     FROM test_data_final td
@@ -819,7 +817,7 @@ latest_lot AS (
 --    良品フィルタが不要で、lot_id はパーティション列なので基準ロットのぶんだけ
 --    読めば済む（実測 0.02 s）
 current_spec AS (
-    SELECT td.test_num, COALESCE(td.pin_num, -1) AS pin_num,
+    SELECT td.test_num,
            ANY_VALUE(td.lo_limit) AS cur_lsl,
            ANY_VALUE(td.hi_limit) AS cur_usl
     FROM test_data_final td CROSS JOIN params pa
@@ -838,10 +836,8 @@ current_spec AS (
 stats AS (
     SELECT
         test_num,
-        pin_num,
         ANY_VALUE(test_name)                       AS test_name,
         ANY_VALUE(units)                           AS units,
-        ANY_VALUE(pin_name)                        AS pin_name,
         COUNT(*) FILTER (WHERE is_good)            AS n,
         COUNT(*)                                   AS n_all,
         COUNT(*) FILTER (WHERE passed = 'F')       AS fail_n,
@@ -874,7 +870,7 @@ candidate AS (
     FROM stats s
     CROSS JOIN (SELECT target_cpk, min_n FROM params) pa
     CROSS JOIN latest_lot ll
-    LEFT JOIN current_spec cs USING (test_num, pin_num)
+    LEFT JOIN current_spec cs USING (test_num)
     WHERE s.sigma IS NOT NULL AND isfinite(s.sigma) AND s.sigma > 0
 ),
 rounded AS (
@@ -891,8 +887,6 @@ rounded AS (
 -- ⑥ 判定
 SELECT
     test_num, test_name, units,
-    CASE WHEN pin_num = -1 THEN NULL ELSE pin_num END AS pin_num,
-    NULLIF(pin_name, '')                              AS pin_name,
 
     -- 母集団と pass/fail
     n, n_all, fail_n,
@@ -938,7 +932,7 @@ SELECT
 FROM rounded
 -- Cpk 不足のみ。全件見るならこの 1 行を削除
 WHERE cpk_current IS NULL OR cpk_current < target_cpk
-ORDER BY cpk_current NULLS LAST, test_num, pin_num;
+ORDER BY cpk_current NULLS LAST, test_num;
 ```
 
 **読み方**
@@ -968,6 +962,12 @@ ORDER BY cpk_current NULLS LAST, test_num, pin_num;
 - パーサは PTR の `OPT_FLAG` を解釈せずリミット領域を読むため（`parser.py`）、
   リミット未定義のテストに 0 等が入り得ます。`lo_limit < hi_limit` で大半は
   落ちますが、`min_val` / `max_val` と突き合わせて確認してください。
+- 集約キーは `test_num` のみで、`pin_num` は含めていません。MPR（ピンごとの測定）の
+  テストは**全ピンが 1 つの分布にまとまります**。ピン別に見る必要がある場合は、
+  `base` / `stats` / `current_spec` のキーと `LEFT JOIN ... USING` に `pin_num`
+  （PTR は NULL なので `COALESCE(pin_num, -1)`）を足してください。
+  対象データに MPR があるかは `SELECT COUNT(*) FROM test_data_final WHERE
+  rec_type = 'MPR'` で確認できます。
 
 **性能上の注意 — なぜ `parts_final` を使わず ⓪ `good_die` を書いているか**
 
