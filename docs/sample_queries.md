@@ -1080,7 +1080,7 @@ WITH params AS (
            'CP'                   AS test_category,
            'CP1'                  AS sub_process,
            -- 確認したいテスト。8-2 の test_name 列から拾う。NULL で全テスト（重い）
-           CAST('%VTH%' AS VARCHAR) AS test_name_like,
+           CAST('%IDDQ%' AS VARCHAR) AS test_name_like,
            CAST(NULL AS VARCHAR)  AS job_name,
            CAST(NULL AS VARCHAR)  AS job_rev,
            CAST(NULL AS VARCHAR)  AS exclude_lot_pattern
