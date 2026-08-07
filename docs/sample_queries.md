@@ -809,7 +809,7 @@ flowchart TD
     TD -->|"基準ロットのぶんだけ"| CS
 
     BASE --> ST["④ stats<br/>キー: test_num<br/>n / mean / σ / fail 件数"]
-    ST --> CAND["⑤ 新リミット候補<br/>mean ± 3 × target_cpk × σ<br/>有効数字 3 桁・緩い側へ丸め"]
+    ST --> CAND["⑤ 新リミット候補<br/>mean ± 3 × target_cpk × σ<br/>+ 比較用 3σ/6σ/9σ<br/>有効数字 3 桁・緩い側へ丸め"]
     CS --> JUDGE["⑥ Cpk 判定・direction・フラグ"]
     CAND --> JUDGE
 ```
@@ -937,6 +937,8 @@ stats AS (
 -- ⑤ 新リミット候補 = mean ± 3 × target_cpk × σ
 --    有効数字 3 桁へ丸め。FLOOR / CEIL なので常に「緩い側」に丸まる
 --    （丸めで意図せず厳しくならない）
+--    加えて mean ± 3σ / 6σ / 9σ を並記し、TIGHTEN が厳しすぎるテストを
+--    見比べられるようにする（正規分布前提の限界を σ 倍率で目視確認する簡易策）
 candidate AS (
     SELECT s.*, cs.cur_lsl, cs.cur_usl,
            ll.lot_id   AS ref_lot_id,
@@ -944,7 +946,13 @@ candidate AS (
            ll.job_rev  AS latest_job_rev,
            pa.target_cpk, pa.min_n,
            s.mean - 3.0 * pa.target_cpk * s.sigma AS new_lsl_exact,
-           s.mean + 3.0 * pa.target_cpk * s.sigma AS new_usl_exact
+           s.mean + 3.0 * pa.target_cpk * s.sigma AS new_usl_exact,
+           s.mean - 3.0 * s.sigma AS new_lsl_3s_exact,
+           s.mean + 3.0 * s.sigma AS new_usl_3s_exact,
+           s.mean - 6.0 * s.sigma AS new_lsl_6s_exact,
+           s.mean + 6.0 * s.sigma AS new_usl_6s_exact,
+           s.mean - 9.0 * s.sigma AS new_lsl_9s_exact,
+           s.mean + 9.0 * s.sigma AS new_usl_9s_exact
     FROM stats s
     CROSS JOIN (SELECT target_cpk, min_n FROM params) pa
     CROSS JOIN latest_lot ll
@@ -958,7 +966,25 @@ rounded AS (
                      * POW(10, FLOOR(LOG10(ABS(new_lsl_exact))) - 2) END AS new_lsl,
            CASE WHEN new_usl_exact = 0 THEN 0 ELSE
                 CEIL(new_usl_exact / POW(10, FLOOR(LOG10(ABS(new_usl_exact))) - 2))
-                     * POW(10, FLOOR(LOG10(ABS(new_usl_exact))) - 2) END AS new_usl
+                     * POW(10, FLOOR(LOG10(ABS(new_usl_exact))) - 2) END AS new_usl,
+           CASE WHEN new_lsl_3s_exact = 0 THEN 0 ELSE
+                FLOOR(new_lsl_3s_exact / POW(10, FLOOR(LOG10(ABS(new_lsl_3s_exact))) - 2))
+                     * POW(10, FLOOR(LOG10(ABS(new_lsl_3s_exact))) - 2) END AS new_lsl_3s,
+           CASE WHEN new_usl_3s_exact = 0 THEN 0 ELSE
+                CEIL(new_usl_3s_exact / POW(10, FLOOR(LOG10(ABS(new_usl_3s_exact))) - 2))
+                     * POW(10, FLOOR(LOG10(ABS(new_usl_3s_exact))) - 2) END AS new_usl_3s,
+           CASE WHEN new_lsl_6s_exact = 0 THEN 0 ELSE
+                FLOOR(new_lsl_6s_exact / POW(10, FLOOR(LOG10(ABS(new_lsl_6s_exact))) - 2))
+                     * POW(10, FLOOR(LOG10(ABS(new_lsl_6s_exact))) - 2) END AS new_lsl_6s,
+           CASE WHEN new_usl_6s_exact = 0 THEN 0 ELSE
+                CEIL(new_usl_6s_exact / POW(10, FLOOR(LOG10(ABS(new_usl_6s_exact))) - 2))
+                     * POW(10, FLOOR(LOG10(ABS(new_usl_6s_exact))) - 2) END AS new_usl_6s,
+           CASE WHEN new_lsl_9s_exact = 0 THEN 0 ELSE
+                FLOOR(new_lsl_9s_exact / POW(10, FLOOR(LOG10(ABS(new_lsl_9s_exact))) - 2))
+                     * POW(10, FLOOR(LOG10(ABS(new_lsl_9s_exact))) - 2) END AS new_lsl_9s,
+           CASE WHEN new_usl_9s_exact = 0 THEN 0 ELSE
+                CEIL(new_usl_9s_exact / POW(10, FLOOR(LOG10(ABS(new_usl_9s_exact))) - 2))
+                     * POW(10, FLOOR(LOG10(ABS(new_usl_9s_exact))) - 2) END AS new_usl_9s
     FROM candidate c
 )
 
@@ -985,11 +1011,16 @@ SELECT
     ROUND(LEAST((cur_usl - mean) / (3 * sigma),
                 (mean - cur_lsl) / (3 * sigma)), 3) AS cpk_current,
 
-    -- 新スペック候補
+    -- 新スペック候補（target_cpk 基準。TIGHTEN 判定・flags もこれで決まる）
     ROUND(new_lsl, 6) AS new_lsl,
     ROUND(new_usl, 6) AS new_usl,
     ROUND(new_lsl - cur_lsl, 6) AS lsl_change,
     ROUND(new_usl - cur_usl, 6) AS usl_change,
+
+    -- σ 倍率違いの比較用。TIGHTEN が厳しすぎるときにどこまで戻すか目視で判断する
+    ROUND(new_lsl_3s, 6) AS new_lsl_3s, ROUND(new_usl_3s, 6) AS new_usl_3s,
+    ROUND(new_lsl_6s, 6) AS new_lsl_6s, ROUND(new_usl_6s, 6) AS new_usl_6s,
+    ROUND(new_lsl_9s, 6) AS new_lsl_9s, ROUND(new_usl_9s, 6) AS new_usl_9s,
 
     CASE
         WHEN cur_lsl IS NULL                          THEN 'NO_BASELINE'
@@ -1020,7 +1051,10 @@ ORDER BY cpk_current NULLS LAST, test_num;
 - `direction = 'LOOSEN'` → 緩和候補。`min_val` / `max_val` と `new_lsl` / `new_usl` を
   見比べて、実測レンジに対して妥当な広げ方かを確認します。
 - `direction = 'TIGHTEN'` → 締め候補。`min_val` / `max_val` が新リミットの内側に
-  収まっているかが歯止めになります。
+  収まっているかが歯止めになります。**`new_lsl`/`new_usl`（target_cpk 基準）が
+  締めすぎに見える場合は `new_lsl_3s`/`new_usl_3s` → `_6s` → `_9s` の順に見比べて、
+  `min_val`/`max_val` を余裕を持って含む段階まで戻してください**（正規分布前提
+  で σ が過小評価されがちな歪んだ分布ほど差が大きく出ます）。
 - `fail_n` / `fail_pct` はそのテスト単体の fail 件数・率です（`test_data.passed`）。
 - `LIMIT_CHANGED` → そのテストのリミットは過去に変更されています。`cur_lsl` /
   `cur_usl` は基準ロット（`ref_lot_id`、プログラム版は `latest_job_rev`）のものです。
