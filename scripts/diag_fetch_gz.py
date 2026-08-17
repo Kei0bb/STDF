@@ -23,6 +23,7 @@ Output contains file names, byte counts and hashes only - no measurement data.
 import argparse
 import gzip
 import hashlib
+import shutil
 import struct
 import sys
 import tempfile
@@ -88,6 +89,109 @@ def skip_gzip_header(f) -> None:
         f.read(2)
 
 
+def walk_members(path: Path) -> list[dict]:
+    """Walk every gzip member in the file, verifying each one independently.
+
+    A .gz written by an appending logger is a *concatenation* of gzip members.
+    `gzip.open()` stops at the first member whose trailer fails, so a whole-file
+    check cannot say which member is bad or how much data follows it.
+    """
+    members: list[dict] = []
+    size = path.stat().st_size
+    offset = 0
+    with open(path, "rb") as f:
+        while offset < size:
+            m: dict = {"index": len(members) + 1, "offset": offset}
+            f.seek(offset)
+            try:
+                skip_gzip_header(f)
+            except (ValueError, struct.error) as e:
+                m.update(ok=False, state=f"no valid gzip header at offset {offset}: {e}")
+                members.append(m)
+                break
+
+            dec = zlib.decompressobj(-15)
+            crc = 0
+            total = 0
+            pos = f.tell()
+            while True:
+                chunk = f.read(1 << 20)
+                if not chunk:
+                    break
+                pos += len(chunk)
+                try:
+                    out = dec.decompress(chunk)
+                except zlib.error as e:
+                    m.update(ok=False, out_size=total, state=f"deflate error: {e}")
+                    break
+                crc = zlib.crc32(out, crc)
+                total += len(out)
+                if dec.eof:
+                    break
+            if "state" in m:
+                members.append(m)
+                break
+
+            out = dec.flush()
+            crc = zlib.crc32(out, crc)
+            total += len(out)
+            m["out_size"] = total
+            m["crc_calc"] = crc
+
+            if not dec.eof:
+                m.update(ok=False, state="member truncated (no end-of-stream marker)")
+                members.append(m)
+                break
+
+            # The deflate stream ended inside the last chunk read; whatever
+            # followed it is in unused_data, so the trailer starts here.
+            trailer_at = pos - len(dec.unused_data)
+            f.seek(trailer_at)
+            raw = f.read(8)
+            if len(raw) < 8:
+                m.update(ok=False, state="member trailer missing (file ends early)")
+                members.append(m)
+                break
+            crc_stored, isize_stored = struct.unpack("<II", raw)
+            m["crc_stored"] = crc_stored
+            m["isize_stored"] = isize_stored
+            m["comp_size"] = (trailer_at + 8) - offset
+            crc_ok = crc_stored == crc
+            len_ok = isize_stored == (total & 0xFFFFFFFF)
+            m["ok"] = crc_ok and len_ok
+            if m["ok"]:
+                m["state"] = "OK"
+            elif len_ok:
+                m["state"] = "CRC MISMATCH (length correct -> content altered, no bytes lost)"
+            elif crc_ok:
+                m["state"] = "ISIZE MISMATCH (crc correct)"
+            else:
+                m["state"] = "CRC + ISIZE MISMATCH (bytes lost or added)"
+            members.append(m)
+            offset = trailer_at + 8
+
+    return members
+
+
+def print_members(members: list[dict]) -> None:
+    print(f"    gzip members : {len(members)}")
+    total_out = 0
+    for m in members:
+        total_out += m.get("out_size") or 0
+        mark = "ok " if m.get("ok") else "BAD"
+        line = (f"      [{mark}] #{m['index']} off={m['offset']} "
+                f"comp={m.get('comp_size', '?')} out={m.get('out_size', '?')}")
+        if "crc_stored" in m:
+            line += (f" crc stored=0x{m['crc_stored']:08x} calc=0x{m['crc_calc']:08x}"
+                     f" isize={m['isize_stored']}")
+        print(line)
+        if not m.get("ok"):
+            print(f"            -> {m['state']}")
+    bad = [m for m in members if not m.get("ok")]
+    print(f"    total decompressed : {total_out} bytes, "
+          f"{len(bad)} bad member(s) of {len(members)}")
+
+
 def raw_inflate_size(path: Path) -> tuple[int, str]:
     """Decompress as raw deflate, bypassing the gzip CRC/ISIZE trailer entirely.
 
@@ -132,8 +236,10 @@ TRANSFER_BAD = ("TRANSFER_CORRUPTION: bytes differ between downloads. "
                 "A download retry (with verification) would recover this file.")
 
 
-def check_one(client: FTPClient, remote_path: str, tmpdir: Path, index: int, total: int) -> dict:
-    """Download + verify one remote file. Returns a result record."""
+def check_one(client: FTPClient | None, remote_path: str, tmpdir: Path,
+              index: int, total: int, local_file: Path | None = None,
+              keep_dir: Path | None = None) -> dict:
+    """Verify one file. Downloads it unless `local_file` is given."""
     name = Path(remote_path).name
     rec: dict = {
         "index": index, "total": total, "name": name, "remote": remote_path,
@@ -142,11 +248,16 @@ def check_one(client: FTPClient, remote_path: str, tmpdir: Path, index: int, tot
     print(f"\n--- [{index}/{total}] {name}")
     print(f"    remote : {remote_path}")
 
-    rsize = remote_size(client, remote_path)
+    if local_file is not None:
+        rsize = None
+        local = local_file
+        print("    SIZE   : (local file - no FTP)")
+    else:
+        rsize = remote_size(client, remote_path)
+        print(f"    SIZE   : {rsize if rsize is not None else 'unsupported'}")
+        local = raw_download(client, remote_path, tmpdir / f"a_{name}")
     rec["remote_size"] = rsize
-    print(f"    SIZE   : {rsize if rsize is not None else 'unsupported'}")
 
-    local = raw_download(client, remote_path, tmpdir / f"a_{name}")
     lsize = local.stat().st_size
     hash_a = sha256_of(local)
     rec["local_size"] = lsize
@@ -157,9 +268,13 @@ def check_one(client: FTPClient, remote_path: str, tmpdir: Path, index: int, tot
         print(f"    [!] SIZE mismatch: server {rsize} vs local {lsize} "
               f"(diff {lsize - rsize:+d}) -> transfer is truncated/padded")
 
+    def discard(p: Path) -> None:
+        if local_file is None:  # never delete a file the user pointed us at
+            p.unlink(missing_ok=True)
+
     if not name.lower().endswith(".gz"):
         print("    gunzip : not gzip, skipped")
-        local.unlink()
+        discard(local)
         return rec
 
     trailer = gz_trailer(local)
@@ -175,24 +290,34 @@ def check_one(client: FTPClient, remote_path: str, tmpdir: Path, index: int, tot
               f"(decompressed mod 2^32 = {nbytes & 0xFFFFFFFF})")
 
     if verdict == "OK":
-        local.unlink()
+        discard(local)
         return rec
 
     rec["ok"] = False
 
-    # How much of the payload actually survives if the CRC check is ignored?
+    # How much of the FIRST member survives if the CRC check is ignored?
     inflated, stream_state = raw_inflate_size(local)
     rec["inflated"] = inflated
     rec["stream_state"] = stream_state
-    print(f"    ignoring CRC: {inflated} bytes recovered ({stream_state})")
-    if stream_state != "deflate stream intact":
-        print("    -> the stream does not reach its end marker, so the last 8 bytes "
-              "are not a real trailer: bytes are MISSING from the file")
-    elif trailer and inflated == trailer[1]:
-        print("    -> length matches ISIZE: payload is complete, only its content "
-              "(or the stored CRC) is wrong")
-    elif trailer:
-        print(f"    -> length does NOT match ISIZE ({trailer[1]}): data is missing")
+    print(f"    ignoring CRC: {inflated} bytes recovered from member #1 ({stream_state})")
+
+    # Per-member walk: a whole-file check stops at the first bad member and
+    # cannot tell how many members there are or how much data follows.
+    members = walk_members(local)
+    rec["members"] = members
+    print_members(members)
+
+    if keep_dir is not None and local_file is None:
+        keep_dir.mkdir(parents=True, exist_ok=True)
+        kept = keep_dir / name
+        shutil.copy(local, kept)
+        rec["kept"] = str(kept)
+        print(f"    kept   : {kept}")
+
+    if local_file is not None:
+        rec["verdict"] = "LOCAL FILE - no second download, transfer not re-tested"
+        print(f"    VERDICT: {rec['verdict']}")
+        return rec
 
     # Second download to separate source corruption from transport corruption.
     print("    [!] failed - re-downloading to compare...")
@@ -211,8 +336,8 @@ def check_one(client: FTPClient, remote_path: str, tmpdir: Path, index: int, tot
         print(f"    2nd gunzip: {verdict_b} ({nbytes_b} bytes)")
     print(f"    VERDICT: {rec['verdict']}")
 
-    local.unlink()
-    local_b.unlink()
+    discard(local)
+    local_b.unlink(missing_ok=True)
     return rec
 
 
@@ -247,13 +372,21 @@ def print_summary(results: list[dict], checked: int, pending: int, listed: int) 
             print(f"  ignoring CRC  : {r['inflated']} bytes ({r.get('stream_state')})")
         if r.get("trailer"):
             crc, isize = r["trailer"]
-            intact = r.get("stream_state") == "deflate stream intact"
-            print(f"  trailer       : crc32=0x{crc:08x} isize={isize}"
-                  f"{'' if intact else '  (not a real trailer - stream truncated)'}")
-            if intact and "inflated" in r:
-                print(f"  length match  : {r['inflated'] == isize}  "
-                      f"(True = payload complete, only content/CRC wrong; "
-                      f"False = data missing)")
+            print(f"  last 8 bytes  : crc32=0x{crc:08x} isize={isize}  "
+                  f"(final member's trailer - only meaningful if the file has 1 member)")
+        if r.get("members"):
+            members = r["members"]
+            bad_m = [m for m in members if not m.get("ok")]
+            out_total = sum(m.get("out_size") or 0 for m in members)
+            print(f"  gzip members  : {len(members)}  ({len(bad_m)} bad)")
+            print(f"  decompressed  : {out_total} bytes across all members")
+            for m in members:
+                mark = "ok " if m.get("ok") else "BAD"
+                print(f"    [{mark}] #{m['index']} off={m['offset']} "
+                      f"comp={m.get('comp_size', '?')} out={m.get('out_size', '?')}"
+                      + (f" crc stored=0x{m['crc_stored']:08x} calc=0x{m['crc_calc']:08x}"
+                         f" isize={m['isize_stored']}" if "crc_stored" in m else "")
+                      + ("" if m.get("ok") else f"  <- {m['state']}"))
         if r.get("gunzip_b"):
             print(f"  2nd gunzip    : {r['gunzip_b']} ({r.get('output_size_b')} bytes)")
         print(f"  VERDICT       : {r['verdict']}")
@@ -274,7 +407,16 @@ def main() -> int:
     ap.add_argument("--limit", type=int, default=None, help="Max files to check")
     ap.add_argument("--all", action="store_true",
                     help="Include files already recorded in sync_history.json")
+    ap.add_argument("--local", type=Path, default=None,
+                    help="Inspect an already-downloaded .gz file; no FTP connection")
+    ap.add_argument("--keep", type=Path, default=None,
+                    help="Copy every failing download into this directory for re-inspection")
     args = ap.parse_args()
+
+    if args.local:
+        rec = check_one(None, str(args.local), Path("."), 1, 1, local_file=args.local)
+        print_summary([rec], checked=1, pending=1, listed=1)
+        return 1 if not rec["ok"] else 0
 
     config = Config.load(args.config)
     sync_manager = SyncManager(config.storage.data_dir / "sync_history.json")
@@ -311,7 +453,8 @@ def main() -> int:
         results = []
         for i, remote_path in enumerate(candidates, start=1):
             try:
-                results.append(check_one(client, remote_path, tmpdir, i, pending))
+                results.append(check_one(client, remote_path, tmpdir, i, pending,
+                                        keep_dir=args.keep))
             except Exception as e:  # keep going - that is the whole point
                 print(f"    [!] {type(e).__name__}: {e}")
                 results.append({
