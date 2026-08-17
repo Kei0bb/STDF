@@ -173,6 +173,35 @@ def walk_members(path: Path) -> list[dict]:
     return members
 
 
+def find_gzip_headers(path: Path, cap: int = 32) -> list[int]:
+    """Offsets that look like the start of a gzip member.
+
+    Distinguishes "one member that broke internally" (magic only at offset 0)
+    from "two uploads spliced together" (a second plausible header further in).
+    Requires magic + CM=8 (deflate) + no reserved FLG bits, which makes a false
+    positive inside compressed data unlikely but not impossible.
+    """
+    hits: list[int] = []
+    overlap = b""
+    buf_start = 0  # absolute offset of overlap[0]
+    with open(path, "rb") as f:
+        while chunk := f.read(1 << 20):
+            buf = overlap + chunk
+            start = 0
+            while (i := buf.find(b"\x1f\x8b\x08", start)) != -1:
+                # A full match needs the FLG byte too, so a hit inside the
+                # 3-byte overlap can never have been reported already.
+                if i + 4 <= len(buf) and not (buf[i + 3] & 0xE0):
+                    hits.append(buf_start + i)
+                    if len(hits) >= cap:
+                        return hits
+                start = i + 1
+            keep = min(3, len(buf))
+            overlap = buf[len(buf) - keep:]
+            buf_start += len(buf) - keep
+    return hits
+
+
 def print_members(members: list[dict]) -> None:
     print(f"    gzip members : {len(members)}")
     total_out = 0
@@ -228,6 +257,44 @@ def remote_size(client: FTPClient, remote_path: str) -> int | None:
         return client._ftp.size(remote_path)
     except Exception:
         return None
+
+
+def interpret(rec: dict, file_size: int) -> list[str]:
+    """Turn the raw measurements into a plain statement of what is wrong."""
+    out: list[str] = []
+    members = rec.get("members") or []
+    headers = rec.get("header_offsets") or []
+    trailer = rec.get("trailer")
+    consumed = sum(m.get("comp_size") or 0 for m in members)
+    reached = sum(m.get("out_size") or 0 for m in members)
+
+    spliced = [h for h in headers if h != 0]
+    if len(members) == 1 and members[0].get("ok"):
+        return ["single healthy member"]
+
+    if spliced:
+        out.append(f"a second gzip header exists at offset {spliced[0]} -> the file looks "
+                   f"SPLICED (two uploads concatenated / a failed resume), not merely corrupt")
+    elif headers == [0]:
+        out.append("only one gzip header, at offset 0 -> this is a SINGLE-member file "
+                   "that broke internally; it was never a concatenation of members")
+
+    if consumed and consumed < file_size:
+        pct = 100.0 * consumed / file_size
+        out.append(f"the deflate stream stops after {consumed} of {file_size} bytes "
+                   f"({pct:.1f}% of the file); corruption made the decoder see a false "
+                   f"end-of-stream, and the remaining {file_size - consumed} bytes are "
+                   f"unreachable")
+
+    if trailer and headers == [0]:
+        true_isize = trailer[1]
+        if true_isize > reached:
+            pct = 100.0 * reached / true_isize
+            out.append(f"the file's real trailer says the payload should be {true_isize} "
+                       f"bytes; only {reached} bytes ({pct:.1f}%) can be decompressed "
+                       f"-> NOT salvageable, the file must be re-exported at the source")
+
+    return out or ["no clear interpretation - inspect the member table above"]
 
 
 SOURCE_BAD = ("SOURCE_BAD: identical bytes both times -> the file ON THE SERVER is bad. "
@@ -306,6 +373,14 @@ def check_one(client: FTPClient | None, remote_path: str, tmpdir: Path,
     members = walk_members(local)
     rec["members"] = members
     print_members(members)
+
+    headers = find_gzip_headers(local)
+    rec["header_offsets"] = headers
+    print(f"    gzip headers found at: {headers if headers else 'none'}")
+
+    rec["interpretation"] = interpret(rec, lsize)
+    for line in rec["interpretation"]:
+        print(f"    => {line}")
 
     if keep_dir is not None and local_file is None:
         keep_dir.mkdir(parents=True, exist_ok=True)
@@ -387,6 +462,10 @@ def print_summary(results: list[dict], checked: int, pending: int, listed: int) 
                       + (f" crc stored=0x{m['crc_stored']:08x} calc=0x{m['crc_calc']:08x}"
                          f" isize={m['isize_stored']}" if "crc_stored" in m else "")
                       + ("" if m.get("ok") else f"  <- {m['state']}"))
+        if "header_offsets" in r:
+            print(f"  gzip headers  : {r['header_offsets'] or 'none'}")
+        for line in r.get("interpretation", []):
+            print(f"  => {line}")
         if r.get("gunzip_b"):
             print(f"  2nd gunzip    : {r['gunzip_b']} ({r.get('output_size_b')} bytes)")
         print(f"  VERDICT       : {r['verdict']}")
