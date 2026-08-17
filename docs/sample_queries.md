@@ -836,6 +836,9 @@ WITH params AS (
            'CP1'                  AS sub_process,     -- 必ず指定
            CAST(1.33 AS DOUBLE)   AS target_cpk,
            30                     AS min_n,             -- これ未満は LOW_SAMPLE
+           -- 最も外れた 1 点を除いたときに新リミットが動いてよい量（σ 単位）。
+           -- これを超えると DRIVEN_BY_1PT。下記「1 点 outlier の影響」参照
+           CAST(0.3 AS DOUBLE)    AS max_1pt_shift,
            -- テスト名のあいまい検索。ILIKE なので大文字小文字を区別しない。
            -- 例 CAST('%IDD%' AS VARCHAR) / NULL なら全テスト
            CAST(NULL AS VARCHAR)  AS test_name_like,
@@ -942,11 +945,22 @@ candidate AS (
            ll.lot_id   AS ref_lot_id,
            ll.job_name AS latest_job_name,
            ll.job_rev  AS latest_job_rev,
-           pa.target_cpk, pa.min_n,
+           pa.target_cpk, pa.min_n, pa.max_1pt_shift,
            s.mean - 3.0 * pa.target_cpk * s.sigma AS new_lsl_exact,
-           s.mean + 3.0 * pa.target_cpk * s.sigma AS new_usl_exact
+           s.mean + 3.0 * pa.target_cpk * s.sigma AS new_usl_exact,
+           -- 最も外れた 1 点（max / min）を除いた mean / σ。
+           -- SS_excl = SS_all - n/(n-1) * (x_out - mean)^2 の恒等式で、既存の
+           -- 集約値だけから厳密に復元できる（追加スキャンなし = コスト 0）
+           (s.n * s.mean - s.max_val) / (s.n - 1) AS mean_excl_hi,
+           (s.n * s.mean - s.min_val) / (s.n - 1) AS mean_excl_lo,
+           SQRT(GREATEST(0, ((s.n - 1) * s.sigma * s.sigma
+                    - (s.n::DOUBLE / (s.n - 1)) * POW(s.max_val - s.mean, 2))
+                   / NULLIF(s.n - 2, 0))) AS sigma_excl_hi,
+           SQRT(GREATEST(0, ((s.n - 1) * s.sigma * s.sigma
+                    - (s.n::DOUBLE / (s.n - 1)) * POW(s.min_val - s.mean, 2))
+                   / NULLIF(s.n - 2, 0))) AS sigma_excl_lo
     FROM stats s
-    CROSS JOIN (SELECT target_cpk, min_n FROM params) pa
+    CROSS JOIN (SELECT target_cpk, min_n, max_1pt_shift FROM params) pa
     CROSS JOIN latest_lot ll
     LEFT JOIN current_spec cs USING (test_num)
     WHERE s.sigma IS NOT NULL AND isfinite(s.sigma) AND s.sigma > 0
@@ -958,7 +972,14 @@ rounded AS (
                      * POW(10, FLOOR(LOG10(ABS(new_lsl_exact))) - 2) END AS new_lsl,
            CASE WHEN new_usl_exact = 0 THEN 0 ELSE
                 CEIL(new_usl_exact / POW(10, FLOOR(LOG10(ABS(new_usl_exact))) - 2))
-                     * POW(10, FLOOR(LOG10(ABS(new_usl_exact))) - 2) END AS new_usl
+                     * POW(10, FLOOR(LOG10(ABS(new_usl_exact))) - 2) END AS new_usl,
+           -- 1 点除去でリミット候補が動く量（σ 単位。緩む / 締まるどちらも正）
+           GREATEST(
+               ABS((c.mean_excl_hi + 3.0 * c.target_cpk * c.sigma_excl_hi)
+                   - c.new_usl_exact) / NULLIF(c.sigma_excl_hi, 0),
+               ABS((c.mean_excl_lo - 3.0 * c.target_cpk * c.sigma_excl_lo)
+                   - c.new_lsl_exact) / NULLIF(c.sigma_excl_lo, 0)
+           ) AS spec_shift_1pt
     FROM candidate c
 )
 
@@ -975,6 +996,8 @@ SELECT
     ROUND(sigma, 6)   AS sigma,
     ROUND(min_val, 6) AS min_val,
     ROUND(max_val, 6) AS max_val,
+    -- 最外 1 点を除くと新リミットが何 σ 動くか（1 点 outlier への依存度）
+    ROUND(spec_shift_1pt, 3) AS spec_shift_1pt,
 
     -- 現行スペックとその出所（テストプログラム照合）
     ref_lot_id, latest_job_name, latest_job_rev,
@@ -1004,12 +1027,15 @@ SELECT
         CASE WHEN cur_lsl IS NULL            THEN 'NOT_IN_LATEST_LOT' END,
         CASE WHEN lo_limit_min <> lo_limit_max
                OR hi_limit_min <> hi_limit_max
-                                             THEN 'LIMIT_CHANGED'     END
+                                             THEN 'LIMIT_CHANGED'     END,
+        CASE WHEN spec_shift_1pt > max_1pt_shift
+                                             THEN 'DRIVEN_BY_1PT'     END
     ) AS flags
 
 FROM rounded
--- Cpk 不足のみ。全件見るならこの 1 行を削除
+-- Cpk 不足 + 1 点でスペックが動くもの。全件見るならこの 2 行を削除
 WHERE cpk_current IS NULL OR cpk_current < target_cpk
+   OR spec_shift_1pt > max_1pt_shift
 ORDER BY cpk_current NULLS LAST, test_num;
 ```
 
@@ -1024,6 +1050,36 @@ ORDER BY cpk_current NULLS LAST, test_num;
 - `fail_n` / `fail_pct` はそのテスト単体の fail 件数・率です（`test_data.passed`）。
 - `LIMIT_CHANGED` → そのテストのリミットは過去に変更されています。`cur_lsl` /
   `cur_usl` は基準ロット（`ref_lot_id`、プログラム版は `latest_job_rev`）のものです。
+
+**1 点 outlier の影響（`spec_shift_1pt` / `DRIVEN_BY_1PT`）**
+
+新リミット候補は `mean ± 3 × target_cpk × σ` なので、外れた 1 点が mean / σ を汚すと
+候補値も歪みます。`spec_shift_1pt` は **最も外れた 1 点（`max_val` または `min_val`）を
+除いて計算し直したとき、リミット候補が何 σ 動くか**です。`0.000` ならその 1 点は
+スペック決定に影響していません。`DRIVEN_BY_1PT` が付いた行は、Cpk が足りていても
+出力されます（1 点で新リミットが動く = 候補値をそのまま採用できない）。
+
+- **この列は spec 内の外れ値も spec 外の外れ値も同じように扱います**。`fail_n` は
+  リミットを跨いだ点しか数えないので、リミット内側の孤立点はそちらでは見えません。
+- 影響量は n に強く依存します。実測（正規分布 + 1 点混入、300 回反復の中央値）:
+
+  | n | 正常データ（誤検出ライン p99） | 5σ の 1 点混入 | 8σ の 1 点混入 |
+  |---|---|---|---|
+  | 30 | 0.97 | **1.57** | **3.36** |
+  | 300 | 0.11 | 0.17 | 0.42 |
+  | 5,000 | 0.01 | 0.01 | 0.03 |
+  | 50,000 | 0.00 | 0.00 | 0.00 |
+
+  つまり **n が数千を超えると 8σ の 1 点でもリミット候補は動きません**（無視して
+  よい）。危険なのは `LOW_SAMPLE` と同じ行、n が小さいテストです。閾値 `max_1pt_shift`
+  の既定値 `0.3` はこの表から取っています。
+- 対数正規（リーク電流系）のように裾を引く分布では、正常データでも n=300 で p99 が
+  1.01 に達します。この場合は「1 点が悪い」のではなく**分布が正規でない**ので、
+  リミットは `min_val` / `max_val` を見て手で決めてください。
+- z スコアや IQR による外れ値フラグは入れていません。正常な正規分布でも
+  `max` の z は n とともに 2.0 → 4.2（n=30 → 50,000）と増え、Tukey フェンスは
+  片側 0.35% を構造的に外れ値と数えるため（n=50,000 で 350 点）、テスト単位の
+  判定閾値が定まらないからです。該当ダイを見たいときは 8-3 を使います。
 
 **既知の限界**
 
@@ -1057,6 +1113,9 @@ ORDER BY cpk_current NULLS LAST, test_num;
 
 | 要素 | 追加時間 | 本クエリでの扱い |
 |---|---|---|
+| 1 点除去の再計算（`spec_shift_1pt`） | ±0.00 s | **採用**（既存の集約値の算術のみ） |
+| `MEDIAN` + `MAD`（robust 外れ値判定） | +0.95 s | 不採用 |
+| `QUANTILE_CONT` × 2（IQR） | +0.48 s | 不採用 |
 | パーティション列を集約キーに含める | +0.27 s | 不採用（工程を指定して回避） |
 | `COUNT(DISTINCT ...)` × 3 | +0.44 s | 不採用（`MIN`/`MAX` で等価判定） |
 | 分位点 / skewness | +0.34 s | 不採用 |
@@ -1155,6 +1214,257 @@ ORDER BY test_num;
 
 ```sql
 COPY (/* ↑ 8-3 のクエリをそのまま貼る */) TO 'check.csv' (HEADER, DELIMITER ',');
+```
+
+**外れ値ダイの特定（8-2 の `DRIVEN_BY_1PT` の中身を見る）**
+
+上の出力を `result` でソートすれば、**先頭行と末尾行が `min_val` / `max_val` の
+該当ダイ**です（`lot_id` / `wafer_id` / `x_coord` / `y_coord` が同じ行に出ています）。
+CSV に落として Excel でソートするか、`ORDER BY td.result` に変えてください。特定の
+ウェーハの外周に固まっていればプローブ接触、ロット・ウェーハに散っていれば分布の裾
+です。
+
+### 8-4. 手直しした spec を CSV で戻して検証
+
+8-2 の新リミット候補を**手で整えた結果**を CSV で読み戻し、8-2 と同じ母集団に当てて
+影響を確認します。DuckDB が CSV を直接読めるので、コード追加は不要です。
+
+```
+8-2 → COPY で CSV 出力
+        ↓ Excel で編集（丸め / データシート整合 / DRIVEN_BY_1PT の手当て）
+      spec_review.csv  列: test_num, rev_lsl, rev_usl
+        ↓
+8-4 → 同じ母集団に当てて cpk_rev / fail 件数 / 新たに落ちるダイ数を出す
+```
+
+**手順 1 — 候補を CSV に出す**
+
+```sql
+COPY (/* ↑ 8-2 のクエリを貼る。末尾の ; は外す */)
+TO 'spec_candidate.csv' (HEADER, DELIMITER ',');
+```
+
+**手順 2 — Excel で手直し**
+
+`new_lsl` / `new_usl` を編集し、**列名を `rev_lsl` / `rev_usl` に変えて**
+`spec_review.csv` として保存します。読み込むのは次の 3 列だけです。
+
+| 列名 | 型 | 内容 |
+|---|---|---|
+| `test_num` | 整数 | 8-2 の `test_num`。ここで突合する |
+| `rev_lsl` | 数値 | 手直し後の下限 |
+| `rev_usl` | 数値 | 手直し後の上限 |
+
+`spec_review.csv` の中身（最小形）:
+
+```csv
+test_num,rev_lsl,rev_usl
+1001,0.35,0.75
+1002,38.4,569.0
+1003,-1.06,-0.02
+```
+
+8-2 の出力をそのまま残して `new_lsl` / `new_usl` の**列名だけ**変えた形でも動きます
+（余分な列は無視されます）:
+
+```csv
+test_num,test_name,units,n,cur_lsl,cur_usl,rev_lsl,rev_usl,flags
+1001,Vth_N,V,4150,0.3,0.8,0.35,0.75,
+1002,Idsat_N,UA,4150,200.0,400.0,38.4,569.0,
+```
+
+> [!IMPORTANT]
+> - 保存形式は **「CSV UTF-8」**。Shift-JIS のままだと `test_name` が化けます。
+> - **列名は小文字で完全一致**（`rev_lsl` / `rev_usl` / `test_num`）。`REV_LSL` や
+>   `rev lsl` は認識されません。
+> - `test_num` が指数表記（`1.23E+05`）にならないよう、セル書式は数値のままに。
+> - **行を削れば「その test_num は検証対象外」**になり、`MISSING_IN_CSV` が付きます。
+>   セルを空にした場合も同じ扱いです（`NULL` として読まれます）。
+> - **同じ `test_num` の行を重複させないこと。** 重複していると `DUP_IN_CSV` が付き、
+>   `rev_lsl` / `rev_usl` はそのうち 1 行が任意に採用されます。
+> - `read_csv` のパスは DuckDB プロセスの作業ディレクトリ基準です。確実にするなら
+>   絶対パス（Windows は `'C:/work/spec_review.csv'`、区切りは `/` でも動きます）。
+
+**手順 3 — 検証**
+
+`params` は **8-2 と同じ値を入れてください**（母集団が変わると数字の意味が変わります）。
+`read_csv` のパスは定数でなければならないので、そこだけ直接書き換えます。
+
+```sql
+WITH params AS (
+    SELECT 'YOUR_PRODUCT'         AS product,
+           'CP'                   AS test_category,
+           'CP1'                  AS sub_process,
+           CAST(1.33 AS DOUBLE)   AS target_cpk,
+           CAST(NULL AS VARCHAR)  AS test_name_like,
+           CAST(NULL AS VARCHAR)  AS job_name,
+           CAST(NULL AS VARCHAR)  AS job_rev,
+           CAST(NULL AS VARCHAR)  AS exclude_lot_pattern
+),
+
+-- 手直し後のスペック。パスは定数のみ（params には入れられない）
+--   GROUP BY で test_num ごと 1 行に潰している。手編集で同じ test_num が重複すると
+--   join で母集団が二重になり n が倍になるため。重複は csv_rows > 1 = DUP_IN_CSV で出す
+review AS (
+    SELECT CAST(test_num AS BIGINT) AS test_num,
+           ANY_VALUE(CAST(rev_lsl AS DOUBLE)) AS rev_lsl,
+           ANY_VALUE(CAST(rev_usl AS DOUBLE)) AS rev_usl,
+           COUNT(*)                           AS csv_rows
+    FROM read_csv('spec_review.csv', header = true)
+    GROUP BY 1
+),
+
+-- ⓪①②③ は 8-2 と同一
+target_lots AS (
+    SELECT l.lot_id, l.job_name, l.job_rev, l.start_time
+    FROM lots l CROSS JOIN params pa
+    WHERE l.product       = pa.product
+      AND l.test_category = pa.test_category
+      AND l.sub_process   = pa.sub_process
+      AND (pa.job_name IS NULL OR l.job_name = pa.job_name)
+      AND (pa.job_rev  IS NULL OR l.job_rev  = pa.job_rev)
+      AND (pa.exclude_lot_pattern IS NULL
+           OR l.lot_id NOT LIKE pa.exclude_lot_pattern)
+),
+base AS (
+    SELECT td.test_num, td.test_name, td.units, td.result, td.passed
+    FROM test_data_final td CROSS JOIN params pa
+    WHERE td.product       = pa.product
+      AND td.test_category = pa.test_category
+      AND td.sub_process   = pa.sub_process
+      AND td.rec_type IN ('PTR', 'MPR')
+      AND td.lot_id IN (SELECT lot_id FROM target_lots)
+      AND (pa.test_name_like IS NULL OR td.test_name ILIKE pa.test_name_like)
+      AND td.result IS NOT NULL   AND isfinite(td.result)
+      AND td.lo_limit IS NOT NULL AND isfinite(td.lo_limit)
+      AND td.hi_limit IS NOT NULL AND isfinite(td.hi_limit)
+      AND td.lo_limit < td.hi_limit
+      AND regexp_matches(UPPER(TRIM(td.units)), '^.?[VA]$')
+),
+latest_lot AS (
+    SELECT lot_id FROM (
+        SELECT l.*, ROW_NUMBER() OVER (
+                   ORDER BY l.start_time DESC, l.lot_id DESC) AS rn
+        FROM target_lots l
+    ) WHERE rn = 1
+),
+current_spec AS (
+    SELECT td.test_num,
+           ANY_VALUE(td.lo_limit) AS cur_lsl,
+           ANY_VALUE(td.hi_limit) AS cur_usl
+    FROM test_data_final td CROSS JOIN params pa
+    WHERE td.product       = pa.product
+      AND td.test_category = pa.test_category
+      AND td.sub_process   = pa.sub_process
+      AND td.lot_id        = (SELECT lot_id FROM latest_lot)
+      AND td.rec_type IN ('PTR', 'MPR')
+      AND td.lo_limit IS NOT NULL AND isfinite(td.lo_limit)
+      AND td.hi_limit IS NOT NULL AND isfinite(td.hi_limit)
+      AND td.lo_limit < td.hi_limit
+    GROUP BY ALL
+),
+
+-- 手直し後リミットを同じ母集団に当てる
+agg AS (
+    SELECT b.test_num,
+           ANY_VALUE(b.test_name) AS test_name,
+           ANY_VALUE(b.units)     AS units,
+           COUNT(*)               AS n,
+           AVG(b.result)          AS mean,
+           STDDEV_SAMP(b.result)  AS sigma,
+           MIN(b.result)          AS min_val,
+           MAX(b.result)          AS max_val,
+           ANY_VALUE(cs.cur_lsl)  AS cur_lsl,
+           ANY_VALUE(cs.cur_usl)  AS cur_usl,
+           ANY_VALUE(r.rev_lsl)   AS rev_lsl,
+           ANY_VALUE(r.rev_usl)   AS rev_usl,
+           ANY_VALUE(r.csv_rows)  AS csv_rows,
+           -- 現行スペックでの fail（テスタ判定）
+           COUNT(*) FILTER (WHERE b.passed = 'F') AS fail_n_cur,
+           -- 手直し後リミットを当てたときの fail
+           COUNT(*) FILTER (WHERE b.result < r.rev_lsl
+                              OR b.result > r.rev_usl) AS fail_n_rev,
+           -- 現行では通るが手直し後は落ちる = 締めたことによる実害
+           COUNT(*) FILTER (WHERE b.result >= cs.cur_lsl AND b.result <= cs.cur_usl
+                              AND (b.result < r.rev_lsl
+                                OR b.result > r.rev_usl)) AS n_newly_fail
+    FROM base b
+    LEFT JOIN review r       USING (test_num)
+    LEFT JOIN current_spec cs USING (test_num)
+    GROUP BY b.test_num
+),
+judged AS (
+    SELECT a.* EXCLUDE (fail_n_rev, n_newly_fail), pa.target_cpk,
+           -- CSV に無いテストは 0 件ではなく NULL（「影響なし」と誤読しないため）
+           CASE WHEN a.rev_lsl IS NULL OR a.rev_usl IS NULL
+                THEN NULL ELSE a.fail_n_rev   END AS fail_n_rev,
+           CASE WHEN a.rev_lsl IS NULL OR a.rev_usl IS NULL
+                THEN NULL ELSE a.n_newly_fail END AS n_newly_fail,
+           LEAST((a.rev_usl - a.mean) / (3 * a.sigma),
+                 (a.mean - a.rev_lsl) / (3 * a.sigma)) AS cpk_rev
+    FROM agg a CROSS JOIN (SELECT target_cpk FROM params) pa
+)
+
+SELECT
+    test_num, test_name, units, n,
+    ROUND(mean, 6)    AS mean,
+    ROUND(sigma, 6)   AS sigma,
+    ROUND(min_val, 6) AS min_val,
+    ROUND(max_val, 6) AS max_val,
+    cur_lsl, cur_usl,
+    rev_lsl, rev_usl,
+    ROUND(cpk_rev, 3) AS cpk_rev,
+    fail_n_cur, fail_n_rev, n_newly_fail,
+    ROUND(1000000.0 * fail_n_rev / NULLIF(n, 0), 1) AS fail_ppm_rev,
+    CONCAT_WS(',',
+        CASE WHEN rev_lsl IS NULL OR rev_usl IS NULL THEN 'MISSING_IN_CSV'   END,
+        CASE WHEN csv_rows > 1                       THEN 'DUP_IN_CSV'       END,
+        CASE WHEN rev_lsl >= rev_usl                 THEN 'INVERTED'         END,
+        CASE WHEN min_val < rev_lsl
+               OR max_val > rev_usl                  THEN 'OUTSIDE_MEASURED' END,
+        CASE WHEN cpk_rev < target_cpk               THEN 'CPK_SHORT'        END
+    ) AS flags
+FROM judged
+ORDER BY n_newly_fail DESC, cpk_rev NULLS FIRST, test_num;
+```
+
+**読み方**
+
+- `n_newly_fail` — 現行スペックでは通っていたのに手直し後リミットでは落ちるダイ数。
+  **締めたときの歩留り影響そのもの**なので、降順に並べています。`0` なら実害なし。
+- `fail_n_rev` / `fail_ppm_rev` — 手直し後リミットを実測に当てた fail 件数・ppm。
+  `fail_n_cur`（テスタが実際に落とした数）と比べて、緩めたのか締めたのかが分かります。
+- `cpk_rev` — 手直し後リミットでの Cpk。`CPK_SHORT` は 8-2 の目的（1.33 確保）を
+  満たしていないという意味です。
+- `flags`
+  - `MISSING_IN_CSV` — 母集団にはあるが CSV に無い（手直し漏れ、または意図的に除外）。
+    このとき `fail_n_rev` / `n_newly_fail` は `0` ではなく `NULL` になります
+  - `DUP_IN_CSV` — CSV に同じ `test_num` の行が複数ある。どの値が使われたか不定なので
+    CSV を直して再実行してください
+  - `INVERTED` — `rev_lsl >= rev_usl`。Excel での編集ミス
+  - `OUTSIDE_MEASURED` — 実測の `min_val` / `max_val` が手直し後リミットの外。
+    `n_newly_fail` と合わせて、落とす気があるのか確認してください
+  - `CPK_SHORT` — `cpk_rev < target_cpk`
+
+**新たに落ちるダイの内訳**
+
+`n_newly_fail` が付いたテストについて、どのウェーハのどの座標かを見るには、8-3 の
+ダンプに同じ CSV を join します。
+
+```sql
+WITH review AS (
+    SELECT CAST(test_num AS BIGINT) AS test_num,
+           CAST(rev_lsl AS DOUBLE)  AS rev_lsl,
+           CAST(rev_usl AS DOUBLE)  AS rev_usl
+    FROM read_csv('spec_review.csv', header = true)
+)
+SELECT d.lot_id, d.wafer_id, d.x_coord, d.y_coord, d.part_txt,
+       d.test_num, d.test_name, d.result, r.rev_lsl, r.rev_usl
+FROM (/* ↑ 8-3 のクエリを貼る。末尾の ; は外す */) d
+JOIN review r USING (test_num)
+WHERE d.result BETWEEN d.lo_limit AND d.hi_limit      -- 現行では通っている
+  AND (d.result < r.rev_lsl OR d.result > r.rev_usl)  -- 手直し後は落ちる
+ORDER BY d.test_num, d.lot_id, d.wafer_id;
 ```
 
 ---
