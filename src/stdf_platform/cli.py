@@ -604,6 +604,107 @@ def _run_ingest_batch(
     return successes, failures
 
 
+_CORRUPT_DIR = "_corrupt"
+
+
+def _download_files(
+    client,
+    config,
+    sync_manager,
+    files: list[tuple[str, str, str, str]],
+    verbose: bool = False,
+) -> tuple[list[tuple[str, Path, str, str]], list[tuple[str, str]]]:
+    """Download every candidate, surviving files that turn out to be corrupt.
+
+    A .gz whose stream is broken at the source cannot be recovered by retrying,
+    so it is moved to downloads/_corrupt/ and recorded in the sync history -
+    otherwise it is re-downloaded on every run. One bad file must never stop
+    the files behind it from being fetched.
+
+    Returns (downloaded, corrupt, failed):
+      downloaded - (remote_path, local_path, product, test_type)
+      corrupt    - (remote_path, error) quarantined, never retried automatically
+      failed     - (remote_path, error) transient, retried on the next run
+    """
+    from rich.progress import BarColumn
+
+    from .ftp_client import CorruptDownloadError
+
+    downloaded: list[tuple[str, Path, str, str]] = []
+    corrupt: list[tuple[str, str]] = []
+    failed: list[tuple[str, str]] = []
+    if not files:
+        return downloaded, corrupt, failed
+
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        TextColumn("{task.completed}/{task.total}"),
+        console=console,
+    ) as progress:
+        dl_task = progress.add_task("Downloading...", total=len(files))
+
+        for remote_path, prod, ttype, filename in files:
+            # Create subdirectory structure: downloads/product/test_type/
+            local_dir = config.storage.download_dir / prod / ttype
+            try:
+                local_file = client.download_file(remote_path, local_dir, decompress=True)
+            except CorruptDownloadError as e:
+                quarantined = _quarantine(e.compressed_path, config)
+                sync_manager.mark_corrupt(
+                    remote_path=remote_path,
+                    product=prod,
+                    test_type=ttype,
+                    error=e.reason,
+                    quarantine_path=quarantined,
+                )
+                corrupt.append((remote_path, e.reason))
+                progress.update(dl_task, advance=1, description=f"Corrupt {filename}")
+                if verbose:
+                    console.print(f"  [red]![/red] {filename}: {e.reason}")
+                continue
+            except Exception as e:
+                # Anything else (network drop, disk full) is not the file's
+                # fault: leave it unrecorded so the next run retries it.
+                failed.append((remote_path, f"{type(e).__name__}: {e}"))
+                progress.update(dl_task, advance=1, description=f"Failed {filename}")
+                if verbose:
+                    console.print(f"  [red]![/red] {filename}: {type(e).__name__}: {e}")
+                continue
+
+            # Track in sync history
+            sync_manager.mark_downloaded(
+                remote_path=remote_path,
+                local_path=local_file,
+                product=prod,
+                test_type=ttype,
+            )
+            # A --retry-corrupt run that succeeds clears the quarantine record.
+            if sync_manager.is_corrupt(remote_path):
+                sync_manager.clear_corrupt(remote_path)
+
+            downloaded.append((remote_path, local_file, prod, ttype))
+            progress.update(dl_task, advance=1, description=f"Downloaded {filename}")
+
+    return downloaded, corrupt, failed
+
+
+def _quarantine(compressed_path: Path | None, config) -> Path | None:
+    """Move a corrupt download out of the ingest path, keeping it for analysis."""
+    if compressed_path is None or not compressed_path.exists():
+        return None
+    dest_dir = config.storage.download_dir / _CORRUPT_DIR
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest = dest_dir / compressed_path.name
+    try:
+        shutil.move(str(compressed_path), str(dest))
+    except OSError:
+        compressed_path.unlink(missing_ok=True)
+        return None
+    return dest
+
+
 @main.command()
 @click.option("--product", "-p", multiple=True, help="Product filter (can specify multiple)")
 @click.option("--test-type", "-t", multiple=True, help="Test type filter (CP, FT)")
@@ -612,9 +713,10 @@ def _run_ingest_batch(
 @click.option("--cleanup/--no-cleanup", default=True, help="Delete source files after successful ingest")
 @click.option("--force", "-f", is_flag=True, help="Force re-download even if file exists")
 @click.option("--reingest", is_flag=True, help="Re-ingest downloaded files (skip FTP download)")
+@click.option("--retry-corrupt", is_flag=True, help="Retry files previously quarantined as corrupt")
 @click.option("--verbose", "-v", is_flag=True, help="Verbose output")
 @click.pass_context
-def fetch(ctx, product: tuple, test_type: tuple, limit: int | None, ingest: bool, cleanup: bool, force: bool, reingest: bool, verbose: bool):
+def fetch(ctx, product: tuple, test_type: tuple, limit: int | None, ingest: bool, cleanup: bool, force: bool, reingest: bool, retry_corrupt: bool, verbose: bool):
     """
     Fetch STDF files from FTP server with incremental sync.
 
@@ -721,6 +823,22 @@ def fetch(ctx, product: tuple, test_type: tuple, limit: int | None, ingest: bool
                     console.print(f"  [dim]Skipping {skipped} already downloaded files[/dim]")
                 files = new_files
 
+            # Filter out files quarantined as unrecoverable. Retrying them only
+            # re-downloads the same broken bytes; they need a re-export first.
+            if not retry_corrupt:
+                kept = [(f, p, t, n) for f, p, t, n in files if not sync_manager.is_corrupt(f)]
+                quarantined = len(files) - len(kept)
+                if quarantined > 0:
+                    console.print(
+                        f"  [yellow]Skipping {quarantined} file(s) quarantined as corrupt[/yellow] "
+                        f"[dim](re-export at the source, then --retry-corrupt)[/dim]"
+                    )
+                    for entry in sync_manager.get_corrupt():
+                        console.print(
+                            f"    [dim]• {Path(entry['remote_path']).name} - {entry['error']}[/dim]"
+                        )
+                files = kept
+
             if limit:
                 files = files[:limit]
 
@@ -731,36 +849,27 @@ def fetch(ctx, product: tuple, test_type: tuple, limit: int | None, ingest: bool
             console.print(f"  Files to download: {len(files)}")
             console.print()
 
-            from rich.progress import BarColumn
-
-            downloaded = []
-            if files:
-                with Progress(
-                    SpinnerColumn(),
-                    TextColumn("[progress.description]{task.description}"),
-                    BarColumn(),
-                    TextColumn("{task.completed}/{task.total}"),
-                    console=console,
-                ) as progress:
-                    dl_task = progress.add_task("Downloading...", total=len(files))
-
-                    for remote_path, prod, ttype, filename in files:
-                        # Create subdirectory structure: downloads/product/test_type/
-                        local_dir = config.storage.download_dir / prod / ttype
-                        local_file = client.download_file(remote_path, local_dir, decompress=True)
-
-                        # Track in sync history
-                        sync_manager.mark_downloaded(
-                            remote_path=remote_path,
-                            local_path=local_file,
-                            product=prod,
-                            test_type=ttype,
-                        )
-
-                        downloaded.append((remote_path, local_file, prod, ttype))
-                        progress.update(dl_task, advance=1, description=f"Downloaded {filename}")
+            downloaded, corrupt, failed = _download_files(
+                client, config, sync_manager, files, verbose=verbose
+            )
 
         console.print(f"\n[green]✓[/green] Downloaded {len(downloaded)} files")
+        if corrupt:
+            console.print(
+                f"[red]![/red] {len(corrupt)} file(s) could not be decompressed and were "
+                f"quarantined in {config.storage.download_dir / _CORRUPT_DIR}"
+            )
+            for remote_path, error in corrupt:
+                console.print(f"    [red]•[/red] {Path(remote_path).name} - {error}")
+            console.print(
+                "  [dim]These are skipped from now on. Ask the source to re-export them, "
+                "then run `stdf fetch --retry-corrupt`.[/dim]"
+            )
+        if failed:
+            console.print(f"[yellow]![/yellow] {len(failed)} file(s) failed to download "
+                          f"(will retry on the next run)")
+            for remote_path, error in failed:
+                console.print(f"    [yellow]•[/yellow] {Path(remote_path).name} - {error}")
 
         # Auto-ingest if enabled
         if ingest:
@@ -780,6 +889,11 @@ def fetch(ctx, product: tuple, test_type: tuple, limit: int | None, ingest: bool
                 _run_ingest_batch(config, sync_manager, to_ingest, cleanup, verbose)
             else:
                 console.print("\n[dim]No files to ingest[/dim]")
+
+        # Everything else has been fetched and ingested; still exit non-zero so
+        # the nightly task reports the bad files instead of hiding them.
+        if corrupt or failed:
+            sys.exit(1)
 
     except Exception as e:
         console.print(f"[red]Error:[/red] {e}")

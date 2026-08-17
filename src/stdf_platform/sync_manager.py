@@ -19,7 +19,7 @@ class SyncManager:
             history_file: Path to JSON history file
         """
         self.history_file = history_file
-        self._history: dict = {"files": {}}
+        self._history: dict = {"files": {}, "corrupt": {}}
         self._load()
 
     def _load(self) -> None:
@@ -29,7 +29,10 @@ class SyncManager:
                 with open(self.history_file, "r", encoding="utf-8") as f:
                     self._history = json.load(f)
             except (json.JSONDecodeError, IOError):
-                self._history = {"files": {}}
+                self._history = {"files": {}, "corrupt": {}}
+        # "corrupt" was added later; histories written before then lack it.
+        self._history.setdefault("files", {})
+        self._history.setdefault("corrupt", {})
 
     def _save(self) -> None:
         """Save history atomically."""
@@ -108,3 +111,53 @@ class SyncManager:
     def get_downloaded_count(self) -> int:
         """Get count of downloaded files."""
         return len(self._history["files"])
+
+    # ── corrupt (unrecoverable) files ─────────────────────────────────────
+    #
+    # A file whose gzip stream is broken at the source can never be recovered
+    # by re-downloading. Without a record of that, `fetch` retries it on every
+    # run and - since it used to abort the run - blocked every file behind it.
+
+    def is_corrupt(self, remote_path: str) -> bool:
+        """Check if a file was quarantined as unrecoverable."""
+        return remote_path in self._history["corrupt"]
+
+    def mark_corrupt(
+        self,
+        remote_path: str,
+        product: str,
+        test_type: str,
+        error: str,
+        quarantine_path: Optional[Path] = None,
+    ) -> None:
+        """Record a file as unrecoverable so later runs skip it.
+
+        Reversible via `clear_corrupt()` - the source is expected to re-export
+        the file to the same remote path once the problem is fixed.
+        """
+        self._history["corrupt"][remote_path] = {
+            "product": product,
+            "test_type": test_type,
+            "error": error,
+            "quarantine_path": str(quarantine_path) if quarantine_path else None,
+            "detected_at": datetime.now().isoformat(),
+        }
+        self._save()
+
+    def get_corrupt(self) -> list[dict]:
+        """List quarantined files, each entry including its remote_path."""
+        return [
+            {"remote_path": remote_path, **entry}
+            for remote_path, entry in self._history["corrupt"].items()
+        ]
+
+    def clear_corrupt(self, remote_path: Optional[str] = None) -> int:
+        """Forget quarantined files so they are retried. Returns the count cleared."""
+        if remote_path is None:
+            cleared = len(self._history["corrupt"])
+            self._history["corrupt"] = {}
+        else:
+            cleared = 1 if self._history["corrupt"].pop(remote_path, None) else 0
+        if cleared:
+            self._save()
+        return cleared

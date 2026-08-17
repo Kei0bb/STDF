@@ -4,10 +4,25 @@ import ftplib
 import gzip
 import shutil
 import fnmatch
+import zlib
 from pathlib import Path
 from typing import Generator
 
 from .config import FTPConfig
+
+
+class CorruptDownloadError(Exception):
+    """A downloaded file could not be decompressed.
+
+    Carries the remote path so the caller can quarantine the file and record it
+    in the sync history instead of aborting the whole run.
+    """
+
+    def __init__(self, remote_path: str, reason: str, compressed_path: Path | None = None):
+        super().__init__(f"{Path(remote_path).name}: {reason}")
+        self.remote_path = remote_path
+        self.reason = reason
+        self.compressed_path = compressed_path
 
 
 class FTPClient:
@@ -164,9 +179,17 @@ class FTPClient:
         if decompress and filename.endswith(".gz"):
             decompressed_path = local_dir / filename[:-3]
 
-            with gzip.open(local_path, "rb") as f_in:
-                with open(decompressed_path, "wb") as f_out:
-                    shutil.copyfileobj(f_in, f_out)
+            try:
+                with gzip.open(local_path, "rb") as f_in:
+                    with open(decompressed_path, "wb") as f_out:
+                        shutil.copyfileobj(f_in, f_out)
+            except (gzip.BadGzipFile, EOFError, zlib.error) as e:
+                # Never leave the half-written .stdf behind: it looks like a
+                # complete file to `ingest-all` and would be ingested silently.
+                decompressed_path.unlink(missing_ok=True)
+                raise CorruptDownloadError(
+                    remote_path, f"{type(e).__name__}: {e}", compressed_path=local_path
+                ) from e
 
             # Remove compressed file
             local_path.unlink()
