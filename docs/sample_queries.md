@@ -1001,7 +1001,11 @@ SELECT
 
     -- 現行スペックとその出所（テストプログラム照合）
     ref_lot_id, latest_job_name, latest_job_rev,
-    cur_lsl, cur_usl,
+    -- STDF の限界値は元が 32bit float のため、DOUBLE に上がると
+    -- 0.019999999999995529 のような表示になることがある。丸めは表示用のみ
+    -- （cp_current / cpk_current は元の精度のまま計算している）
+    ROUND(cur_lsl, 6) AS cur_lsl,
+    ROUND(cur_usl, 6) AS cur_usl,
     (lo_limit_min <> lo_limit_max
      OR hi_limit_min <> hi_limit_max) AS limits_changed,
     ROUND((cur_usl - cur_lsl) / (6 * sigma), 3) AS cp_current,
@@ -1411,7 +1415,8 @@ SELECT
     ROUND(sigma, 6)   AS sigma,
     ROUND(min_val, 6) AS min_val,
     ROUND(max_val, 6) AS max_val,
-    cur_lsl, cur_usl,
+    ROUND(cur_lsl, 6) AS cur_lsl,
+    ROUND(cur_usl, 6) AS cur_usl,
     rev_lsl, rev_usl,
     ROUND(cpk_rev, 3) AS cpk_rev,
     fail_n_cur, fail_n_rev, n_newly_fail,
@@ -1465,6 +1470,115 @@ JOIN review r USING (test_num)
 WHERE d.result BETWEEN d.lo_limit AND d.hi_limit      -- 現行では通っている
   AND (d.result < r.rev_lsl OR d.result > r.rev_usl)  -- 手直し後は落ちる
 ORDER BY d.test_num, d.lot_id, d.wafer_id;
+```
+
+### 8-5. 確認用 — CSV のテスト名リストで生データをまとめて取得
+
+8-3 は 1 パターンずつしか絞れませんが、こちらは **CSV に列挙した複数の `test_name`**
+をまとめて対象にします。8-2 / 8-4 の出力 CSV（`test_name` 列がある）をそのまま
+使い回せます。母集団の条件（`params` / `target_lots` / `base` 相当）は 8-2 / 8-3 と
+同じです。
+
+> [!WARNING]
+> 母集団は測定 1 行 = 1 レコードです。CSV に挙げるテスト数が多いほど行数が増えます。
+> 件数が多いときは `COPY (...) TO 'check.csv' (HEADER)` で CSV に落としてください。
+
+**入力 CSV（`test_list.csv`）の形式**
+
+読むのは `test_name` 列だけです。他の列（8-2 / 8-4 の出力ならそのまま）があっても
+無視されます。
+
+```csv
+test_name
+Vth_N
+Idsat_N
+Leakage
+```
+
+> [!IMPORTANT]
+> - `test_name` は**完全一致**です（8-3 の `ILIKE` のようなあいまい検索はしません）。
+>   `test_data_final.test_name` の表記と 1 文字でも違うと拾えません。8-2 の出力
+>   CSV から `test_name` 列をそのまま持ってくるのが確実です。
+> - 保存形式は「CSV UTF-8」、列名は小文字で完全一致。
+
+```sql
+WITH params AS (
+    SELECT 'YOUR_PRODUCT'         AS product,
+           'CP'                   AS test_category,
+           'CP1'                  AS sub_process,
+           CAST(NULL AS VARCHAR)  AS job_name,
+           CAST(NULL AS VARCHAR)  AS job_rev,
+           CAST(NULL AS VARCHAR)  AS exclude_lot_pattern
+),
+
+-- ⓪ 対象ロット（8-2 / 8-3 と同じ）
+target_lots AS (
+    SELECT l.lot_id, l.job_name, l.job_rev, l.start_time
+    FROM lots l CROSS JOIN params pa
+    WHERE l.product       = pa.product
+      AND l.test_category = pa.test_category
+      AND l.sub_process   = pa.sub_process
+      AND (pa.job_name IS NULL OR l.job_name = pa.job_name)
+      AND (pa.job_rev  IS NULL OR l.job_rev  = pa.job_rev)
+      AND (pa.exclude_lot_pattern IS NULL
+           OR l.lot_id NOT LIKE pa.exclude_lot_pattern)
+),
+
+-- 対象テスト名（重複除去）。パスは定数のみ
+test_list AS (
+    SELECT DISTINCT test_name FROM read_csv('test_list.csv', header = true)
+)
+
+-- ① 母集団（8-2 の base と同じ条件。test_name_like の代わりに CSV の IN で絞る）
+SELECT
+    td.lot_id,
+    td.wafer_id,
+    td.x_coord,
+    td.y_coord,
+    td.part_txt,
+    tl.job_name,
+    tl.job_rev,
+    td.test_num,
+    td.test_name,
+    td.units,
+    td.rec_type,
+    td.exec_seq,
+    td.result,
+    td.lo_limit,
+    td.hi_limit,
+    td.passed AS test_passed
+FROM test_data_final td
+JOIN target_lots tl ON tl.lot_id = td.lot_id
+CROSS JOIN params pa
+WHERE td.product       = pa.product
+  AND td.test_category = pa.test_category
+  AND td.sub_process   = pa.sub_process
+  AND td.rec_type IN ('PTR', 'MPR')
+  AND td.test_name IN (SELECT test_name FROM test_list)
+  AND td.result IS NOT NULL   AND isfinite(td.result)
+  AND td.lo_limit IS NOT NULL AND isfinite(td.lo_limit)
+  AND td.hi_limit IS NOT NULL AND isfinite(td.hi_limit)
+  AND td.lo_limit < td.hi_limit
+  AND regexp_matches(UPPER(TRIM(td.units)), '^.?[VA]$')
+ORDER BY td.test_num, td.lot_id, td.wafer_id, td.x_coord, td.y_coord, td.exec_seq;
+```
+
+CSV にあるが母集団に 1 行も無かったテスト名（表記違い・単位が V/A 系以外など）は、
+結果に含まれず**サイレントに消えます**。取りこぼしがないか確認するには:
+
+```sql
+SELECT tl.test_name
+FROM (SELECT DISTINCT test_name FROM read_csv('test_list.csv', header = true)) tl
+WHERE NOT EXISTS (
+    SELECT 1 FROM (/* ↑ 8-5 のクエリを貼る。末尾の ; は外す */) d
+    WHERE d.test_name = tl.test_name
+);
+```
+
+**CSV に落とす**
+
+```sql
+COPY (/* ↑ 8-5 のクエリをそのまま貼る */) TO 'check.csv' (HEADER, DELIMITER ',');
 ```
 
 ---
