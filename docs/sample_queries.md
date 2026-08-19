@@ -773,8 +773,8 @@ ORDER BY cpk;
 | | 8-1 | 8-2 |
 |---|---|---|
 | 母集団 | 1 ロット | 工程 × 試験プログラムで絞ったロット全部 |
-| 現行スペック | 行が持つリミットで `GROUP BY` | **別 CSV**（`test_num` + `test_name` で join） |
-| 出力 | Cp / Cpk | + 新リミット候補 / fail 件数 / プログラム版 |
+| 現行スペック | 行が持つリミットで `GROUP BY` | **別 CSV**（`test_num` で join） |
+| 出力 | Cp / Cpk | + 新リミット候補 / fail 件数 |
 
 > [!IMPORTANT]
 > **`test_category` と `sub_process` は必ず指定してください。** 省略すると CP1 と CP2 の
@@ -787,15 +787,13 @@ ORDER BY cpk;
   新リミット候補は `direction`（`LOOSEN` / `TIGHTEN` / `MIXED`）付きで出ます。
 - *「現行スペックからどれだけ動くか」* — 現行スペックは **`current_spec.csv`（別ファイル）
   から読み込みます**。データシート / 仕様書側の値を正としたいためです。突合キーは
-  `test_num` + `test_name` の 2 列で、CSV に無いものは `NOT_IN_CSV`。
+  `test_num`、`test_name` は照合用で、食い違えば `NAME_MISMATCH`（spec は消しません）。
+  CSV に無いものは `NOT_IN_CSV`。
   なお STDF に記録されたリミットが全ロットを通して変わっているかは、CSV とは独立に
   `limits_changed` / `LIMIT_CHANGED` で出します。
-- *「どのテストプログラムか」* — `lots.job_name` / `job_rev` を join し、対象ロットのうち
-  `start_time` 最大のもの（= 基準ロット）の版を `ref_lot_id` / `latest_job_name` /
-  `latest_job_rev` に出します。CSV の現行スペックがどの版に対応するかの確認用です。
-  逆に**特定のプログラム版だけを対象にしたい場合は `params` の `job_name` / `job_rev`
-  に値を入れます**（`NULL` なら工程内の全版が対象）。指定するとロット集合・基準ロットの
-  両方がその版に揃うので、プログラム改版をまたいだ母集団の混在を避けられます。
+- *「どの母集団で見るか」* — **特定のプログラム版だけを対象にしたい場合は `params` の
+  `job_name` / `job_rev` に値を入れます**（`NULL` なら工程内の全版が対象）。指定すると
+  対象ロットがその版に揃うので、プログラム改版をまたいだ母集団の混在を避けられます。
   使える値は 1-1 / 1-2 のクエリで確認してください。
 
 **データの流れ**（丸数字は SQL 中の CTE コメントに対応）
@@ -807,12 +805,11 @@ flowchart TD
     TL --> BASE
     BASE["① base<br/>対象ロットの全測定<br/>rec_type = PTR / MPR<br/>test_name ILIKE（任意）<br/>lo_limit &lt; hi_limit<br/>units = V / A 系"]
 
-    TL --> LL["② latest_lot<br/>対象ロット内で<br/>start_time 最大の 1 本<br/>= プログラム版の表示用"]
     CSVIN["current_spec.csv<br/>test_num / test_name<br/>cur_lsl / cur_usl"] --> CS["③ current_spec<br/>= 現行スペック"]
 
     BASE --> ST["④ stats<br/>キー: test_num<br/>n / mean / σ / fail 件数"]
     ST --> CAND["⑤ 新リミット候補<br/>mean ± 3 × target_cpk × σ<br/>有効数字 3 桁・緩い側へ丸め"]
-    CS -->|"test_num + test_name"| JUDGE["⑥ Cpk 判定・direction・フラグ"]
+    CS -->|"test_num"| JUDGE["⑥ Cpk 判定・direction・フラグ"]
     CAND --> JUDGE
 ```
 
@@ -820,8 +817,8 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-    S["新 LSL/USL と現行 LSL/USL を比較"] --> A{"CSV に<br/>その test_num +<br/>test_name がある?"}
-    A -->|"なし"| NB["NO_BASELINE<br/>CSV 未記載 or 名前違い<br/>→ 現行スペックとの比較不可"]
+    S["新 LSL/USL と現行 LSL/USL を比較"] --> A{"CSV に<br/>その test_num がある?"}
+    A -->|"なし"| NB["NO_BASELINE<br/>CSV 未記載<br/>→ 現行スペックとの比較不可"]
     A -->|"あり"| B{"両側とも外側へ?"}
     B -->|"はい"| L["LOOSEN（緩和候補）<br/>→ cpk_current の低い順に検討"]
     B -->|"いいえ"| C{"両側とも内側へ?"}
@@ -853,7 +850,7 @@ WITH params AS (
 ),
 
 -- ⓪ 対象ロット: 工程 + 試験プログラム + 除外パターンで確定させる。
---    以降の base / latest_lot は必ずこの集合に揃える
+--    base はこの集合に揃える
 target_lots AS (
     SELECT l.lot_id, l.job_name, l.job_rev, l.start_time
     FROM lots l CROSS JOIN params pa
@@ -886,31 +883,22 @@ base AS (
       AND regexp_matches(UPPER(TRIM(td.units)), '^.?[VA]$')
 ),
 
--- ② 基準ロット: 対象ロット内で start_time 最大の 1 本
---    lot_id はタイブレーク。start_time が同値のロットがあると基準ロットが
---    実行ごとに変わり、現行スペックが揺れるため
-latest_lot AS (
-    SELECT lot_id, job_name, job_rev
-    FROM (
-        SELECT l.*, ROW_NUMBER() OVER (
-                   ORDER BY l.start_time DESC, l.lot_id DESC) AS rn
-        FROM target_lots l
-    ) WHERE rn = 1
-),
-
 -- ③ 現行スペック = 別 CSV（形式は下記「入力 CSV の形式」）。
---    test_num + test_name の 2 列で join する。read_csv のパスは定数しか
---    受け付けない（params には置けない）ので、ここを直接書き換えてください
+--    join は test_num のみ。test_name は照合用で、食い違ったら spec を消さずに
+--    NAME_MISMATCH を立てる（名前は STDF の任意フィールドで、ロットによって
+--    空だったり改版で変わったりするため。詳細は「既知の限界」）。
+--    read_csv のパスは定数しか受け付けない（params には置けない）ので、
+--    ここを直接書き換えてください
 current_spec AS (
-    SELECT CAST(test_num  AS BIGINT)          AS test_num,
-           CAST(test_name AS VARCHAR)         AS test_name,
-           ANY_VALUE(CAST(cur_lsl AS DOUBLE)) AS cur_lsl,
-           ANY_VALUE(CAST(cur_usl AS DOUBLE)) AS cur_usl,
+    SELECT CAST(test_num AS BIGINT)             AS test_num,
+           ANY_VALUE(CAST(test_name AS VARCHAR)) AS csv_test_name,
+           ANY_VALUE(CAST(cur_lsl AS DOUBLE))    AS cur_lsl,
+           ANY_VALUE(CAST(cur_usl AS DOUBLE))    AS cur_usl,
            -- 手編集の CSV で同じキーが重複していると LEFT JOIN で母集団 n が
            -- 水増しされる。GROUP BY で畳んだうえで件数を DUP_IN_CSV に出す
            COUNT(*)                           AS csv_rows
     FROM read_csv('current_spec.csv', header = true)
-    GROUP BY 1, 2
+    GROUP BY 1
 ),
 
 -- ④ 統計
@@ -940,10 +928,7 @@ stats AS (
 --    有効数字 3 桁へ丸め。FLOOR / CEIL なので常に「緩い側」に丸まる
 --    （丸めで意図せず厳しくならない）
 candidate AS (
-    SELECT s.*, cs.cur_lsl, cs.cur_usl, cs.csv_rows,
-           ll.lot_id   AS ref_lot_id,
-           ll.job_name AS latest_job_name,
-           ll.job_rev  AS latest_job_rev,
+    SELECT s.*, cs.cur_lsl, cs.cur_usl, cs.csv_rows, cs.csv_test_name,
            pa.target_cpk, pa.min_n, pa.max_1pt_shift,
            s.mean - 3.0 * pa.target_cpk * s.sigma AS new_lsl_exact,
            s.mean + 3.0 * pa.target_cpk * s.sigma AS new_usl_exact,
@@ -960,8 +945,7 @@ candidate AS (
                    / NULLIF(s.n - 2, 0))) AS sigma_excl_lo
     FROM stats s
     CROSS JOIN (SELECT target_cpk, min_n, max_1pt_shift FROM params) pa
-    CROSS JOIN latest_lot ll
-    LEFT JOIN current_spec cs USING (test_num, test_name)
+    LEFT JOIN current_spec cs USING (test_num)
     WHERE s.sigma IS NOT NULL AND isfinite(s.sigma) AND s.sigma > 0
 ),
 rounded AS (
@@ -998,9 +982,8 @@ SELECT
     -- 最外 1 点を除くと新リミットが何 σ 動くか（1 点 outlier への依存度）
     ROUND(spec_shift_1pt, 3) AS spec_shift_1pt,
 
-    -- 現行スペック（CSV）と、対象ロットのプログラム版
-    ref_lot_id, latest_job_name, latest_job_rev,
-    -- 下記のテンプレート出力で CSV を作った場合、元が 32bit float なので
+    -- 現行スペック（CSV）
+    -- テンプレート出力で CSV を作った場合、元が 32bit float なので
     -- 0.019999999999995529 のような値が入り得る。丸めは表示用のみ
     -- （cp_current / cpk_current は元の精度のまま計算している）
     ROUND(cur_lsl, 6) AS cur_lsl,
@@ -1033,6 +1016,8 @@ SELECT
         CASE WHEN cur_lsl IS NULL
                OR cur_usl IS NULL            THEN 'NOT_IN_CSV'        END,
         CASE WHEN csv_rows > 1               THEN 'DUP_IN_CSV'        END,
+        CASE WHEN UPPER(TRIM(csv_test_name))
+                  <> UPPER(TRIM(test_name))  THEN 'NAME_MISMATCH'     END,
         CASE WHEN cur_lsl >= cur_usl         THEN 'INVERTED'          END,
         CASE WHEN lo_limit_min <> lo_limit_max
                OR hi_limit_min <> hi_limit_max
@@ -1055,8 +1040,8 @@ ORDER BY cpk_current NULLS LAST, test_num;
 
 | 列名 | 型 | 内容 |
 |---|---|---|
-| `test_num` | 整数 | 突合キー その 1 |
-| `test_name` | 文字列 | 突合キー その 2。**完全一致**（大文字小文字も区別） |
+| `test_num` | 整数 | 突合キー |
+| `test_name` | 文字列 | 照合用。データ側と違えば `NAME_MISMATCH`（大小・前後空白は無視） |
 | `cur_lsl` | 数値 | 現行の下限 |
 | `cur_usl` | 数値 | 現行の上限 |
 
@@ -1071,12 +1056,12 @@ test_num,test_name,cur_lsl,cur_usl
 
 > [!IMPORTANT]
 > - 保存形式は **「CSV UTF-8」**。Shift-JIS のままだと `test_name` が化けて全件
->   `NOT_IN_CSV` になります。
+>   `NAME_MISMATCH` になります。
 > - **列名は小文字で完全一致**（`test_num` / `test_name` / `cur_lsl` / `cur_usl`）。
-> - `test_name` は **`ILIKE` ではなく完全一致**です。プログラム改版で名前が変わった
->   テストは `NOT_IN_CSV` になります（= 名前が変わったことに気付ける）。
+> - `test_name` は突合キーではありません。プログラム改版で名前が変わったテストは
+>   `NAME_MISMATCH` として出ますが、spec の比較自体は `test_num` で続きます。
 > - `test_num` が指数表記（`1.23E+05`）にならないよう、セル書式は数値のままに。
-> - 行を削る / セルを空にすると `NOT_IN_CSV`、同じキーが重複していると
+> - 行を削る / セルを空にすると `NOT_IN_CSV`、同じ `test_num` が重複していると
 >   `DUP_IN_CSV`、`cur_lsl >= cur_usl` なら `INVERTED` が付きます。
 > - `read_csv` のパスは DuckDB プロセスの作業ディレクトリ基準です。確実にするなら
 >   絶対パス（Windows は `'C:/work/current_spec.csv'`、区切りは `/` でも動きます）。
@@ -1141,21 +1126,20 @@ FROM read_csv('current_spec.csv', header = true) c
 WHERE NOT EXISTS (
     SELECT 1 FROM (/* ↑ 8-2 のクエリを貼る。末尾の ; と WHERE 2 行は外す */) q
     WHERE q.test_num = CAST(c.test_num AS BIGINT)
-      AND q.test_name = c.test_name
 );
 ```
 
 **読み方**
 
-- `cpk_current` が小さい順に並びます。`NULL`（= `NO_BASELINE`）は基準ロットに
-  そのテストが無く、現行スペックと比較できないものです。
+- `cpk_current` が小さい順に並びます。`NULL`（= `NO_BASELINE`）は CSV にそのテストが
+  無く、現行スペックと比較できないものです。
 - `direction = 'LOOSEN'` → 緩和候補。`min_val` / `max_val` と `new_lsl` / `new_usl` を
   見比べて、実測レンジに対して妥当な広げ方かを確認します。
 - `direction = 'TIGHTEN'` → 締め候補。`min_val` / `max_val` が新リミットの内側に
   収まっているかが歯止めになります。
 - `fail_n` / `fail_pct` はそのテスト単体の fail 件数・率です（`test_data.passed`）。
-- `LIMIT_CHANGED` → そのテストのリミットは過去に変更されています。`cur_lsl` /
-  `cur_usl` は基準ロット（`ref_lot_id`、プログラム版は `latest_job_rev`）のものです。
+- `LIMIT_CHANGED` → STDF に記録されたリミットが対象ロットの間で変わっています
+  （`cur_lsl` / `cur_usl` は CSV の値なので、これとは独立した情報です）。
 
 **1 点 outlier の影響（`spec_shift_1pt` / `DRIVEN_BY_1PT`）**
 
@@ -1204,9 +1188,21 @@ WHERE NOT EXISTS (
 - パーサは PTR の `OPT_FLAG` を解釈せずリミット領域を読むため（`parser.py`）、
   リミット未定義のテストに 0 等が入り得ます。`lo_limit < hi_limit` で大半は
   落ちますが、`min_val` / `max_val` と突き合わせて確認してください。
-- 集約キーは `test_num` のみなので、`test_name` は `ANY_VALUE` で 1 つ選ばれます。
-  同じ `test_num` に複数の名前が付いているデータでは、CSV 側と突合できるのは
-  選ばれた 1 つだけです（残りは `NOT_IN_CSV`）。
+- **`test_name` は突合キーに使えません。** `parser.py` はテスト名をファイルごとに
+  最初の PTR から 1 回だけ取りますが、STDF の TEST_TXT は任意フィールドなので、
+  ロットによって空だったりプログラム改版で変わったりします。同じ `test_num` に
+  複数の名前がぶら下がると `ANY_VALUE` がどれを返すか不定なので、名前で join すると
+  spec が黙って消えます。そのため join は `test_num` のみとし、名前の食い違いは
+  `NAME_MISMATCH` で見せる形にしています。名前の揺れは次で確認できます:
+
+  ```sql
+  SELECT test_num, COUNT(DISTINCT test_name) AS name_variants,
+         string_agg(DISTINCT '[' || test_name || ']', ' ') AS names
+  FROM test_data_final
+  WHERE product = 'YOUR_PRODUCT' AND test_category = 'CP' AND sub_process = 'CP1'
+    AND rec_type IN ('PTR', 'MPR')
+  GROUP BY 1 HAVING COUNT(DISTINCT test_name) > 1 ORDER BY 1;
+  ```
 - 集約キーは `test_num` のみで、`pin_num` は含めていません。MPR（ピンごとの測定）の
   テストは**全ピンが 1 つの分布にまとまります**。ピン別に見る必要がある場合は、
   `base` / `stats` / `current_spec` のキーと `LEFT JOIN ... USING` に `pin_num`
@@ -1343,6 +1339,7 @@ CSV に落として Excel でソートするか、`ORDER BY td.result` に変え
         ↓ Excel で編集（丸め / データシート整合 / DRIVEN_BY_1PT の手当て）
       spec_review.csv   列: test_num, rev_lsl, rev_usl        ← 手直し後
       current_spec.csv  列: test_num, test_name, cur_lsl, cur_usl ← 現行（8-2 と同じ）
+                        ※ join は test_num のみ。test_name は照合用
         ↓
 8-4 → 同じ母集団に当てて cpk_rev / fail 件数 / 新たに落ちるダイ数を出す
 ```
@@ -1455,14 +1452,15 @@ base AS (
       AND td.lo_limit < td.hi_limit
       AND regexp_matches(UPPER(TRIM(td.units)), '^.?[VA]$')
 ),
--- 現行スペック = 8-2 と同じ CSV。test_num + test_name の 2 列で join する
+-- 現行スペック = 8-2 と同じ CSV。join は test_num のみで、test_name は照合用
+-- （理由は 8-2 の「既知の限界」）
 current_spec AS (
-    SELECT CAST(test_num  AS BIGINT)          AS test_num,
-           CAST(test_name AS VARCHAR)         AS test_name,
-           ANY_VALUE(CAST(cur_lsl AS DOUBLE)) AS cur_lsl,
-           ANY_VALUE(CAST(cur_usl AS DOUBLE)) AS cur_usl
+    SELECT CAST(test_num AS BIGINT)              AS test_num,
+           ANY_VALUE(CAST(test_name AS VARCHAR)) AS csv_test_name,
+           ANY_VALUE(CAST(cur_lsl AS DOUBLE))    AS cur_lsl,
+           ANY_VALUE(CAST(cur_usl AS DOUBLE))    AS cur_usl
     FROM read_csv('current_spec.csv', header = true)
-    GROUP BY 1, 2
+    GROUP BY 1
 ),
 
 -- 手直し後リミットを同じ母集団に当てる
@@ -1475,6 +1473,7 @@ agg AS (
            STDDEV_SAMP(b.result)  AS sigma,
            MIN(b.result)          AS min_val,
            MAX(b.result)          AS max_val,
+           ANY_VALUE(cs.csv_test_name) AS csv_test_name,
            ANY_VALUE(cs.cur_lsl)  AS cur_lsl,
            ANY_VALUE(cs.cur_usl)  AS cur_usl,
            ANY_VALUE(r.rev_lsl)   AS rev_lsl,
@@ -1491,7 +1490,7 @@ agg AS (
                                 OR b.result > r.rev_usl)) AS n_newly_fail
     FROM base b
     LEFT JOIN review r       USING (test_num)
-    LEFT JOIN current_spec cs USING (test_num, test_name)
+    LEFT JOIN current_spec cs USING (test_num)
     GROUP BY b.test_num
 ),
 judged AS (
@@ -1524,6 +1523,8 @@ SELECT
     CONCAT_WS(',',
         CASE WHEN rev_lsl IS NULL OR rev_usl IS NULL THEN 'MISSING_IN_CSV'   END,
         CASE WHEN cur_lsl IS NULL OR cur_usl IS NULL THEN 'NO_CURRENT_SPEC'  END,
+        CASE WHEN UPPER(TRIM(csv_test_name))
+                  <> UPPER(TRIM(test_name))          THEN 'NAME_MISMATCH'    END,
         CASE WHEN csv_rows > 1                       THEN 'DUP_IN_CSV'       END,
         CASE WHEN rev_lsl >= rev_usl                 THEN 'INVERTED'         END,
         CASE WHEN min_val < rev_lsl
@@ -1545,8 +1546,10 @@ ORDER BY n_newly_fail DESC, cpk_rev NULLS FIRST, test_num;
 - `flags`
   - `MISSING_IN_CSV` — 母集団にはあるが CSV に無い（手直し漏れ、または意図的に除外）。
     このとき `fail_n_rev` / `n_newly_fail` は `0` ではなく `NULL` になります
-  - `NO_CURRENT_SPEC` — `current_spec.csv` にそのテストが無い（`test_name` 違いを含む）。
-    比較対象が無いので `n_newly_fail` は `NULL` になります
+  - `NO_CURRENT_SPEC` — `current_spec.csv` にその `test_num` が無い。比較対象が
+    無いので `n_newly_fail` は `NULL` になります
+  - `NAME_MISMATCH` — `current_spec.csv` の `test_name` がデータ側と違う（大小・
+    前後空白は無視して比較）。spec の突合は `test_num` で続いています
   - `DUP_IN_CSV` — `spec_review.csv` に同じ `test_num` の行が複数ある。どの値が使われたか不定なので
     CSV を直して再実行してください
   - `INVERTED` — `rev_lsl >= rev_usl`。Excel での編集ミス
@@ -1567,18 +1570,18 @@ WITH review AS (
     FROM read_csv('spec_review.csv', header = true)
 ),
 current_spec AS (
-    SELECT CAST(test_num  AS BIGINT)  AS test_num,
-           CAST(test_name AS VARCHAR) AS test_name,
-           CAST(cur_lsl AS DOUBLE)    AS cur_lsl,
-           CAST(cur_usl AS DOUBLE)    AS cur_usl
+    SELECT CAST(test_num AS BIGINT)          AS test_num,
+           ANY_VALUE(CAST(cur_lsl AS DOUBLE)) AS cur_lsl,
+           ANY_VALUE(CAST(cur_usl AS DOUBLE)) AS cur_usl
     FROM read_csv('current_spec.csv', header = true)
+    GROUP BY 1
 )
 SELECT d.lot_id, d.wafer_id, d.x_coord, d.y_coord, d.part_txt,
        d.test_num, d.test_name, d.result,
        cs.cur_lsl, cs.cur_usl, r.rev_lsl, r.rev_usl
 FROM (/* ↑ 8-3 のクエリを貼る。末尾の ; は外す */) d
-JOIN review r       USING (test_num)
-JOIN current_spec cs USING (test_num, test_name)
+JOIN review r        USING (test_num)
+JOIN current_spec cs USING (test_num)
 WHERE d.result BETWEEN cs.cur_lsl AND cs.cur_usl      -- 現行では通っている
   AND (d.result < r.rev_lsl OR d.result > r.rev_usl)  -- 手直し後は落ちる
 ORDER BY d.test_num, d.lot_id, d.wafer_id;
