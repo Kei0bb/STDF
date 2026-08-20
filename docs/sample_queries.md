@@ -767,7 +767,8 @@ ORDER BY cpk;
 ### 8-2. 次期プログラム向けスペック検討（Cpk < 1.33 の洗い出し）
 
 現行データから **Cp / Cpk が 1.33 を割っているテストを洗い出し**、新しいリミット候補を
-`mean ± 3 × Cpk_target × σ` で算出します。あわせて **pass/fail 件数**と、その現行
+**目標帯**（`mean ± 3 × cpk_min × σ` 〜 `mean ± 3 × cpk_max × σ`）で算出します。
+現行スペックが帯の中なら動かさず、狭すぎれば広げ、広すぎれば締めます。あわせて **pass/fail 件数**と、その現行
 リミットが**どのテストプログラムのものか**を突き合わせます。8-1 との違い:
 
 | | 8-1 | 8-2 |
@@ -783,7 +784,7 @@ ORDER BY cpk;
 
 **このクエリが答える 3 つの問い**
 
-- *「Cpk が足りないテストはどれか」* — `cpk_current < target_cpk` で絞り、昇順に並べます。
+- *「Cpk が足りないテストはどれか」* — `cpk_current < cpk_min` で絞り、昇順に並べます。
   新リミット候補は `direction`（`LOOSEN` / `TIGHTEN` / `MIXED`）付きで出ます。
 - *「そのスペックは最新か」* — リミットは STDF の PTR/MPR にロット（＝ファイル）ごとに
   記録されています。**基準ロット（`start_time` 最大）のリミットを「現行」**とし、Cp / Cpk と
@@ -810,23 +811,25 @@ flowchart TD
     TD -->|"基準ロットのぶんだけ"| CS
 
     BASE --> ST["④ stats<br/>キー: test_num<br/>n / mean / σ / fail 件数"]
-    ST --> CAND["⑤ 新リミット候補<br/>mean ± 3 × target_cpk × σ<br/>有効数字 3 桁・緩い側へ丸め"]
-    CS --> JUDGE["⑥ Cpk 判定・direction・フラグ"]
-    CAND --> JUDGE
+    ST --> CAND["⑤ 目標帯<br/>広げる先 mean ± 3 × cpk_min × σ<br/>締める先 mean ± 3 × cpk_max × σ<br/>有効数字 3 桁・緩い側へ丸め"]
+    CAND --> CL["⑥ clamped<br/>現行スペックを帯で挟む<br/>帯の中ならそのまま"]
+    CS --> CL
+    CS --> JUDGE["⑦ Cpk 判定・direction・フラグ"]
+    CL --> JUDGE
 ```
 
 **判定フロー**（`direction` 列）
 
 ```mermaid
 flowchart TD
-    S["新 LSL/USL と現行 LSL/USL を比較"] --> A{"基準ロットに<br/>そのテストがある?"}
+    S["片側ごとに<br/>現行を目標帯で挟む"] --> A{"基準ロットに<br/>そのテストがある?"}
     A -->|"なし"| NB["NO_BASELINE<br/>新規追加 or 削除されたテスト<br/>→ 現行スペックとの比較不可"]
     A -->|"あり"| B{"両側とも外側へ?"}
-    B -->|"はい"| L["LOOSEN（緩和候補）<br/>→ cpk_current の低い順に検討"]
+    B -->|"はい"| L["LOOSEN（緩和候補）<br/>現行が帯より狭い = Cpk 不足<br/>→ cpk_min の線まで広げる"]
     B -->|"いいえ"| C{"両側とも内側へ?"}
-    C -->|"はい"| T["TIGHTEN（締め候補）<br/>→ fail_n / min_val / max_val で<br/>　 実測が新リミットに収まるか確認"]
+    C -->|"はい"| T["TIGHTEN（締め候補）<br/>現行が帯より広い = spec 過剰<br/>→ cpk_max の線まで締める"]
     C -->|"いいえ"| D{"現行と完全一致?"}
-    D -->|"はい"| N["NO_CHANGE"]
+    D -->|"はい"| N["NO_CHANGE<br/>現行が帯の中<br/>= 動かす理由がない"]
     D -->|"いいえ"| M["MIXED<br/>片側は緩め・片側は締め"]
 ```
 
@@ -835,7 +838,10 @@ WITH params AS (
     SELECT 'YOUR_PRODUCT'         AS product,
            'CP'                   AS test_category,   -- 必ず指定（上記 IMPORTANT）
            'CP1'                  AS sub_process,     -- 必ず指定
-           CAST(1.33 AS DOUBLE)   AS target_cpk,
+           -- 新リミットの目標帯。現行スペックがこの帯の外にあるときだけ動かす
+           -- （帯の中なら NO_CHANGE）。σ 換算は 3 × Cpk
+           CAST(1.33 AS DOUBLE)   AS cpk_min,   -- 下回るなら広げる（±3.99σ）
+           CAST(3.00 AS DOUBLE)   AS cpk_max,   -- 上回るなら締める（±9σ）
            30                     AS min_n,             -- これ未満は LOW_SAMPLE
            -- テスト名のあいまい検索。ILIKE なので大文字小文字を区別しない。
            -- 例 CAST('%IDD%' AS VARCHAR) / NULL なら全テスト
@@ -935,19 +941,21 @@ stats AS (
     HAVING COUNT(*) > 1
 ),
 
--- ⑤ 新リミット候補 = mean ± 3 × target_cpk × σ
---    有効数字 3 桁へ丸め。FLOOR / CEIL なので常に「緩い側」に丸まる
---    （丸めで意図せず厳しくならない）
+-- ⑤ 新リミット候補 = 目標帯の 2 本の線
+--    広げる先 mean ± 3 × cpk_min × σ / 締める先 mean ± 3 × cpk_max × σ。
+--    現行スペックをこの 2 本で挟む（帯の中ならそのまま）
 candidate AS (
     SELECT s.*, cs.cur_lsl, cs.cur_usl,
            ll.lot_id   AS ref_lot_id,
            ll.job_name AS latest_job_name,
            ll.job_rev  AS latest_job_rev,
-           pa.target_cpk, pa.min_n,
-           s.mean - 3.0 * pa.target_cpk * s.sigma AS new_lsl_exact,
-           s.mean + 3.0 * pa.target_cpk * s.sigma AS new_usl_exact
+           pa.cpk_min, pa.cpk_max, pa.min_n,
+           s.mean - 3.0 * pa.cpk_min * s.sigma AS lsl_widen_exact,
+           s.mean - 3.0 * pa.cpk_max * s.sigma AS lsl_tight_exact,
+           s.mean + 3.0 * pa.cpk_min * s.sigma AS usl_widen_exact,
+           s.mean + 3.0 * pa.cpk_max * s.sigma AS usl_tight_exact
     FROM stats s
-    CROSS JOIN (SELECT target_cpk, min_n FROM params) pa
+    CROSS JOIN (SELECT cpk_min, cpk_max, min_n FROM params) pa
     CROSS JOIN latest_lot ll
     LEFT JOIN current_spec cs USING (test_num)
     WHERE s.sigma IS NOT NULL AND isfinite(s.sigma) AND s.sigma > 0
@@ -960,16 +968,35 @@ rounded AS (
            -- 例 sigma = 2.5e-9 → 15 桁。1 以上のスケールでは従来どおり 6 桁
            GREATEST(6, 6 - CAST(FLOOR(LOG10(LEAST(
                NULLIF(ABS(c.mean), 0), c.sigma))) AS INTEGER)) AS disp_digits,
-           CASE WHEN new_lsl_exact = 0 THEN 0 ELSE
-                FLOOR(new_lsl_exact / POW(10, FLOOR(LOG10(ABS(new_lsl_exact))) - 2))
-                     * POW(10, FLOOR(LOG10(ABS(new_lsl_exact))) - 2) END AS new_lsl,
-           CASE WHEN new_usl_exact = 0 THEN 0 ELSE
-                CEIL(new_usl_exact / POW(10, FLOOR(LOG10(ABS(new_usl_exact))) - 2))
-                     * POW(10, FLOOR(LOG10(ABS(new_usl_exact))) - 2) END AS new_usl
+           -- 帯の 4 本を有効数字 3 桁へ丸める。LSL は FLOOR / USL は CEIL なので
+           -- 常に「緩い側」に丸まる（丸めで意図せず厳しくならない）。
+           -- 丸めは現行値ではなく帯の線にだけかける。現行値を丸めると、
+           -- 動かさない項目まで cur とズレて NO_CHANGE にならなくなる
+           CASE WHEN lsl_widen_exact = 0 THEN 0 ELSE
+                FLOOR(lsl_widen_exact / POW(10, FLOOR(LOG10(ABS(lsl_widen_exact))) - 2))
+                     * POW(10, FLOOR(LOG10(ABS(lsl_widen_exact))) - 2) END AS lsl_widen,
+           CASE WHEN lsl_tight_exact = 0 THEN 0 ELSE
+                FLOOR(lsl_tight_exact / POW(10, FLOOR(LOG10(ABS(lsl_tight_exact))) - 2))
+                     * POW(10, FLOOR(LOG10(ABS(lsl_tight_exact))) - 2) END AS lsl_tight,
+           CASE WHEN usl_widen_exact = 0 THEN 0 ELSE
+                CEIL(usl_widen_exact / POW(10, FLOOR(LOG10(ABS(usl_widen_exact))) - 2))
+                     * POW(10, FLOOR(LOG10(ABS(usl_widen_exact))) - 2) END AS usl_widen,
+           CASE WHEN usl_tight_exact = 0 THEN 0 ELSE
+                CEIL(usl_tight_exact / POW(10, FLOOR(LOG10(ABS(usl_tight_exact))) - 2))
+                     * POW(10, FLOOR(LOG10(ABS(usl_tight_exact))) - 2) END AS usl_tight
     FROM candidate c
+),
+
+-- ⑥ 現行スペックを帯で挟む。GREATEST / LEAST は NULL を無視するので、
+--    NOT_IN_LATEST_LOT の行は cpk_min の線がそのまま出る
+clamped AS (
+    SELECT r.*,
+           GREATEST(LEAST(r.cur_lsl, r.lsl_widen), r.lsl_tight) AS new_lsl,
+           LEAST(GREATEST(r.cur_usl, r.usl_widen), r.usl_tight) AS new_usl
+    FROM rounded r
 )
 
--- ⑥ 判定
+-- ⑦ 判定
 SELECT
     test_num, test_name, units,
 
@@ -1022,9 +1049,9 @@ SELECT
                                              THEN 'LIMIT_CHANGED'     END
     ) AS flags
 
-FROM rounded
+FROM clamped
 -- Cpk 不足のものだけ。全件見るならこの WHERE を削除
-WHERE cpk_current IS NULL OR cpk_current < target_cpk
+WHERE cpk_current IS NULL OR cpk_current < cpk_min
 ORDER BY cpk_current NULLS LAST, test_num;
 ```
 
@@ -1032,10 +1059,16 @@ ORDER BY cpk_current NULLS LAST, test_num;
 
 - `cpk_current` が小さい順に並びます。`NULL`（= `NO_BASELINE`）は基準ロットに
   そのテストが無く、現行スペックと比較できないものです。
-- `direction = 'LOOSEN'` → 緩和候補。`min_val` / `max_val` と `new_lsl` / `new_usl` を
-  見比べて、実測レンジに対して妥当な広げ方かを確認します。
-- `direction = 'TIGHTEN'` → 締め候補。`min_val` / `max_val` が新リミットの内側に
-  収まっているかが歯止めになります。
+- `direction = 'LOOSEN'` → 現行が帯より狭い（Cpk 不足）ので `cpk_min` の線まで
+  広げる提案です。`min_val` / `max_val` と見比べて、実測レンジに対して妥当な
+  広げ方かを確認します。データシート上限に当たるならここで手を止めてください。
+- `direction = 'TIGHTEN'` → 現行が帯より広い（spec 過剰）ので `cpk_max` の線まで
+  締める提案です。`min_val` / `max_val` が新リミットの内側に収まっているかが
+  歯止めになります。
+- `direction = 'NO_CHANGE'` → 現行スペックが帯の中に収まっており、動かす理由が
+  ありません。`cpk_min` 〜 `cpk_max` を広く取るほどこれが増えます。
+- `direction = 'MIXED'` → 片側だけ帯の外。分布が偏っていて、USL 側だけ余裕がある
+  ようなケースです。
 - `fail_n` / `fail_pct` はそのテスト単体の fail 件数・率です（`test_data.passed`）。
 - `LIMIT_CHANGED` → そのテストのリミットは対象ロットの間で変更されています。
   `cur_lsl` / `cur_usl` は基準ロット（`ref_lot_id`、プログラム版は `latest_job_rev`）の
