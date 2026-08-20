@@ -793,7 +793,9 @@ ORDER BY cpk;
   仕様書側の値）を読み込み、基準ロットのリミットと突き合わせます。相対差が
   `spec_rel_tol` を超えたら `spec_diff = true` / `SPEC_DIFF`。突合キーは `test_num`、
   `test_name` は照合用で、食い違えば `NAME_MISMATCH`（値は捨てません）。
-  **CSV を使わない運用も可能です**（SQL 中の `csv_spec` CTE のコメント参照）。
+  **CSV が無いときは `csv_spec` CTE の 3 行を差し替えるだけで読み飛ばせます**
+  （SQL 中のコメント参照）。その場合 `csv_lsl` / `csv_usl` / `spec_diff` は全件
+  NULL になり、CSV 由来のフラグも出ません。
 - *「どのテストプログラムか」* — `lots.job_name` / `job_rev` を join し、基準ロットの版を
   `ref_lot_id` / `latest_job_name` / `latest_job_rev` に出します。逆に**特定の
   プログラム版だけを対象にしたい場合は `params` の `job_name` / `job_rev` に値を
@@ -927,11 +929,19 @@ current_spec AS (
 --    NAME_MISMATCH を立てる（名前は STDF の任意フィールドで、ロットによって
 --    空だったり改版で変わったりするため。詳細は「既知の限界」）。
 --    read_csv のパスは定数しか受け付けない（params には置けない）ので、
---    ここを直接書き換えてください。CSV を使わないなら、この CTE・
---    LEFT JOIN csv_spec の行・candidate の xs.* の行・最終 SELECT の
---    csv_lsl / csv_usl / spec_diff と SPEC_DIFF 以下のフラグ 4 行・
---    WHERE の OR spec_diff を消せば、③ だけで動きます
+--    ここを直接書き換えてください。
+--
+--    ★ CSV が無い / 使わないときは、下の「CSV なし」3 行のコメントを外し、
+--      「CSV あり」の SELECT 〜 GROUP BY 1 をコメントアウトします。
+--      ほかはどこも触りません（csv_lsl / csv_usl / spec_diff は全件 NULL に
+--      なり、CSV 由来のフラグも出なくなります）。read_csv はファイルが
+--      無いと実行計画の時点で IO Error になるため、条件分岐では回避できません
 csv_spec AS (
+    -- ▼ CSV なし
+    -- SELECT NULL::BIGINT AS test_num, NULL::VARCHAR AS csv_test_name,
+    --        NULL::DOUBLE AS csv_lsl, NULL::DOUBLE AS csv_usl, NULL::BIGINT AS csv_rows
+    -- WHERE false
+    -- ▼ CSV あり
     SELECT CAST(test_num AS BIGINT)              AS test_num,
            ANY_VALUE(CAST(test_name AS VARCHAR)) AS csv_test_name,
            ANY_VALUE(CAST(cur_lsl AS DOUBLE))    AS csv_lsl,
@@ -987,6 +997,9 @@ candidate AS (
 ),
 rounded AS (
     SELECT c.*,
+           -- CSV を読み込んだかどうか。CSV なし運用では全件 NOT_IN_CSV に
+           -- なってしまうので、CSV 由来のフラグはこれで抑止する
+           (SELECT COUNT(*) FROM csv_spec) > 0 AS csv_loaded,
            -- 表示桁数。ROUND(x, 6) 固定だと ILPP のような 1e-6 〜 1e-9 の
            -- 微小電流が 0 に丸められてしまうため、そのテスト自身のスケール
            -- （mean と sigma の小さいほう）から小数桁を決める。
@@ -1065,8 +1078,9 @@ SELECT
                OR hi_limit_min <> hi_limit_max
                                              THEN 'LIMIT_CHANGED'     END,
         CASE WHEN spec_diff                  THEN 'SPEC_DIFF'         END,
-        CASE WHEN csv_lsl IS NULL
-               OR csv_usl IS NULL            THEN 'NOT_IN_CSV'        END,
+        CASE WHEN csv_loaded AND (csv_lsl IS NULL
+                              OR csv_usl IS NULL)
+                                             THEN 'NOT_IN_CSV'        END,
         CASE WHEN csv_rows > 1               THEN 'DUP_IN_CSV'        END,
         CASE WHEN UPPER(TRIM(csv_test_name))
                   <> UPPER(TRIM(test_name))  THEN 'NAME_MISMATCH'     END,
