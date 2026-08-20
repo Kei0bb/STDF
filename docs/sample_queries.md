@@ -774,7 +774,7 @@ ORDER BY cpk;
 |---|---|---|
 | 母集団 | 1 ロット | 工程 × 試験プログラムで絞ったロット全部 |
 | 現行スペック | 行が持つリミットで `GROUP BY` | **基準ロット**（`start_time` 最大）のリミット |
-| 出力 | Cp / Cpk | + 新リミット候補 / fail 件数 / プログラム版 / CSV との差 |
+| 出力 | Cp / Cpk | + 新リミット候補 / fail 件数 / プログラム版 |
 
 > [!IMPORTANT]
 > **`test_category` と `sub_process` は必ず指定してください。** 省略すると CP1 と CP2 の
@@ -789,13 +789,6 @@ ORDER BY cpk;
   記録されています。**基準ロット（`start_time` 最大）のリミットを「現行」**とし、Cp / Cpk と
   `direction` はこれに対して計算します。全ロットを通してリミットが変わっているかは
   `limits_changed` / `LIMIT_CHANGED` で示します。
-- *「テスタのリミットはデータシートと合っているか」* — `current_spec.csv`（データシート /
-  仕様書側の値）を読み込み、基準ロットのリミットと突き合わせます。相対差が
-  `spec_rel_tol` を超えたら `spec_diff = true` / `SPEC_DIFF`。突合キーは `test_num`、
-  `test_name` は照合用で、食い違えば `NAME_MISMATCH`（値は捨てません）。
-  **CSV が無いときは `csv_spec` CTE の 3 行を差し替えるだけで読み飛ばせます**
-  （SQL 中のコメント参照）。その場合 `csv_lsl` / `csv_usl` / `spec_diff` は全件
-  NULL になり、CSV 由来のフラグも出ません。
 - *「どのテストプログラムか」* — `lots.job_name` / `job_rev` を join し、基準ロットの版を
   `ref_lot_id` / `latest_job_name` / `latest_job_rev` に出します。逆に**特定の
   プログラム版だけを対象にしたい場合は `params` の `job_name` / `job_rev` に値を
@@ -815,12 +808,10 @@ flowchart TD
     TL --> LL["② latest_lot<br/>対象ロット内で<br/>start_time 最大の 1 本<br/>= 基準ロット"]
     LL --> CS["③ current_spec<br/>基準ロットのリミット<br/>= 現行スペック"]
     TD -->|"基準ロットのぶんだけ"| CS
-    CSVIN["current_spec.csv<br/>データシート側の値"] --> XS["④ csv_spec<br/>= 照合用スペック"]
 
-    BASE --> ST["⑤ stats<br/>キー: test_num<br/>n / mean / σ / fail 件数"]
-    ST --> CAND["⑥ 新リミット候補<br/>mean ± 3 × target_cpk × σ<br/>有効数字 3 桁・緩い側へ丸め"]
-    CS --> JUDGE["⑦ Cpk 判定・direction・フラグ"]
-    XS -->|"test_num で突合<br/>→ SPEC_DIFF"| JUDGE
+    BASE --> ST["④ stats<br/>キー: test_num<br/>n / mean / σ / fail 件数"]
+    ST --> CAND["⑤ 新リミット候補<br/>mean ± 3 × target_cpk × σ<br/>有効数字 3 桁・緩い側へ丸め"]
+    CS --> JUDGE["⑥ Cpk 判定・direction・フラグ"]
     CAND --> JUDGE
 ```
 
@@ -846,9 +837,6 @@ WITH params AS (
            'CP1'                  AS sub_process,     -- 必ず指定
            CAST(1.33 AS DOUBLE)   AS target_cpk,
            30                     AS min_n,             -- これ未満は LOW_SAMPLE
-           -- 基準ロットのリミットと CSV の値を「違う」と見なす相対差。
-           -- STDF の限界値は 32bit float なので相対誤差 1e-7 程度は常に乗る
-           CAST(1e-6 AS DOUBLE)   AS spec_rel_tol,
            -- テスト名のあいまい検索。ILIKE なので大文字小文字を区別しない。
            -- 例 CAST('%IDD%' AS VARCHAR) / NULL なら全テスト
            CAST(NULL AS VARCHAR)  AS test_name_like,
@@ -924,36 +912,7 @@ current_spec AS (
     GROUP BY ALL
 ),
 
--- ④ 照合用スペック = 別 CSV（データシート / 仕様書側の値。形式は下記）。
---    join は test_num のみ。test_name は照合用で、食い違ったら値を捨てずに
---    NAME_MISMATCH を立てる（名前は STDF の任意フィールドで、ロットによって
---    空だったり改版で変わったりするため。詳細は「既知の限界」）。
---    read_csv のパスは定数しか受け付けない（params には置けない）ので、
---    ここを直接書き換えてください。
---
---    ★ CSV が無い / 使わないときは、下の「CSV なし」3 行のコメントを外し、
---      「CSV あり」の SELECT 〜 GROUP BY 1 をコメントアウトします。
---      ほかはどこも触りません（csv_lsl / csv_usl / spec_diff は全件 NULL に
---      なり、CSV 由来のフラグも出なくなります）。read_csv はファイルが
---      無いと実行計画の時点で IO Error になるため、条件分岐では回避できません
-csv_spec AS (
-    -- ▼ CSV なし
-    -- SELECT NULL::BIGINT AS test_num, NULL::VARCHAR AS csv_test_name,
-    --        NULL::DOUBLE AS csv_lsl, NULL::DOUBLE AS csv_usl, NULL::BIGINT AS csv_rows
-    -- WHERE false
-    -- ▼ CSV あり
-    SELECT CAST(test_num AS BIGINT)              AS test_num,
-           ANY_VALUE(CAST(test_name AS VARCHAR)) AS csv_test_name,
-           ANY_VALUE(CAST(cur_lsl AS DOUBLE))    AS csv_lsl,
-           ANY_VALUE(CAST(cur_usl AS DOUBLE))    AS csv_usl,
-           -- 手編集の CSV で test_num が重複していると LEFT JOIN で母集団 n が
-           -- 水増しされる。GROUP BY で畳んだうえで件数を DUP_IN_CSV に出す
-           COUNT(*)                              AS csv_rows
-    FROM read_csv('current_spec.csv', header = true)
-    GROUP BY 1
-),
-
--- ⑤ 統計
+-- ④ 統計
 stats AS (
     SELECT
         test_num,
@@ -976,30 +935,25 @@ stats AS (
     HAVING COUNT(*) > 1
 ),
 
--- ⑥ 新リミット候補 = mean ± 3 × target_cpk × σ
+-- ⑤ 新リミット候補 = mean ± 3 × target_cpk × σ
 --    有効数字 3 桁へ丸め。FLOOR / CEIL なので常に「緩い側」に丸まる
 --    （丸めで意図せず厳しくならない）
 candidate AS (
     SELECT s.*, cs.cur_lsl, cs.cur_usl,
-           xs.csv_lsl, xs.csv_usl, xs.csv_test_name, xs.csv_rows,
            ll.lot_id   AS ref_lot_id,
            ll.job_name AS latest_job_name,
            ll.job_rev  AS latest_job_rev,
-           pa.target_cpk, pa.min_n, pa.spec_rel_tol,
+           pa.target_cpk, pa.min_n,
            s.mean - 3.0 * pa.target_cpk * s.sigma AS new_lsl_exact,
            s.mean + 3.0 * pa.target_cpk * s.sigma AS new_usl_exact
     FROM stats s
-    CROSS JOIN (SELECT target_cpk, min_n, spec_rel_tol FROM params) pa
+    CROSS JOIN (SELECT target_cpk, min_n FROM params) pa
     CROSS JOIN latest_lot ll
     LEFT JOIN current_spec cs USING (test_num)
-    LEFT JOIN csv_spec     xs USING (test_num)
     WHERE s.sigma IS NOT NULL AND isfinite(s.sigma) AND s.sigma > 0
 ),
 rounded AS (
     SELECT c.*,
-           -- CSV を読み込んだかどうか。CSV なし運用では全件 NOT_IN_CSV に
-           -- なってしまうので、CSV 由来のフラグはこれで抑止する
-           (SELECT COUNT(*) FROM csv_spec) > 0 AS csv_loaded,
            -- 表示桁数。ROUND(x, 6) 固定だと ILPP のような 1e-6 〜 1e-9 の
            -- 微小電流が 0 に丸められてしまうため、そのテスト自身のスケール
            -- （mean と sigma の小さいほう）から小数桁を決める。
@@ -1011,17 +965,11 @@ rounded AS (
                      * POW(10, FLOOR(LOG10(ABS(new_lsl_exact))) - 2) END AS new_lsl,
            CASE WHEN new_usl_exact = 0 THEN 0 ELSE
                 CEIL(new_usl_exact / POW(10, FLOOR(LOG10(ABS(new_usl_exact))) - 2))
-                     * POW(10, FLOOR(LOG10(ABS(new_usl_exact))) - 2) END AS new_usl,
-           -- 基準ロットのリミット vs CSV。相対差なので微小電流でも桁で潰れない。
-           -- どちらかが NULL なら NULL（= 比較不能。NOT_IN_CSV 側で見る）
-           (ABS(c.cur_lsl - c.csv_lsl)
-                > c.spec_rel_tol * GREATEST(ABS(c.cur_lsl), ABS(c.csv_lsl))
-            OR ABS(c.cur_usl - c.csv_usl)
-                > c.spec_rel_tol * GREATEST(ABS(c.cur_usl), ABS(c.csv_usl))) AS spec_diff
+                     * POW(10, FLOOR(LOG10(ABS(new_usl_exact))) - 2) END AS new_usl
     FROM candidate c
 )
 
--- ⑦ 判定
+-- ⑥ 判定
 SELECT
     test_num, test_name, units,
 
@@ -1038,7 +986,7 @@ SELECT
     -- 現行スペック（基準ロット）とその出所
     -- STDF の限界値は元が 32bit float のため、DOUBLE に上がると
     -- 0.019999999999995529 のような表示になることがある。丸めは表示用のみ
-    -- （cp_current / cpk_current / spec_diff は元の精度のまま計算している）
+    -- （cp_current / cpk_current は元の精度のまま計算している）
     ref_lot_id, latest_job_name, latest_job_rev,
     ROUND(cur_lsl, disp_digits) AS cur_lsl,
     ROUND(cur_usl, disp_digits) AS cur_usl,
@@ -1050,11 +998,6 @@ SELECT
     CASE WHEN cur_lsl IS NULL OR cur_usl IS NULL THEN NULL ELSE
         ROUND(LEAST((cur_usl - mean) / (3 * sigma),
                     (mean - cur_lsl) / (3 * sigma)), 3) END AS cpk_current,
-
-    -- 照合用スペック（CSV）との突き合わせ
-    ROUND(csv_lsl, disp_digits) AS csv_lsl,
-    ROUND(csv_usl, disp_digits) AS csv_usl,
-    spec_diff,
 
     -- 新スペック候補
     ROUND(new_lsl, disp_digits) AS new_lsl,
@@ -1076,121 +1019,13 @@ SELECT
                OR cur_usl IS NULL            THEN 'NOT_IN_LATEST_LOT' END,
         CASE WHEN lo_limit_min <> lo_limit_max
                OR hi_limit_min <> hi_limit_max
-                                             THEN 'LIMIT_CHANGED'     END,
-        CASE WHEN spec_diff                  THEN 'SPEC_DIFF'         END,
-        CASE WHEN csv_loaded AND (csv_lsl IS NULL
-                              OR csv_usl IS NULL)
-                                             THEN 'NOT_IN_CSV'        END,
-        CASE WHEN csv_rows > 1               THEN 'DUP_IN_CSV'        END,
-        CASE WHEN UPPER(TRIM(csv_test_name))
-                  <> UPPER(TRIM(test_name))  THEN 'NAME_MISMATCH'     END,
-        CASE WHEN csv_lsl >= csv_usl         THEN 'CSV_INVERTED'      END
+                                             THEN 'LIMIT_CHANGED'     END
     ) AS flags
 
 FROM rounded
--- Cpk 不足 + CSV と食い違うもの。全件見るならこの 2 行を削除
+-- Cpk 不足のものだけ。全件見るならこの WHERE を削除
 WHERE cpk_current IS NULL OR cpk_current < target_cpk
-   OR spec_diff
 ORDER BY cpk_current NULLS LAST, test_num;
-```
-
-**入力 CSV の形式（`current_spec.csv`）**
-
-データシート / 仕様書側のリミットをこの CSV に書いておくと、基準ロットのリミットと
-突き合わせて `SPEC_DIFF` を出します（Cp / Cpk 自体は基準ロットのリミットで計算します）。
-読み込むのは次の 4 列だけで、余分な列は無視されます（8-2 / 8-4 の出力 CSV をそのまま
-使い回せます）。
-
-| 列名 | 型 | 内容 |
-|---|---|---|
-| `test_num` | 整数 | 突合キー |
-| `test_name` | 文字列 | 照合用。データ側と違えば `NAME_MISMATCH`（大小・前後空白は無視） |
-| `cur_lsl` | 数値 | データシート側の下限 |
-| `cur_usl` | 数値 | データシート側の上限 |
-
-最小形:
-
-```csv
-test_num,test_name,cur_lsl,cur_usl
-1001,Vth_N,0.3,0.8
-1002,Idsat_N,200.0,400.0
-1003,Leakage,-1.0,-0.01
-```
-
-> [!IMPORTANT]
-> - 保存形式は **「CSV UTF-8」**。Shift-JIS のままだと `test_name` が化けて全件
->   `NAME_MISMATCH` になります。
-> - **列名は小文字で完全一致**（`test_num` / `test_name` / `cur_lsl` / `cur_usl`）。
-> - `test_name` は突合キーではありません。プログラム改版で名前が変わったテストは
->   `NAME_MISMATCH` として出ますが、spec の比較自体は `test_num` で続きます。
-> - `test_num` が指数表記（`1.23E+05`）にならないよう、セル書式は数値のままに。
-> - 行を削る / セルを空にすると `NOT_IN_CSV`（= 照合しない）、同じ `test_num` が
->   重複していると `DUP_IN_CSV`、`cur_lsl >= cur_usl` なら `CSV_INVERTED` が付きます。
->   いずれも Cp / Cpk の計算には影響しません（基準ロットのリミットで計算するため）。
-> - `read_csv` のパスは DuckDB プロセスの作業ディレクトリ基準です。確実にするなら
->   絶対パス（Windows は `'C:/work/current_spec.csv'`、区切りは `/` でも動きます）。
-
-**テンプレートの作り方（初回）**
-
-基準ロット（対象ロットのうち `start_time` 最大）の STDF リミットから雛形を出し、
-データシートの値に直してください。直す前の状態では全テストが `SPEC_DIFF` なしに
-なります（同じ値を比較しているため）。`params` は 8-2 と同じ値にします。
-
-```sql
-COPY (
-    WITH params AS (
-        SELECT 'YOUR_PRODUCT' AS product,
-               'CP'           AS test_category,
-               'CP1'          AS sub_process,
-               CAST(NULL AS VARCHAR) AS job_name,
-               CAST(NULL AS VARCHAR) AS job_rev,
-               CAST(NULL AS VARCHAR) AS exclude_lot_pattern
-    ),
-    target_lots AS (
-        SELECT l.lot_id, l.start_time
-        FROM lots l CROSS JOIN params pa
-        WHERE l.product       = pa.product
-          AND l.test_category = pa.test_category
-          AND l.sub_process   = pa.sub_process
-          AND (pa.job_name IS NULL OR l.job_name = pa.job_name)
-          AND (pa.job_rev  IS NULL OR l.job_rev  = pa.job_rev)
-          AND (pa.exclude_lot_pattern IS NULL
-               OR l.lot_id NOT LIKE pa.exclude_lot_pattern)
-    ),
-    latest_lot AS (
-        SELECT lot_id FROM target_lots
-        ORDER BY start_time DESC, lot_id DESC LIMIT 1
-    )
-    SELECT td.test_num,
-           ANY_VALUE(td.test_name) AS test_name,
-           ANY_VALUE(td.lo_limit)  AS cur_lsl,
-           ANY_VALUE(td.hi_limit)  AS cur_usl
-    FROM test_data_final td CROSS JOIN params pa
-    WHERE td.product       = pa.product
-      AND td.test_category = pa.test_category
-      AND td.sub_process   = pa.sub_process
-      AND td.lot_id        = (SELECT lot_id FROM latest_lot)
-      AND td.rec_type IN ('PTR', 'MPR')
-      AND td.lo_limit IS NOT NULL AND isfinite(td.lo_limit)
-      AND td.hi_limit IS NOT NULL AND isfinite(td.hi_limit)
-      AND td.lo_limit < td.hi_limit
-    GROUP BY td.test_num
-    ORDER BY td.test_num
-) TO 'current_spec.csv' (HEADER, DELIMITER ',');
-```
-
-**CSV にあるのにデータ側に無いテストの確認**
-
-`NOT_IN_CSV` は「データにあるが CSV に無い」側です。逆（CSV に書いたのに測定が
-無い / 名前が違う）は次で拾えます。
-
-```sql
-SELECT c.test_num, c.test_name
-FROM read_csv('current_spec.csv', header = true) c
-WHERE NOT EXISTS (
-    SELECT 1 FROM (/* ↑ 8-2 のクエリを貼る。末尾の ; と WHERE 2 行は外す */) q
-    WHERE q.test_num = CAST(c.test_num AS BIGINT)
-);
 ```
 
 **読み方**
@@ -1206,9 +1041,9 @@ WHERE NOT EXISTS (
   `cur_lsl` / `cur_usl` は基準ロット（`ref_lot_id`、プログラム版は `latest_job_rev`）の
   ものです。`fail_n` はテスタが各ロットのリミットで判定した結果なので、この
   フラグが付いた行の `fail_n` は複数基準の混ぜ物になります。
-- `SPEC_DIFF` → 基準ロットのリミット（`cur_lsl` / `cur_usl`）と CSV の値
-  （`csv_lsl` / `csv_usl`）が食い違っています。**テストプログラムがデータシートと
-  合っていない**か、CSV 側が古いかのどちらかです。Cpk が足りていても出力されます。
+- データシートとの突き合わせは、この出力を CSV に落として Excel 側で重ねて
+  ください（`test_num` / `test_name` / `cur_lsl` / `cur_usl` / `new_lsl` / `new_usl`
+  が揃っています）。
 
 **既知の限界**
 
@@ -1227,12 +1062,11 @@ WHERE NOT EXISTS (
 - パーサは PTR の `OPT_FLAG` を解釈せずリミット領域を読むため（`parser.py`）、
   リミット未定義のテストに 0 等が入り得ます。`lo_limit < hi_limit` で大半は
   落ちますが、`min_val` / `max_val` と突き合わせて確認してください。
-- **`test_name` は突合キーに使えません。** `parser.py` はテスト名をファイルごとに
-  最初の PTR から 1 回だけ取りますが、STDF の TEST_TXT は任意フィールドなので、
-  ロットによって空だったりプログラム改版で変わったりします。同じ `test_num` に
-  複数の名前がぶら下がると `ANY_VALUE` がどれを返すか不定なので、名前で join すると
-  spec が黙って消えます。そのため join は `test_num` のみとし、名前の食い違いは
-  `NAME_MISMATCH` で見せる形にしています。名前の揺れは次で確認できます:
+- **`test_name` を突合キーにしないでください**（Excel で重ねるときも `test_num` で
+  VLOOKUP します）。`parser.py` はテスト名をファイルごとに最初の PTR から 1 回だけ
+  取りますが、STDF の TEST_TXT は任意フィールドなので、ロットによって空だったり
+  プログラム改版で変わったりします。同じ `test_num` に複数の名前がぶら下がると
+  `ANY_VALUE` がどれを返すか不定です。名前の揺れは次で確認できます:
 
   ```sql
   SELECT test_num, COUNT(DISTINCT test_name) AS name_variants,
