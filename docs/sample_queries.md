@@ -1609,6 +1609,146 @@ WHERE NOT EXISTS (
 COPY (/* ↑ 8-5 のクエリをそのまま貼る */) TO 'check.csv' (HEADER, DELIMITER ',');
 ```
 
+### 8-6. 確認用 — `LIMIT_CHANGED` の原因切り分け
+
+8-2 の `limits_changed` / `LIMIT_CHANGED` が立ったときに、**本当にリミットが
+変わったのか**を切り分けます。`job_rev` で絞っているのに立つ場合はまずこれを
+実行してください。
+
+**`limits_changed` が何を比べているか**
+
+リミット・テスト名・単位は、`parser.py` が **1 ファイルにつき最初に出てきた
+PTR / MPR から 1 回だけ**登録し、`storage.py` がその 1 個をそのファイルの全行へ
+コピーして書きます。つまり **1 ファイル内では `lo_limit` / `hi_limit` は必ず定数**で、
+8-2 の
+
+```sql
+MIN(lo_limit) <> MAX(lo_limit) OR MIN(hi_limit) <> MAX(hi_limit)
+```
+
+が TRUE になるのは「**母集団の中に、最初の PTR のリミットが違うファイルが 2 本以上
+ある**」ときだけです。母集団はロット × ウェーハ（＝ファイル）単位なので、**1 ロットの
+中のウェーハ間**でも起こります。
+
+**同じ `job_rev` でも立つ理由**（可能性の高い順）
+
+| # | 原因 | 見分け方 |
+|---|---|---|
+| 1 | **`job_name` を指定していない** — 8-2 の `job_name` / `job_rev` は独立したフィルタなので、`PROG_A/Rev04` と `PROG_B/Rev04` が混ざる | 下のクエリの `jobs` 列に 2 つ以上出る |
+| 2 | 同じ `test_num` がフローの**複数箇所で別リミット**で使われている。パーサは「ファイル内で最初の 1 個」を採るので、1 枚目のダイがどの分岐を通ったかで採用値が入れ替わる | `jobs` は 1 つ。少数のファイルだけ別の値 |
+| 3 | パーサが **OPT_FLAG を見ていない**（`parser.py` は opt_flag を含む 4 バイトを読み飛ばして無条件に続く 4 バイトをリミットとして読む）。「このレコードのリミットは無効」と宣言した PTR が最初に来たファイルでは、無意味な値（多くは `0.0`）が入る | `variants` に `0.0` や `NULL` が混ざる |
+| 4 | **rev を上げずにリミットだけ変えた** / リミットが外部の limit ファイル由来。`limits_changed` が本来検出したいケース | `jobs` は 1 つ。ロット単位できれいに 2 群に割れる |
+
+```mermaid
+flowchart TD
+    Q["limits_changed = true"] --> J{"jobs 列に<br/>2 版以上ある?"}
+    J -->|"はい"| C1["原因 1: 母集団の混在<br/>→ 8-2 の params に job_name も入れる"]
+    J -->|"いいえ"| Z{"variants に<br/>0.0 / NULL がある?"}
+    Z -->|"はい"| C3["原因 3: OPT_FLAG 無視<br/>→ その値は現行スペックではない"]
+    Z -->|"いいえ"| S{"ロット単位で<br/>きれいに割れる?"}
+    S -->|"はい"| C4["原因 4: 本物のリミット変更<br/>→ 基準ロット側が正"]
+    S -->|"いいえ"| C2["原因 2: 同一 test_num の使い回し<br/>→ フローを確認"]
+```
+
+> [!NOTE]
+> 8-2 の `base` と違い、このクエリは単位の正規表現も `lo_limit < hi_limit` も
+> かけません。8-2 が黙って落としている `(0, 0)` や `NULL` のファイルを見るためです。
+> `ANY_VALUE` を使えるのは、上記のとおり**値がファイル内で定数だから**です。
+
+**① どのテストが何通りのリミットを持っているか**
+
+```sql
+WITH params AS (
+    SELECT 'YOUR_PRODUCT'         AS product,
+           'CP'                   AS test_category,   -- 8-2 と同じ値にする
+           'CP1'                  AS sub_process,     -- 8-2 と同じ値にする
+           CAST(NULL AS VARCHAR)  AS job_name,        -- 例 'PROG_A'
+           CAST(NULL AS VARCHAR)  AS job_rev,         -- 例 'Rev04'
+           CAST(NULL AS VARCHAR)  AS exclude_lot_pattern
+),
+
+-- ⓪ 対象ロット（8-2 の target_lots と同一）
+target_lots AS (
+    SELECT l.lot_id, l.job_name, l.job_rev, l.start_time
+    FROM lots l CROSS JOIN params pa
+    WHERE l.product       = pa.product
+      AND l.test_category = pa.test_category
+      AND l.sub_process   = pa.sub_process
+      AND (pa.job_name IS NULL OR l.job_name = pa.job_name)
+      AND (pa.job_rev  IS NULL OR l.job_rev  = pa.job_rev)
+      AND (pa.exclude_lot_pattern IS NULL
+           OR l.lot_id NOT LIKE pa.exclude_lot_pattern)
+),
+
+-- ① ファイル（lot × wafer × retest）ごとに 1 行へ畳む。
+--    値はファイル内で定数なので ANY_VALUE で厳密に取れる
+per_file AS (
+    SELECT td.test_num, td.lot_id, td.wafer_id, td.retest_num,
+           ANY_VALUE(td.test_name) AS test_name,
+           ANY_VALUE(td.units)     AS units,
+           ANY_VALUE(td.lo_limit)  AS lo,
+           ANY_VALUE(td.hi_limit)  AS hi
+    FROM test_data_final td CROSS JOIN params pa
+    WHERE td.product       = pa.product
+      AND td.test_category = pa.test_category
+      AND td.sub_process   = pa.sub_process
+      AND td.rec_type IN ('PTR', 'MPR')
+      AND td.lot_id IN (SELECT lot_id FROM target_lots)
+    GROUP BY ALL
+),
+
+-- ② リミット文字列。CONCAT は NULL を空文字として扱うので、
+--    NULL を握りつぶさないよう明示的に 'NULL' へ落とす
+labeled AS (
+    SELECT p.*, tl.job_name, tl.job_rev,
+           CONCAT(COALESCE(CAST(p.lo AS VARCHAR), 'NULL'), ' / ',
+                  COALESCE(CAST(p.hi AS VARCHAR), 'NULL')) AS limit_pair
+    FROM per_file p JOIN target_lots tl USING (lot_id)
+)
+
+SELECT test_num,
+       ANY_VALUE(test_name)                AS test_name,
+       COUNT(*)                            AS files,
+       COUNT(DISTINCT limit_pair)          AS limit_variants,
+       COUNT(DISTINCT test_name)           AS name_variants,
+       string_agg(DISTINCT limit_pair, '  |  ')                       AS variants,
+       string_agg(DISTINCT CONCAT_WS('/', job_name, job_rev), ', ')   AS jobs
+FROM labeled
+GROUP BY test_num
+HAVING COUNT(DISTINCT limit_pair) > 1
+    OR COUNT(DISTINCT test_name)  > 1
+ORDER BY limit_variants DESC, name_variants DESC, test_num;
+```
+
+| 列 | 意味 |
+|---|---|
+| `files` | その test_num を含むファイル数（ロット × ウェーハ × リテスト） |
+| `limit_variants` | リミットの種類数。2 以上なら 8-2 で `LIMIT_CHANGED` が立つ |
+| `name_variants` | テスト名の種類数。2 以上なら `test_name` での突合は不可 |
+| `variants` | `lo / hi` の実値。`0.0` や `NULL` が混ざれば原因 3 |
+| `jobs` | 内訳の `job_name/job_rev`。2 つ以上なら原因 1 |
+
+**② 気になった test_num を 1 本掘る**
+
+`params` / `target_lots` / `per_file` / `labeled` は ① をそのまま貼り、末尾だけ
+差し替えます。
+
+```sql
+SELECT limit_pair, job_name, job_rev, units,
+       COUNT(*)                          AS files,
+       string_agg(DISTINCT lot_id, ', ') AS lots,
+       MIN(wafer_id)                     AS wafer_min,
+       MAX(wafer_id)                     AS wafer_max
+FROM labeled
+WHERE test_num = 1234        -- ← ① で見つけた test_num
+GROUP BY ALL
+ORDER BY files DESC;
+```
+
+少数のファイルだけ違う値なら原因 2 か 3、ロット単位できれいに割れているなら
+原因 4（本物のリミット変更）です。原因 1 なら 8-2 の `params` に `job_name` も
+入れて絞り直してください。
+
 ---
 
 ## 9. ChipID トレーサビリティ（EN-S0-CHIPID_R / TSMC）
