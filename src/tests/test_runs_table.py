@@ -1,5 +1,5 @@
 """Tests for the `runs` table (storage.py) and the `lots` view derived from
-it (views.py). See docs/superpowers/specs/2026-08-23-per-run-test-program-design.md.
+it (views.py). See docs/schema.md for the runs / lots column reference.
 """
 
 from pathlib import Path

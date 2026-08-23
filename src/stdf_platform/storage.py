@@ -36,8 +36,8 @@ def _unix_to_datetime(unix_ts: int) -> datetime:
 # in place on every file (`data/lots/.../lot_id={lot}/data.parquet`), which
 # meant only the LAST ingested file's MIR survived for a lot. That info now
 # lives in `runs` at (file x wafer identity) granularity; `views.py` derives
-# a `lots` VIEW from it by aggregation. See docs/superpowers/specs/
-# 2026-08-23-per-run-test-program-design.md for the full rationale.
+# a `lots` VIEW from it by aggregation. See docs/schema.md (runs / lots)
+# for the full column reference and the changed `lots` semantics.
 RUNS_SCHEMA = pa.schema([
     ("lot_id", pa.string()),
     ("wafer_id", pa.string()),        # '' for FT (no WIR)

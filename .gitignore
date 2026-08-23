@@ -21,3 +21,7 @@ config.yaml
 
 # User scratch space for ad-hoc DuckDB queries (over AnalysisSession)
 query.py
+# Claude Code 関連（ローカルにのみ置く。実環境には配らない）
+.claude/
+CLAUDE.md
+docs/superpowers/

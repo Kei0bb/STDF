@@ -1,7 +1,7 @@
 """Tests for section (4) of the per-run test-program design:
 database.get_lot_summary / get_runs, `stdf db programs` CLI, and
 AnalysisSession.runs(). See
-docs/superpowers/specs/2026-08-23-per-run-test-program-design.md.
+docs/schema.md (runs / lots).
 """
 
 import sys
