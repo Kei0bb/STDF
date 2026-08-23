@@ -14,14 +14,16 @@ data/
         └── test_category={CP|FT}/
             └── sub_process={CP1|FT2|...}/
                 └── lot_id={lot_id}/
-                    └── (wafer_id={id}/retest={n}/)  ← wafers / parts / test_data / chipid
+                    └── (wafer_id={id}/retest={n}/)  ← runs / wafers / parts / test_data / chipid
                         └── data.parquet
 ```
 
-> `lots` は `lot_id` まで。`wafers` / `parts` / `test_data` / `chipid` は
-> さらに `wafer_id` / `retest` まで切る（FT はウェーハ概念が無いため
-> `wafer_id=`（空）になる）。`product` / `test_category` / `sub_process` /
-> `lot_id` / `wafer_id` / `retest` は Hive パーティション列として SELECT 可能。
+> `lots` は Parquet を持たず `runs` から派生する DuckDB VIEW。`runs` / `wafers` /
+> `parts` / `test_data` / `chipid` は `lot_id` の下にさらに `wafer_id` / `retest`
+> まで切る（FT はウェーハ概念が無いため `wafer_id=`（空）になる。`runs` は FT では
+> lot 単位 = `wafer_id=''` ごとに 1 行）。`product` / `test_category` /
+> `sub_process` / `lot_id` / `wafer_id` / `retest` は Hive パーティション列として
+> SELECT 可能。
 
 ---
 
@@ -31,7 +33,8 @@ data/
 
 | テーブル | CP | FT | 単位 / 備考 |
 |---------|:--:|:--:|------|
-| `lots` | ✓ | ✓ | 1 STDF = 1 行。MIR メタデータ |
+| `runs` | ✓ | ✓ | CP は 1 wafer = 1 行、FT は 1 FT lot run（`wafer_id=''`）= 1 行。MIR メタデータの実体（Parquet） |
+| `lots` | ✓ | ✓ | 1 lot = 1 行。`runs` から集約した VIEW（Parquet ではない） |
 | `wafers` | ✓ | **✗** | **CP 専用**。FT は WIR/WRR が無いため **1 行も生成されない** |
 | `parts` | ✓ | ✓ | CP = ダイ / FT = パッケージ（1 PRR）。真の単位 |
 | `test_data` | ✓ | ✓ | パラメトリック測定（PTR/MPR/FTR） |
@@ -45,16 +48,22 @@ data/
 
 ---
 
-## lots
+## runs
 
-ロット単位のメタデータ。1 STDF ファイル = 1 レコード。
+**1 STDF ファイル × wafer identity = 1 行**の MIR/MRR メタデータ。CP はファイル中の
+wafer ごとに 1 行（1 ファイルに複数 wafer が入っていれば同じ `source_file` の複数行に
+なる）、FT は `wafer_id=''` として **FT lot run 単位**（= ファイル単位）に 1 行。
+`lots` はこのテーブルから集約した VIEW（下記参照）で、Parquet として書かれる実体は
+`runs` だけ。
 
 | 列名 | 型 | ソース | 説明 |
 |------|----|--------|------|
 | lot_id | STRING | MIR.LOT_ID | ロットID |
+| wafer_id | STRING | WIR.WAFER_ID | ウェーハID（FT は空） |
 | product | STRING | CLI / パス | 製品名 |
 | test_category | STRING | sub_process から導出 | `CP` / `FT` / `OTHER` |
 | sub_process | STRING | MIR.TEST_COD | 小工程（CP1, FT2 等） |
+| retest_num | INT64 | 自動算出（`wafer_retest_map`） | リテスト番号（0=初回, 1,2...=リテスト）。`parts` / `test_data` と同じキーで join できる |
 | part_type | STRING | MIR.PART_TYP | 品種名 |
 | job_name | STRING | MIR.JOB_NAM | テストプログラム名 |
 | job_rev | STRING | MIR.JOB_REV | テストプログラムリビジョン |
@@ -62,6 +71,62 @@ data/
 | finish_time | TIMESTAMP(ms, UTC) | MRR.FINISH_T | テスト終了時刻 |
 | tester_type | STRING | MIR.TSTR_TYP | テスター種別 |
 | operator | STRING | MIR.OPER_NAM | オペレータ名 |
+| test_rev | STRING | ファイル名 (Rev04等) | テストプログラムリビジョン（ファイル名由来。TP 判定には使わない） |
+| source_file | STRING | CLI | 元STDFファイル名 |
+
+> **TP（テストプログラム）の判定キーは `job_name` + `job_rev`（MIR 由来）のみ**。
+> `test_rev` はファイル名から抽出した参考情報で判定には使わない。
+> per-wafer の TP 一覧は `SELECT lot_id, wafer_id, retest_num, job_name, job_rev FROM runs`
+> で直接引ける（`stdf db programs` も参照）。
+
+---
+
+## lots
+
+**`runs` 由来の VIEW**（Parquet ではない）。1 lot = 1 行に集約される。
+
+```sql
+CREATE OR REPLACE VIEW lots AS
+SELECT lot_id, product, test_category, sub_process,
+       arg_max(part_type,   start_time) AS part_type,
+       arg_max(job_name,    start_time) AS job_name,
+       arg_max(job_rev,     start_time) AS job_rev,
+       MIN(start_time)  AS start_time,
+       MAX(finish_time) AS finish_time,
+       arg_max(tester_type, start_time) AS tester_type,
+       arg_max(operator,    start_time) AS operator,
+       COUNT(DISTINCT (job_name, job_rev))     AS job_variant_count,
+       COUNT(DISTINCT (job_name, job_rev)) > 1 AS job_mixed
+FROM runs
+GROUP BY lot_id, product, test_category, sub_process
+```
+
+| 列名 | 型 | ソース | 説明 |
+|------|----|--------|------|
+| lot_id | STRING | MIR.LOT_ID | ロットID |
+| product | STRING | CLI / パス | 製品名 |
+| test_category | STRING | sub_process から導出 | `CP` / `FT` / `OTHER` |
+| sub_process | STRING | MIR.TEST_COD | 小工程（CP1, FT2 等） |
+| part_type | STRING | `runs` の最新 run の値 | 品種名 |
+| job_name | STRING | `runs` の最新 run の値 | テストプログラム名 |
+| job_rev | STRING | `runs` の最新 run の値 | テストプログラムリビジョン |
+| start_time | TIMESTAMP(ms, UTC) | `MIN(runs.start_time)` | lot 内で最初の run の開始時刻 |
+| finish_time | TIMESTAMP(ms, UTC) | `MAX(runs.finish_time)` | lot 内で最後の run の終了時刻 |
+| tester_type | STRING | `runs` の最新 run の値 | テスター種別 |
+| operator | STRING | `runs` の最新 run の値 | オペレータ名 |
+| job_variant_count | INT64 | `COUNT(DISTINCT (job_name, job_rev))` | lot 内で異なる TP の版数 |
+| job_mixed | BOOL | `job_variant_count > 1` | lot 内で TP が混在しているか |
+
+> **意味が変わった点**（旧: 1 STDF ファイル = 1 行を上書きしていた頃との違い）:
+> - `start_time` / `finish_time` は「lot 内の最初の run 〜 最後の run」になった
+>   （旧: 最後に ingest したファイルの値という不定値）。`trend.py` のロット並び順に影響する。
+> - `job_name` / `job_rev` / `part_type` / `tester_type` / `operator` は
+>   **「最新 run（`start_time` が最も新しい run）の値」**に定義が固定される
+>   （旧: ingest した順序に依存する不定値）。lot 内で TP が変わったかどうかは
+>   `job_mixed` / `job_variant_count` で判定する。TP 混在の詳細（どの wafer が
+>   どちらの版か）は `runs` を直接引く（[docs/sample_queries.md](./sample_queries.md)
+>   の TP 混在検出クエリ参照）。
+> - `lot_id` join の fan-out は起きない（1 lot = 1 行の契約は維持）。
 
 ---
 
@@ -70,6 +135,10 @@ data/
 ウェーハ単位のサマリ。リテスト履歴を保持。**CP 専用**（FT は WIR/WRR が無く生成
 されない）。`part_count` / `good_count` は WRR の報告値のため、歩留りは
 `parts_final` から算出する（[適用範囲](#適用範囲cp--ft) 参照）。
+
+> 旧スキーマにあった `test_rev` / `source_file` は書き込み専用の死に列だった
+> （読んでいるコードが無かった）ため削除。同じ内容は `runs.test_rev` /
+> `runs.source_file` で取得できる。
 
 | 列名 | 型 | ソース | 説明 |
 |------|----|--------|------|
@@ -82,9 +151,7 @@ data/
 | good_count | INT64 | WRR.GOOD_CNT | 良品数 |
 | rtst_count | INT64 | WRR.RTST_CNT | リテスト数 |
 | abrt_count | INT64 | WRR.ABRT_CNT | アボート数 |
-| test_rev | STRING | ファイル名 (Rev04等) | テストプログラムリビジョン |
 | retest_num | INT64 | 自動算出 | リテスト番号（0=初回, 1,2...=リテスト） |
-| source_file | STRING | CLI | 元STDFファイル名 |
 
 > **リテスト**: 同一 lot_id + wafer_id で再 ingest すると `retest_num` がインクリメント。  
 > 分析クエリでは最新 `retest_num` のみを使用（`ROW_NUMBER() OVER(PARTITION BY lot_id, wafer_id ORDER BY retest_num DESC)`）。

@@ -171,6 +171,35 @@ ORDER BY p.wafer_id, p.part_id, td.test_num;
 > 行数が多い場合は `COPY (...) TO 'output.csv' (HEADER)` で CSV 出力するか、
 > `WHERE p.wafer_id = '...'` を追加して絞ると扱いやすくなります。
 
+### 1-5. TP 混在検出（wafer / FT lot run 単位の job_name / job_rev 一覧）
+
+`lots.job_name` / `job_rev` は lot 内**最新 run** の値しか持たないため、lot 内で
+テストプログラムが変わった（TP 混在）ケースは `lots` だけでは分かりません。
+per-run（CP は wafer 単位、FT は FT lot run 単位）の MIR を保持する `runs` を
+直接引くと、どの wafer / run がどちらの版かまで一覧できます。
+
+```sql
+SELECT lot_id, wafer_id, retest_num, job_name, job_rev, start_time
+FROM runs
+WHERE lot_id = 'YOUR_LOT_ID'
+ORDER BY wafer_id, retest_num;
+```
+
+`job_mixed` で混在している lot だけをまず絞り込みたい場合は `lots` 側から入ります。
+
+```sql
+SELECT lot_id, product, sub_process, job_variant_count, job_name, job_rev
+FROM lots
+WHERE job_mixed
+ORDER BY job_variant_count DESC, lot_id;
+```
+
+> `job_mixed` = `true` の lot に対して 1 つ目のクエリを実行すると、`job_name` /
+> `job_rev` が wafer / run ごとにどう分布しているかが分かります
+> （例:「wafer 1-12 が RevA、13-25 が RevB」）。TP の判定キーは
+> `job_name` + `job_rev`（MIR 由来）のみで、ファイル名由来の `test_rev` は
+> 判定に使いません。
+
 ---
 
 ## 2. ロット検索
@@ -1088,10 +1117,12 @@ ORDER BY cpk_current NULLS LAST, test_num;
 - `mean ± 3σ` は正規分布を前提にしています。リーク電流のように対数正規・片側裾を
   引く分布では新リミット候補が実測とかけ離れるので、`min_val` / `max_val` と必ず
   突き合わせてください。
-- `lots` は lot_id ごとに 1 ファイルを上書きするため（`storage.py`）、同一ロットを
-  複数回 ingest すると **最後に ingest したファイル**の `job_name` / `job_rev` が
-  残ります。ingest 順であって時刻順ではないので、ロット内でプログラムが変わった
-  ケースは追跡できません。
+- `lots.job_name` / `job_rev` は `runs`（wafer 単位 / FT lot run 単位で MIR を保持する
+  テーブル）から集約した VIEW の値で、**lot 内の最新 run のもの**です（`start_time` が
+  最も新しい run）。lot 内でプログラムが変わったケース（TP 混在）は `lots.job_mixed`
+  で検知でき、どの wafer がどちらの版かは `runs` を直接引けば追跡できます
+  （下記「TP 混在検出」参照）。8-2 のように lot 単位でリミットを比較する場合、
+  `job_mixed` の lot は複数版の測定値が混ざっている点に注意してください。
 - パーサは PTR の `OPT_FLAG` を解釈せずリミット領域を読むため（`parser.py`）、
   リミット未定義のテストに 0 等が入り得ます。`lo_limit < hi_limit` で大半は
   落ちますが、`min_val` / `max_val` と突き合わせて確認してください。

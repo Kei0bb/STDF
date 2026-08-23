@@ -64,17 +64,24 @@ def _write_cp(data_dir: Path):
         "passed": [True, True], "retest_num": [0, 0],
     })
 
-    lots = (data_dir / "lots" / "product=PROD" / "test_category=CP"
-            / "sub_process=CP1" / "lot_id=LOT1" / "data.parquet")
-    lots.parent.mkdir(parents=True, exist_ok=True)
+    # `lots` is now a VIEW derived from `runs` (see views.py) — write the MIR
+    # info at the `runs` partition (lot_id/wafer_id/retest) instead of the
+    # old lot-level data.parquet. One row (wafer W1, retest 0) is enough for
+    # the `lots` view's per-lot aggregation.
+    runs = (data_dir / "runs" / "product=PROD" / "test_category=CP"
+            / "sub_process=CP1" / "lot_id=LOT1" / "wafer_id=W1"
+            / "retest=0" / "data.parquet")
+    runs.parent.mkdir(parents=True, exist_ok=True)
     pq.write_table(pa.table({
-        "lot_id": ["LOT1"], "product": ["PROD"], "test_category": ["CP"],
-        "sub_process": ["CP1"], "part_type": ["SCT101A"],
+        "lot_id": ["LOT1"], "wafer_id": ["W1"], "product": ["PROD"],
+        "test_category": ["CP"], "sub_process": ["CP1"], "retest_num": [0],
+        "part_type": ["SCT101A"],
         "job_name": ["CP_TEST"], "job_rev": ["Rev01"],
         "tester_type": ["J750"], "operator": ["OPE01"],
         "start_time": [pa.scalar(1_700_000_000_000, pa.timestamp("ms", tz="UTC"))],
         "finish_time": [pa.scalar(1_700_003_600_000, pa.timestamp("ms", tz="UTC"))],
-    }), lots)
+        "test_rev": [""], "source_file": [""],
+    }), runs)
 
     td = (data_dir / "test_data" / "product=PROD" / "test_category=CP"
           / "sub_process=CP1" / "lot_id=LOT1" / "data.parquet")
@@ -109,17 +116,21 @@ def _write_ft(data_dir: Path):
         "passed": [True, False], "retest_num": [0, 0],
     }), p)
 
-    lots = (data_dir / "lots" / "product=CHIP" / "test_category=FT"
-            / "sub_process=FT1" / "lot_id=FT1" / "data.parquet")
-    lots.parent.mkdir(parents=True, exist_ok=True)
+    # FT: wafer_id='' + retest=0 is the FT-lot-level `runs` row.
+    runs = (data_dir / "runs" / "product=CHIP" / "test_category=FT"
+            / "sub_process=FT1" / "lot_id=FT1" / "wafer_id="
+            / "retest=0" / "data.parquet")
+    runs.parent.mkdir(parents=True, exist_ok=True)
     pq.write_table(pa.table({
-        "lot_id": ["FT1"], "product": ["CHIP"], "test_category": ["FT"],
-        "sub_process": ["FT1"], "part_type": ["CHIP"],
+        "lot_id": ["FT1"], "wafer_id": [""], "product": ["CHIP"],
+        "test_category": ["FT"], "sub_process": ["FT1"], "retest_num": [0],
+        "part_type": ["CHIP"],
         "job_name": ["FT_TEST"], "job_rev": ["Rev01"],
         "tester_type": ["J750"], "operator": ["OPE01"],
         "start_time": [pa.scalar(1_700_000_000_000, pa.timestamp("ms", tz="UTC"))],
         "finish_time": [pa.scalar(1_700_003_600_000, pa.timestamp("ms", tz="UTC"))],
-    }), lots)
+        "test_rev": [""], "source_file": [""],
+    }), runs)
 
     cp = (data_dir / "chipid" / "product=CHIP" / "test_category=FT"
           / "sub_process=FT1" / "lot_id=FT1" / "wafer_id=" / "retest=0" / "data.parquet")

@@ -54,8 +54,21 @@ def setup_views(
     Returns the list of registered view names (base tables and the *_final
     dedup views that were created).
     """
+    # Legacy store detection: `lots` used to be its own Parquet table
+    # (`data/lots/.../lot_id={lot}/data.parquet`, overwritten by every file
+    # ingested for that lot). It is now a VIEW derived from `runs` (see
+    # below) — a store still carrying data/lots/ predates that change and
+    # has no `runs` table to derive from, so refuse to proceed rather than
+    # silently serving a `lots` view with zero rows.
+    if (data_dir / "lots").exists():
+        raise RuntimeError(
+            "Legacy store detected: data/lots/ is no longer written "
+            "(MIR moved to data/runs/). Wipe the data directory and "
+            "re-ingest — there is no migration path."
+        )
+
     registered: list[str] = []
-    for table in ["lots", "wafers", "parts", "test_data", "chipid"]:
+    for table in ["runs", "wafers", "parts", "test_data", "chipid"]:
         path = data_dir / table
         if path.exists():
             # test_data alone can mix pre-migration files (no exec_seq/
@@ -69,6 +82,40 @@ def setup_views(
                 )
             """)
             registered.append(table)
+
+    if "runs" in registered:
+        # `lots` is now a derived VIEW, one row per lot, aggregated from the
+        # per-run `runs` rows (one per file x wafer identity). Column order
+        # matches the old LOTS_SCHEMA so existing consumers (get_lot_summary,
+        # trend.py, analysis/session.py `lots()`, `lot_product` below) need no
+        # changes; job_variant_count / job_mixed are new, additive columns.
+        #
+        # Semantics vs the old overwritten-per-file table:
+        #   - start_time = MIN over all runs in the lot, finish_time = MAX.
+        #     (old: whichever file was ingested last — an ingest-order
+        #     artifact, not a meaningful value)
+        #   - job_name / job_rev / part_type / tester_type / operator = the
+        #     value from the run with the latest start_time (arg_max). This is
+        #     a real, well-defined choice (vs. old ingest-order dependence),
+        #     but still just one value for a lot that may have run under
+        #     multiple test program revisions — job_mixed / job_variant_count
+        #     surface that instead of silently picking one.
+        conn.execute("""
+            CREATE OR REPLACE VIEW lots AS
+            SELECT lot_id, product, test_category, sub_process,
+                   arg_max(part_type,   start_time) AS part_type,
+                   arg_max(job_name,    start_time) AS job_name,
+                   arg_max(job_rev,     start_time) AS job_rev,
+                   MIN(start_time)  AS start_time,
+                   MAX(finish_time) AS finish_time,
+                   arg_max(tester_type, start_time) AS tester_type,
+                   arg_max(operator,    start_time) AS operator,
+                   COUNT(DISTINCT (job_name, job_rev))     AS job_variant_count,
+                   COUNT(DISTINCT (job_name, job_rev)) > 1 AS job_mixed
+            FROM runs
+            GROUP BY lot_id, product, test_category, sub_process
+        """)
+        registered.append("lots")
 
     if "parts" in registered:
         conn.execute(f"""

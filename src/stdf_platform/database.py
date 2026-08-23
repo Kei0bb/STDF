@@ -100,6 +100,8 @@ class Database:
             l.part_type,
             l.job_name,
             l.job_rev,
+            l.job_variant_count,
+            l.job_mixed,
             MAX(p.wafer_count) as wafer_count,
             MAX(p.total_parts) as total_parts,
             MAX(p.good_parts) as good_parts,
@@ -116,8 +118,27 @@ class Database:
             GROUP BY lot_id
         ) p ON l.lot_id = p.lot_id
         {where_clause}
-        GROUP BY l.lot_id, l.product, l.test_category, l.sub_process, l.part_type, l.job_name, l.job_rev
+        GROUP BY l.lot_id, l.product, l.test_category, l.sub_process, l.part_type,
+                 l.job_name, l.job_rev, l.job_variant_count, l.job_mixed
         ORDER BY l.product, l.test_category, l.sub_process, l.lot_id
+        """
+        return self.query(sql, params)
+
+    def get_runs(self, lot_id: str | None = None) -> list[dict]:
+        """Get per-run MIR rows from `runs` (one row per file x wafer identity).
+
+        Unlike `lots` (one row per lot, latest-run values + job_mixed flag),
+        this exposes every run so a mixed lot's job_name/job_rev breakdown by
+        wafer/retest can be inspected directly.
+        """
+        where_clause = "WHERE lot_id = $1" if lot_id else ""
+        params = [lot_id] if lot_id else []
+
+        sql = f"""
+        SELECT lot_id, wafer_id, retest_num, job_name, job_rev, start_time, source_file
+        FROM runs
+        {where_clause}
+        ORDER BY lot_id, wafer_id, retest_num
         """
         return self.query(sql, params)
 

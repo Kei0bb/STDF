@@ -169,13 +169,10 @@ def run_ingest_pool(
     files from the same lot share mutable on-disk state that a
     read-then-write race would corrupt:
 
-      1. the lots table always rewrites the same lot-level data.parquet —
-         two concurrent writers would clobber each other or trip the
-         os.replace retry (see storage.py).
-      2. `_get_next_retest_num` is a read-then-write directory scan — two
+      1. `_get_next_retest_num` is a read-then-write directory scan — two
          workers processing the same wafer concurrently can both read the
          same "next" retest number and both claim it.
-      3. `_demote_superseded` reads and rewrites OLDER retest files when a
+      2. `_demote_superseded` reads and rewrites OLDER retest files when a
          die/test key is re-measured — a second worker's os.replace on the
          same file races the first (WinError 5 on Windows) and can corrupt
          retest_flag ranks.

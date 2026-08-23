@@ -191,7 +191,8 @@ df = zone_yield(s, product="SCT101A", lot_id="L001")
 ### CLI クエリ
 
 ```bash
-stdf db lots                          # ロット一覧
+stdf db lots                          # ロット一覧（TP 混在ロットは Job 列に ⚠×N）
+stdf db programs --lot LOT001         # wafer / retest ごとのテストプログラム履歴
 stdf db query "SELECT * FROM wafers"  # SQL 直接実行
 stdf db shell                         # DuckDB シェル
 ```
@@ -268,11 +269,12 @@ scripts\unregister_task.bat
 
 ## データ構造
 
-### 5 テーブル
+### テーブル
 
 | テーブル | 説明 |
 |---------|------|
-| `lots` | ロット情報（product, test_category, sub_process） |
+| `runs` | STDF ファイル × wafer 単位の MIR/MRR メタデータ。CP は wafer ごと、FT は FT ロットの実行ごと（`wafer_id=''`）に 1 行。テストプログラム（`job_name` / `job_rev`）がロット内で変わってもここに残る |
+| `lots` | ロット情報（product, test_category, sub_process）。Parquet ではなく **`runs` から集約した DuckDB ビュー**（1 ロット 1 行）。`job_mixed` / `job_variant_count` でロット内の TP 混在を判定できる |
 | `wafers` | ウェハー歩留まり（リテスト追跡含む）。**CP 専用**（FT は WIR/WRR が無く生成されない） |
 | `parts` | 個片結果（Bin, X/Y 座標）。CP=ダイ / FT=パッケージ |
 | `test_data` | テスト測定値（PTR/MPR/FTR 統合）。MPR は 1 レコードをピン数分の行に展開し `pin_num` / `pin_name` 列に PMR のピン情報を格納。PTR/FTR 行ではこれらは NULL。 |
@@ -290,9 +292,12 @@ data/
         └── test_category={CP|FT}/
             └── sub_process={CP11|FT2}/
                 └── lot_id={lot_id}/
-                    └── (wafer_id={id}/retest={n}/)  ← wafers/parts/test_data/chipid
+                    └── (wafer_id={id}/retest={n}/)  ← runs/wafers/parts/test_data/chipid
                         └── data.parquet
 ```
+
+> `lots` は Parquet を持たない（`runs` 由来のビュー）。旧ストアの `data/lots/` が
+> 残っていると `setup_views()` がエラーで停止するので、wipe して再 ingest する。
 
 ---
 

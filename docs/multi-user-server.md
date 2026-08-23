@@ -50,7 +50,7 @@
    to_csv("SELECT * FROM test_data_final WHERE lot_id = 'ABC123'", "abc123.csv")
    ```
 
-利用できるビューは共有マシン上の解析と完全に同一(`lots` / `parts_final` /
+利用できるビューは共有マシン上の解析と完全に同一(`runs` / `lots` / `parts_final` /
 `test_data_final` / `wafer_yield_final` など。定義は `views.py` に一本化)。
 クエリ例は docs/sample_queries.md を参照。
 

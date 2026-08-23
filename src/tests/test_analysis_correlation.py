@@ -23,17 +23,22 @@ def _write_cp_origin(data_dir: Path):
         "hard_bin": [1], "soft_bin": [1],
         "passed": [True], "retest_num": [0],
     }), p)
-    lots = (data_dir / "lots" / "product=CHIP" / "test_category=CP"
-            / "sub_process=CP1" / "lot_id=HKPFJK" / "data.parquet")
-    lots.parent.mkdir(parents=True, exist_ok=True)
+    # `lots` is a VIEW derived from `runs` (see views.py) — write the MIR info
+    # at the `runs` partition instead of the old lot-level data.parquet.
+    runs = (data_dir / "runs" / "product=CHIP" / "test_category=CP"
+            / "sub_process=CP1" / "lot_id=HKPFJK" / "wafer_id=11"
+            / "retest=0" / "data.parquet")
+    runs.parent.mkdir(parents=True, exist_ok=True)
     pq.write_table(pa.table({
-        "lot_id": ["HKPFJK"], "product": ["CHIP"], "test_category": ["CP"],
-        "sub_process": ["CP1"], "part_type": ["CHIP"],
+        "lot_id": ["HKPFJK"], "wafer_id": ["11"], "product": ["CHIP"],
+        "test_category": ["CP"], "sub_process": ["CP1"], "retest_num": [0],
+        "part_type": ["CHIP"],
         "job_name": ["CP"], "job_rev": ["Rev01"],
         "tester_type": ["J750"], "operator": ["OPE01"],
         "start_time": [pa.scalar(1_699_000_000_000, pa.timestamp("ms", tz="UTC"))],
         "finish_time": [pa.scalar(1_699_003_600_000, pa.timestamp("ms", tz="UTC"))],
-    }), lots)
+        "test_rev": [""], "source_file": [""],
+    }), runs)
 
 
 def _write_corr_tests(data_dir: Path):

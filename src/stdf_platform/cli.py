@@ -219,7 +219,14 @@ def db():
 @click.option("--lot", "-l", help="Filter by lot ID")
 @click.pass_context
 def lots(ctx, lot: str | None):
-    """List ingested lots."""
+    """List ingested lots.
+
+    The Job column shows the latest run's test program as `name (rev)`. If
+    the lot ran under more than one distinct (job_name, job_rev) — i.e. the
+    test program changed mid-lot — a `⚠×N` marker is appended (N = number of
+    distinct program versions). Use `stdf db programs --lot <ID>` to see the
+    per-wafer/per-run breakdown behind that marker.
+    """
     config: Config = ctx.obj["config"]
 
     try:
@@ -240,14 +247,64 @@ def lots(ctx, lot: str | None):
             table.add_column("Yield %", justify="right", style="green")
 
             for row in results:
+                job_cell = f"{row['job_name']} ({row['job_rev']})" if row["job_name"] else ""
+                if row["job_mixed"]:
+                    job_cell += f" [red]⚠×{row['job_variant_count']}[/red]"
                 table.add_row(
                     row["lot_id"],
                     row["part_type"] or "",
-                    f"{row['job_name']} ({row['job_rev']})" if row["job_name"] else "",
+                    job_cell,
                     str(row["wafer_count"] or 0),
                     f"{row['total_parts'] or 0:,}",
                     f"{row['good_parts'] or 0:,}",
                     f"{row['yield_pct'] or 0:.2f}%",
+                )
+
+            console.print(table)
+
+    except Exception as e:
+        console.print(f"[red]Error:[/red] {e}")
+        sys.exit(1)
+
+
+@db.command()
+@click.option("--lot", "-l", help="Filter by lot ID")
+@click.pass_context
+def programs(ctx, lot: str | None):
+    """List per-run test program (MIR job_name/job_rev) history.
+
+    One row per (lot, wafer, retest) run — the same granularity as the
+    `runs` table. Use this to see the wafer/retest breakdown behind a
+    `⚠` marker in `stdf db lots`'s Job column.
+    """
+    config: Config = ctx.obj["config"]
+
+    try:
+        with Database(config.storage, config.gross_die_map) as db_conn:
+            results = db_conn.get_runs(lot)
+
+            if not results:
+                console.print("[yellow]No runs found[/yellow]")
+                return
+
+            table = Table(title="Test Program History")
+            table.add_column("Lot ID", style="cyan")
+            table.add_column("Wafer")
+            table.add_column("Retest", justify="right")
+            table.add_column("Job")
+            table.add_column("Rev")
+            table.add_column("Start")
+            table.add_column("Source File")
+
+            for row in results:
+                table.add_row(
+                    row["lot_id"],
+                    row["wafer_id"] or "-",
+                    str(row["retest_num"]),
+                    row["job_name"] or "",
+                    row["job_rev"] or "",
+                    str(row["start_time"]) if row["start_time"] is not None else "",
+                    row["source_file"] or "",
                 )
 
             console.print(table)

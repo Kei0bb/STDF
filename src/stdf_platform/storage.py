@@ -31,11 +31,20 @@ def _unix_to_datetime(unix_ts: int) -> datetime:
 
 
 # PyArrow schemas for each table
-LOTS_SCHEMA = pa.schema([
+#
+# `lots` is NOT written to Parquet — it used to be one row per lot, rewritten
+# in place on every file (`data/lots/.../lot_id={lot}/data.parquet`), which
+# meant only the LAST ingested file's MIR survived for a lot. That info now
+# lives in `runs` at (file x wafer identity) granularity; `views.py` derives
+# a `lots` VIEW from it by aggregation. See docs/superpowers/specs/
+# 2026-08-23-per-run-test-program-design.md for the full rationale.
+RUNS_SCHEMA = pa.schema([
     ("lot_id", pa.string()),
+    ("wafer_id", pa.string()),        # '' for FT (no WIR)
     ("product", pa.string()),
     ("test_category", pa.string()),  # CP, FT, OTHER
     ("sub_process", pa.string()),    # CP1, FT2, etc. (from STDF MIR.TEST_COD)
+    ("retest_num", pa.int64()),       # from the same wafer_retest_map as parts/test_data
     ("part_type", pa.string()),
     ("job_name", pa.string()),
     ("job_rev", pa.string()),
@@ -43,6 +52,8 @@ LOTS_SCHEMA = pa.schema([
     ("finish_time", pa.timestamp("ms", tz="UTC")),
     ("tester_type", pa.string()),
     ("operator", pa.string()),
+    ("test_rev", pa.string()),       # Rev04 等（ファイル名から）
+    ("source_file", pa.string()),    # 元ファイル名
 ])
 
 WAFERS_SCHEMA = pa.schema([
@@ -55,10 +66,8 @@ WAFERS_SCHEMA = pa.schema([
     ("good_count", pa.int64()),
     ("rtst_count", pa.int64()),
     ("abrt_count", pa.int64()),
-    # Retest tracking
-    ("test_rev", pa.string()),      # Rev04 等（ファイル名から）
+    # Retest tracking (test_rev / source_file moved to `runs` — see RUNS_SCHEMA)
     ("retest_num", pa.int64()),     # リテスト番号（0=初回, 1,2...=リテスト）
-    ("source_file", pa.string()),   # 元ファイル名
 ])
 
 PARTS_SCHEMA = pa.schema([
@@ -377,26 +386,6 @@ class ParquetStorage:
         # Extract test_rev from filename
         test_rev = extract_test_rev_from_filename(source_file)
 
-        # Save lot info
-        lot_path = self._get_table_path("lots", product, test_category, sub_process) / f"lot_id={self._sanitize(data.lot_id)}"
-        lot_path.mkdir(parents=True, exist_ok=True)
-
-        lot_table = pa.table({
-            "lot_id": [data.lot_id],
-            "product": [product],
-            "test_category": [test_category],
-            "sub_process": [sub_process or ""],
-            "part_type": [data.part_type],
-            "job_name": [data.job_name],
-            "job_rev": [data.job_rev],
-            "start_time": [_unix_to_datetime(data.start_time)],
-            "finish_time": [_unix_to_datetime(data.finish_time)],
-            "tester_type": [data.tester_type],
-            "operator": [data.operator],
-        }, schema=LOTS_SCHEMA)
-        self._write_parquet(lot_table, lot_path / "data.parquet", compression)
-        counts["lots"] = 1
-
         # Pre-calculate retest_num for every identity (wafer_id) BEFORE writing
         # any table. _get_next_retest_num scans the parts directory; calling it
         # after parts are written would return n+1 instead of n.
@@ -411,12 +400,55 @@ class ParquetStorage:
         for part in data.parts:
             identity_wafer_ids.add(part.get("wafer_id", ""))
 
+        # A file carrying a MIR but neither WIR nor PRR (an aborted run) would
+        # otherwise produce no identity at all and lose its MIR entirely — the
+        # old unconditional `lots` write always kept it. Fall back to the
+        # FT-shaped empty identity so `runs` still records the file.
+        if not identity_wafer_ids:
+            identity_wafer_ids.add("")
+
         wafer_retest_map: dict[str, int] = {
             wid: self._get_next_retest_num(
                 product, test_category, sub_process, data.lot_id, wid
             )
             for wid in identity_wafer_ids
         }
+
+        # Save runs: one row per (file x wafer identity) — CP gets one row
+        # per wafer, FT gets one row for wafer_id='' (= FT lot unit). This is
+        # the per-run MIR/MRR record that `lots` is now derived from (see
+        # views.py); it reuses wafer_retest_map so runs/parts/test_data agree
+        # on (lot_id, wafer_id, retest_num).
+        for wafer_id in identity_wafer_ids:
+            retest_num = wafer_retest_map[wafer_id]
+            run_path = (
+                self._get_table_path("runs", product, test_category, sub_process)
+                / f"lot_id={self._sanitize(data.lot_id)}"
+                / f"wafer_id={self._sanitize(wafer_id)}"
+                / f"retest={retest_num}"
+            )
+            run_path.mkdir(parents=True, exist_ok=True)
+
+            run_table = pa.table({
+                "lot_id": [data.lot_id],
+                "wafer_id": [wafer_id],
+                "product": [product],
+                "test_category": [test_category],
+                "sub_process": [sub_process or ""],
+                "retest_num": [retest_num],
+                "part_type": [data.part_type],
+                "job_name": [data.job_name],
+                "job_rev": [data.job_rev],
+                "start_time": [_unix_to_datetime(data.start_time)],
+                "finish_time": [_unix_to_datetime(data.finish_time)],
+                "tester_type": [data.tester_type],
+                "operator": [data.operator],
+                "test_rev": [test_rev],
+                "source_file": [source_file],
+            }, schema=RUNS_SCHEMA)
+            self._write_parquet(run_table, run_path / "data.parquet", compression)
+
+        counts["runs"] = len(identity_wafer_ids)
 
         # Save wafers with retest tracking
         if data.wafers:
@@ -447,9 +479,7 @@ class ParquetStorage:
                     "good_count": [w.get("good_count", 0) for w in wafers],
                     "rtst_count": [w.get("rtst_count", 0) for w in wafers],
                     "abrt_count": [w.get("abrt_count", 0) for w in wafers],
-                    "test_rev": [test_rev for _ in wafers],
                     "retest_num": [retest_num for _ in wafers],
-                    "source_file": [source_file for _ in wafers],
                 }, schema=WAFERS_SCHEMA)
                 self._write_parquet(wafer_table, wafer_path / "data.parquet", compression)
 

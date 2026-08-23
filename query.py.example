@@ -213,6 +213,22 @@ ORDER BY wafer_id
 """)
 
 
+# %% TP 混在チェック（job_mixed な lot の一覧 → wafer 別 job_name/job_rev）
+q("""
+SELECT lot_id, product, sub_process, job_variant_count, job_name, job_rev
+FROM lots
+WHERE job_mixed
+ORDER BY job_variant_count DESC, lot_id
+""")
+
+q(f"""
+SELECT lot_id, wafer_id, retest_num, job_name, job_rev, start_time
+FROM runs
+WHERE lot_id = '{LOT_ID}'
+ORDER BY wafer_id, retest_num
+""")
+
+
 # %% テスト項目一覧（ロット内）
 q(f"""
 SELECT DISTINCT

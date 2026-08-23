@@ -57,6 +57,38 @@ class AnalysisSession:
             params,
         ).fetchdf()
 
+    def runs(self, lot_id: str | None = None, product: str | None = None,
+              test_category: str | None = None) -> pd.DataFrame:
+        """Per-run MIR rows from `runs` (one row per file x wafer identity).
+
+        Unlike `lots()` (one row per lot, latest run's values collapsed via
+        ROW_NUMBER), this returns every run verbatim — no dedup — since the
+        whole point is inspecting a lot's wafer/retest-level test program
+        history (job_mixed detection).
+        """
+        where, params = [], []
+        if lot_id is not None:
+            where.append("lot_id = ?")
+            params.append(lot_id)
+        if product is not None:
+            where.append("product = ?")
+            params.append(product)
+        if test_category is not None:
+            where.append("test_category = ?")
+            params.append(test_category)
+        clause = (" WHERE " + " AND ".join(where)) if where else ""
+        return self.conn.execute(
+            f"""
+            SELECT lot_id, wafer_id, product, test_category, sub_process,
+                   retest_num, part_type, job_name, job_rev,
+                   start_time, finish_time, tester_type, operator,
+                   test_rev, source_file
+            FROM runs{clause}
+            ORDER BY start_time, lot_id, wafer_id, retest_num
+            """,
+            params,
+        ).fetchdf()
+
     def close(self) -> None:
         self.conn.close()
 
