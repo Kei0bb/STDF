@@ -207,6 +207,21 @@ def serve(ctx, host: str | None, port: int | None):
     uvicorn.run(create_app(config), host=host, port=port)
 
 
+@main.command()
+@click.option("--select", help="Build only the given dbt model (dbt --select syntax)")
+@click.pass_context
+def build(ctx, select: str | None):
+    """Run dbt models + tests and atomically refresh data/marts/."""
+    from .build import run_build, BuildError
+    config: Config = ctx.obj["config"]
+    try:
+        run_build(config, select=select)
+        console.print("[green]OK[/green] marts refreshed.")
+    except BuildError as e:
+        console.print(f"[red]Build failed:[/red]\n{e}")
+        sys.exit(1)
+
+
 # ── db group ──────────────────────────────────────────────────────
 
 @main.group()

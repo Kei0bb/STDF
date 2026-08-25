@@ -16,7 +16,7 @@ import pytest
 
 from stdf_platform.config import StorageConfig
 from stdf_platform.parser import STDFData
-from stdf_platform.storage import CHIPID_SCHEMA, ParquetStorage
+from stdf_platform.storage import CHIPID_SCHEMA, TEST_DATA_SCHEMA, ParquetStorage
 
 
 def _cp_run(lot_id, wafer_id, job_name, job_rev, start_time, finish_time, parts, test_results, tests=None):
@@ -199,3 +199,40 @@ def synth_store(tmp_path) -> Path:
     )
 
     return tmp_path
+
+
+def _write_null_flag_row(data_dir: Path) -> None:
+    """Write one test_data row from a pre-retest_flag file: same shape as
+    test_verify_flags.py's `old_schema` case (exec_seq/retest_flag columns
+    entirely absent, not just NULL-valued) for a lot/wafer/die not otherwise
+    in synth_store, so it doesn't disturb the other synth_store-derived
+    fixtures/assertions.
+    """
+    old_schema = pa.schema([f for f in TEST_DATA_SCHEMA if f.name not in ("exec_seq", "retest_flag")])
+    row = {
+        "lot_id": ["LOTCORRUPT"], "wafer_id": ["WBAD"], "part_id": ["PBAD"], "part_txt": [""],
+        "x_coord": [9], "y_coord": [9], "test_num": [1], "test_name": ["VCC"],
+        "rec_type": ["PTR"], "lo_limit": [0.9], "hi_limit": [1.1], "units": ["V"],
+        "result": [1.0], "passed": ["P"], "retest_num": [0],
+        "pin_num": pa.array([None], type=pa.int64()), "pin_name": [None],
+    }
+    path = (
+        data_dir / "test_data" / "product=PROD" / "test_category=CP" / "sub_process=CP1"
+        / "lot_id=LOTCORRUPT" / "wafer_id=WBAD" / "retest=0" / "data.parquet"
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pq.write_table(pa.table(row, schema=old_schema), path)
+
+
+@pytest.fixture
+def corrupt_store(synth_store) -> Path:
+    """`synth_store` plus one test_data row with retest_flag IS NULL (a
+    pre-flag file — see storage.py / views.py's `test_data_final` docstring).
+    Must fail `dbt test` (assert_no_null_retest_flag) / `run_build`.
+
+    Hoisted from tests/test_dbt_invariant_tests.py (Task 4's inline
+    `_write_null_flag_row(synth_store)` pattern) so tests/test_build.py
+    (Task 5) can share it.
+    """
+    _write_null_flag_row(synth_store)
+    return synth_store
