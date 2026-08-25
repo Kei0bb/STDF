@@ -192,35 +192,69 @@ def test_gross_die_ft_not_applied(tmp_path):
 
 # ── QC-fail bin bucket ───────────────────────────────────────────────────────
 
-def test_gross_die_database_wafer_yield(tmp_path):
-    """`stdf analyze yield` path: Database.get_wafer_yield uses the GD total."""
-    from stdf_platform.database import Database
+def _gd_session(tmp_path, monkeypatch, gross_die_map):
+    """AnalysisSession pointed at a Config carrying the given gross_die_map
+    (AnalysisSession resolves gross_die_map from Config.load(), not a ctor
+    arg — unlike the old Database(config, gross_die_map))."""
+    from stdf_platform import analysis as analysis_pkg
+    from stdf_platform.config import Config, ProductConfig
 
+    products = {
+        prod: ProductConfig(gross_die=gd, gd_fail_bin=fail_bin)
+        for prod, (gd, fail_bin) in gross_die_map.items()
+    }
+    cfg = Config(storage=StorageConfig(data_dir=tmp_path, database=tmp_path / "db.duckdb"),
+                 products=products)
+    monkeypatch.setattr(analysis_pkg.session.Config, "load", classmethod(lambda cls, p=None: cfg))
+    return analysis_pkg.AnalysisSession(tmp_path)
+
+
+def test_gross_die_database_wafer_yield(tmp_path, monkeypatch):
+    """`stdf db query` over wafer_yield_final: GD applies to the CP total."""
     storage = _storage(tmp_path)
     _save(storage, _cp_data("LOT1", "W1", 8))  # 8 probed, all pass; GD 10
 
-    db = Database(StorageConfig(data_dir=tmp_path, database=tmp_path / "db.duckdb"),
-                  gross_die_map={"P": (10, 200)})
-    with db:
-        rows = db.get_wafer_yield("LOT1")
-    assert len(rows) == 1
-    assert rows[0]["total"] == 10           # GD denominator, not 8 probed
-    assert rows[0]["good"] == 8
-    assert rows[0]["yield_pct"] == 80.0     # 8 / 10
+    with _gd_session(tmp_path, monkeypatch, {"P": (10, 200)}) as s:
+        df = s.q(
+            "SELECT wafer_id, total, good, yield_pct FROM wafer_yield_final "
+            "WHERE lot_id = ? ORDER BY wafer_id",
+            ["LOT1"],
+        )
+    assert len(df) == 1
+    assert df.iloc[0]["total"] == 10           # GD denominator, not 8 probed
+    assert df.iloc[0]["good"] == 8
+    assert df.iloc[0]["yield_pct"] == 80.0     # 8 / 10
 
 
-def test_gross_die_qc_fail_bin_bucket(tmp_path):
+def test_gross_die_qc_fail_bin_bucket(tmp_path, monkeypatch):
     """Unprobed dies appear in the bin distribution under gd_fail_bin, making
     the bin total equal the gross die."""
-    from stdf_platform.database import Database
-
     storage = _storage(tmp_path)
     _save(storage, _cp_data("LOT1", "W1", 7))  # 7 probed (bin 1), GD 10 → 3 QC
 
-    db = Database(StorageConfig(data_dir=tmp_path, database=tmp_path / "db.duckdb"),
-                  gross_die_map={"P": (10, 200)})
-    with db:
-        bins = {r["soft_bin"]: r["count"] for r in db.get_bin_summary("LOT1")}
+    with _gd_session(tmp_path, monkeypatch, {"P": (10, 200)}) as s:
+        df = s.q(
+            """
+            WITH binned AS (
+                SELECT soft_bin, COUNT(*) AS count
+                FROM parts_final
+                WHERE lot_id = ?
+                GROUP BY soft_bin
+                UNION ALL
+                SELECT gd_fail_bin AS soft_bin, SUM(unprobed) AS count
+                FROM wafer_yield_final
+                WHERE lot_id = ? AND gd_fail_bin IS NOT NULL AND unprobed > 0
+                GROUP BY gd_fail_bin
+            )
+            SELECT soft_bin, SUM(count) AS count,
+                   ROUND(100.0 * SUM(count) / SUM(SUM(count)) OVER (), 2) AS pct
+            FROM binned
+            GROUP BY soft_bin
+            ORDER BY soft_bin
+            """,
+            ["LOT1", "LOT1"],
+        )
+    bins = dict(zip(df["soft_bin"], df["count"]))
     assert bins[1] == 7
     assert bins[200] == 3
     assert sum(bins.values()) == 10

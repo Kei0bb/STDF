@@ -23,7 +23,7 @@ from make_test_stdf import make_ft_stdf, make_stdf  # noqa: E402
 from stdf_platform.parser import parse_stdf  # noqa: E402
 from stdf_platform.storage import ParquetStorage  # noqa: E402
 from stdf_platform.config import StorageConfig  # noqa: E402
-from stdf_platform.database import Database  # noqa: E402
+from stdf_platform.analysis import AnalysisSession  # noqa: E402
 
 
 def _storage(tmp_path: Path) -> ParquetStorage:
@@ -31,8 +31,18 @@ def _storage(tmp_path: Path) -> ParquetStorage:
     return ParquetStorage(cfg)
 
 
-def _db(tmp_path: Path) -> Database:
-    return Database(StorageConfig(data_dir=tmp_path, database=tmp_path / "db.duckdb"))
+def _session(tmp_path: Path) -> AnalysisSession:
+    return AnalysisSession(tmp_path)
+
+
+def _wafer_yield(s: AnalysisSession, lot_id: str) -> list[dict]:
+    """ex-Database.get_wafer_yield, via AnalysisSession.q()."""
+    df = s.q(
+        "SELECT wafer_id, total, good, yield_pct FROM wafer_yield_final "
+        "WHERE lot_id = ? ORDER BY wafer_id",
+        [lot_id],
+    )
+    return df.to_dict("records")
 
 
 def _ingest_ft(storage, ft_file):
@@ -55,8 +65,8 @@ def test_ft_wafer_yield_reflects_latest_retest(tmp_path):
     make_ft_stdf(ft_rt, "FTY", parts=4)  # retest run: all pass
     _ingest_ft(storage, ft_rt)
 
-    with _db(tmp_path) as db:
-        rows = db.get_wafer_yield("FTY")
+    with _session(tmp_path) as s:
+        rows = _wafer_yield(s, "FTY")
 
     # FT has no wafer concept -> single group; final yield is 100% after retest,
     # NOT the run0 50% nor an empty result.
@@ -75,8 +85,8 @@ def test_ft_lot_summary_yield_from_parts(tmp_path):
     make_ft_stdf(ft_rt, "FTY", parts=4)
     _ingest_ft(storage, ft_rt)
 
-    with _db(tmp_path) as db:
-        rows = db.get_lot_summary("FTY")
+    with _session(tmp_path) as s:
+        rows = s.lot_summary("FTY").to_dict("records")
 
     assert len(rows) == 1
     assert rows[0]["total_parts"] == 4
@@ -97,8 +107,8 @@ def test_cp_wafer_yield_grouped_by_wafer(tmp_path):
         source_file=cp.name,
     )
 
-    with _db(tmp_path) as db:
-        rows = db.get_wafer_yield("CPLOT")
+    with _session(tmp_path) as s:
+        rows = _wafer_yield(s, "CPLOT")
 
     assert len(rows) == 2  # two wafers, one group each
     for r in rows:
@@ -127,8 +137,8 @@ def test_cp_reingest_does_not_double_count(tmp_path):
         source_file=cp.name,
     )
 
-    with _db(tmp_path) as db:
-        rows = db.get_wafer_yield("CPLOT")
+    with _session(tmp_path) as s:
+        rows = _wafer_yield(s, "CPLOT")
 
     assert len(rows) == 1
     assert rows[0]["total"] == 10  # not 20

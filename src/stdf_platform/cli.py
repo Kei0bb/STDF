@@ -13,9 +13,8 @@ from rich.progress import Progress, SpinnerColumn, TextColumn
 
 from . import __version__
 from .config import Config
-from .database import Database
+from .analysis import AnalysisSession
 from .sync_manager import SyncManager
-from .mounts import _DEDUP_UNIT
 
 
 console = Console()
@@ -245,10 +244,10 @@ def lots(ctx, lot: str | None):
     config: Config = ctx.obj["config"]
 
     try:
-        with Database(config.storage, config.gross_die_map) as db_conn:
-            results = db_conn.get_lot_summary(lot)
+        with AnalysisSession(config.storage.data_dir) as s:
+            df = s.lot_summary(lot)
 
-            if not results:
+            if df.empty:
                 console.print("[yellow]No lots found[/yellow]")
                 return
 
@@ -261,18 +260,18 @@ def lots(ctx, lot: str | None):
             table.add_column("Good", justify="right")
             table.add_column("Yield %", justify="right", style="green")
 
-            for row in results:
-                job_cell = f"{row['job_name']} ({row['job_rev']})" if row["job_name"] else ""
-                if row["job_mixed"]:
-                    job_cell += f" [red]⚠×{row['job_variant_count']}[/red]"
+            for row in df.itertuples():
+                job_cell = f"{row.job_name} ({row.job_rev})" if row.job_name else ""
+                if row.job_mixed:
+                    job_cell += f" [red]⚠×{row.job_variant_count}[/red]"
                 table.add_row(
-                    row["lot_id"],
-                    row["part_type"] or "",
+                    row.lot_id,
+                    row.part_type or "",
                     job_cell,
-                    str(row["wafer_count"] or 0),
-                    f"{row['total_parts'] or 0:,}",
-                    f"{row['good_parts'] or 0:,}",
-                    f"{row['yield_pct'] or 0:.2f}%",
+                    str(row.wafer_count or 0),
+                    f"{row.total_parts or 0:,}",
+                    f"{row.good_parts or 0:,}",
+                    f"{row.yield_pct or 0:.2f}%",
                 )
 
             console.print(table)
@@ -295,10 +294,10 @@ def programs(ctx, lot: str | None):
     config: Config = ctx.obj["config"]
 
     try:
-        with Database(config.storage, config.gross_die_map) as db_conn:
-            results = db_conn.get_runs(lot)
+        with AnalysisSession(config.storage.data_dir) as s:
+            df = s.runs(lot_id=lot)
 
-            if not results:
+            if df.empty:
                 console.print("[yellow]No runs found[/yellow]")
                 return
 
@@ -311,132 +310,15 @@ def programs(ctx, lot: str | None):
             table.add_column("Start")
             table.add_column("Source File")
 
-            for row in results:
+            for row in df.itertuples():
                 table.add_row(
-                    row["lot_id"],
-                    row["wafer_id"] or "-",
-                    str(row["retest_num"]),
-                    row["job_name"] or "",
-                    row["job_rev"] or "",
-                    str(row["start_time"]) if row["start_time"] is not None else "",
-                    row["source_file"] or "",
-                )
-
-            console.print(table)
-
-    except Exception as e:
-        console.print(f"[red]Error:[/red] {e}")
-        sys.exit(1)
-
-
-@main.group()
-def analyze():
-    """Run analysis on ingested data."""
-    pass
-
-
-@analyze.command()
-@click.argument("lot_id")
-@click.pass_context
-def yield_cmd(ctx, lot_id: str):
-    """Analyze yield by wafer for a lot."""
-    config: Config = ctx.obj["config"]
-
-    try:
-        with Database(config.storage, config.gross_die_map) as db:
-            results = db.get_wafer_yield(lot_id)
-
-            if not results:
-                console.print(f"[yellow]No data found for lot {lot_id}[/yellow]")
-                return
-
-            table = Table(title=f"Wafer Yield - {lot_id}")
-            table.add_column("Wafer ID", style="cyan")
-            table.add_column("Total", justify="right")
-            table.add_column("Good", justify="right")
-            table.add_column("Yield %", justify="right", style="green")
-
-            for row in results:
-                yield_pct = row["yield_pct"] or 0
-                style = "green" if yield_pct >= 90 else "yellow" if yield_pct >= 80 else "red"
-                table.add_row(
-                    row["wafer_id"],
-                    f"{row['total'] or 0:,}",
-                    f"{row['good'] or 0:,}",
-                    f"[{style}]{yield_pct:.2f}%[/{style}]",
-                )
-
-            console.print(table)
-
-    except Exception as e:
-        console.print(f"[red]Error:[/red] {e}")
-        sys.exit(1)
-
-
-@analyze.command()
-@click.argument("lot_id")
-@click.option("--top", "-n", default=10, help="Number of top failing tests")
-@click.pass_context
-def test_fail(ctx, lot_id: str, top: int):
-    """Show top failing tests for a lot."""
-    config: Config = ctx.obj["config"]
-
-    try:
-        with Database(config.storage, config.gross_die_map) as db:
-            results = db.get_test_fail_rate(lot_id, top)
-
-            if not results:
-                console.print(f"[yellow]No test failures found for lot {lot_id}[/yellow]")
-                return
-
-            table = Table(title=f"Top {top} Failing Tests - {lot_id}")
-            table.add_column("Test #", style="cyan", justify="right")
-            table.add_column("Test Name")
-            table.add_column("Total", justify="right")
-            table.add_column("Fails", justify="right")
-            table.add_column("Fail %", justify="right", style="red")
-
-            for row in results:
-                table.add_row(
-                    str(row["test_num"]),
-                    row["test_name"] or "",
-                    f"{row['total']:,}",
-                    f"{row['fails']:,}",
-                    f"{row['fail_rate']:.2f}%",
-                )
-
-            console.print(table)
-
-    except Exception as e:
-        console.print(f"[red]Error:[/red] {e}")
-        sys.exit(1)
-
-
-@analyze.command()
-@click.argument("lot_id")
-@click.pass_context
-def bins(ctx, lot_id: str):
-    """Show bin distribution for a lot."""
-    config: Config = ctx.obj["config"]
-
-    try:
-        with Database(config.storage, config.gross_die_map) as db:
-            results = db.get_bin_summary(lot_id)
-
-            if not results:
-                console.print(f"[yellow]No bin data found for lot {lot_id}[/yellow]")
-                return
-
-            table = Table(title=f"Bin Distribution - {lot_id}")
-            table.add_column("Soft Bin", style="cyan", justify="right")
-            table.add_column("Count", justify="right")
-            table.add_column("Percent", justify="right")
-
-            for row in results:
-                table.add_row(
-                    str(row["soft_bin"]),
-                    f"{row['count']:,}",
-                    f"{row['pct']:.2f}%",
+                    row.lot_id,
+                    row.wafer_id or "-",
+                    str(row.retest_num),
+                    row.job_name or "",
+                    row.job_rev or "",
+                    str(row.start_time) if row.start_time is not None else "",
+                    row.source_file or "",
                 )
 
             console.print(table)
@@ -447,159 +329,37 @@ def bins(ctx, lot_id: str):
 
 
 @db.command()
-@click.argument("sql")
+@click.argument("sql", required=False)
+@click.option("--output", "-o", type=click.Path(path_type=Path), help="Write result to CSV instead of printing")
+@click.option("--file", "-f", "sql_file", type=click.Path(exists=True, path_type=Path), help="Read SQL from file (e.g. dbt/analyses/*.sql)")
 @click.pass_context
-def query(ctx, sql: str):
-    """Execute SQL query against the database."""
+def query(ctx, sql: str | None, output: Path | None, sql_file: Path | None):
+    """Execute SQL (inline or from -f FILE) against the store."""
     config: Config = ctx.obj["config"]
-
+    if (sql is None) == (sql_file is None):
+        raise click.UsageError("give SQL inline or via -f, not both/neither")
+    if sql_file is not None:
+        sql = sql_file.read_text(encoding="utf-8")
     try:
-        with Database(config.storage, config.gross_die_map) as db_conn:
-            results = db_conn.query(sql)
-
-            if not results:
-                console.print("[yellow]No results[/yellow]")
-                return
-
-            # Create table with columns from results
-            table = Table(title="Query Results")
-            columns = list(results[0].keys())
-
-            for col in columns:
-                table.add_column(col)
-
-            for row in results[:100]:  # Limit to 100 rows
-                table.add_row(*[str(v) if v is not None else "" for v in row.values()])
-
-            console.print(table)
-
-            if len(results) > 100:
-                console.print(f"[dim]... showing 100 of {len(results)} rows[/dim]")
-
-    except Exception as e:
-        console.print(f"[red]Error:[/red] {e}")
-        sys.exit(1)
-
-
-@db.command("verify-flags")
-@click.option("--lot", "-l", help="Filter by lot ID")
-@click.pass_context
-def verify_flags(ctx, lot: str | None):
-    """Verify the ingest-time retest_flag/exec_seq invariants on test_data.
-
-    Per lot, checks:
-
-    \b
-      null_flags        rows with no retest_flag (pre-flag files — the store
-                         needs a re-ingest; test_data_final excludes them).
-      orphaned_keys      keys whose newest run isn't flagged 0 (the demote
-                         invariant is broken — test_data_final would show no
-                         row at all for that die/test/pin).
-      inconsistent_runs  keys whose rows within one retest run don't all
-                         share the same flag (a partial demote).
-      dup_current        keys whose flag-0 rows span more than one
-                         retest_num (a concurrency-corruption mode where two
-                         runs of the same key both keep retest_flag=0 —
-                         test_data_final would then return duplicate
-                         measurements for that die/test/pin).
-
-    Exits 1 if any lot fails a check.
-    """
-    config: Config = ctx.obj["config"]
-    key_cols = f"lot_id, {_DEDUP_UNIT}, test_num, pin_num"
-
-    try:
-        with Database(config.storage, config.gross_die_map) as db_conn:
-            if lot:
-                lot_ids = [lot]
+        with AnalysisSession(config.storage.data_dir) as s:
+            if output is not None:
+                n = s.conn.execute(
+                    f"COPY ({sql.rstrip('; ')}) TO '{output.as_posix()}' (HEADER, DELIMITER ',')"
+                ).fetchone()[0]
+                console.print(f"Exported {n:,} rows → {output}")
             else:
-                lot_ids = [
-                    row["lot_id"]
-                    for row in db_conn.query("SELECT DISTINCT lot_id FROM test_data ORDER BY lot_id")
-                ]
-
-            if not lot_ids:
-                console.print("[yellow]No test_data found[/yellow]")
-                return
-
-            table = Table(title="retest_flag Verification")
-            table.add_column("Lot ID", style="cyan")
-            table.add_column("Rows", justify="right")
-            table.add_column("Null Flags", justify="right")
-            table.add_column("Orphaned Keys", justify="right")
-            table.add_column("Inconsistent Runs", justify="right")
-            table.add_column("Dup Current", justify="right")
-
-            any_failed = False
-            for lot_id in lot_ids:
-                rows = db_conn.query(
-                    "SELECT COUNT(*) AS n FROM test_data WHERE lot_id = ?", [lot_id]
-                )[0]["n"]
-                null_flags = db_conn.query(
-                    "SELECT COUNT(*) AS n FROM test_data WHERE lot_id = ? AND retest_flag IS NULL",
-                    [lot_id],
-                )[0]["n"]
-                # Per-lot, so one huge lot's test_data doesn't have to be
-                # scanned alongside every other lot's rows in one query.
-                orphaned_keys = db_conn.query(
-                    f"""
-                    SELECT COUNT(*) AS n FROM (
-                        SELECT 1 FROM test_data WHERE lot_id = ?
-                        GROUP BY {key_cols}
-                        HAVING MIN(retest_flag) != 0
-                    ) sub
-                    """,
-                    [lot_id],
-                )[0]["n"]
-                inconsistent_runs = db_conn.query(
-                    f"""
-                    SELECT COUNT(*) AS n FROM (
-                        SELECT 1 FROM test_data WHERE lot_id = ?
-                        GROUP BY {key_cols}, retest_num
-                        HAVING MIN(retest_flag) != MAX(retest_flag)
-                    ) sub
-                    """,
-                    [lot_id],
-                )[0]["n"]
-                dup_current = db_conn.query(
-                    f"""
-                    SELECT COUNT(*) AS n FROM (
-                        SELECT {key_cols}
-                        FROM test_data
-                        WHERE lot_id = ? AND retest_flag = 0
-                        GROUP BY ALL
-                        HAVING COUNT(DISTINCT retest_num) > 1
-                    ) sub
-                    """,
-                    [lot_id],
-                )[0]["n"]
-
-                failed = (
-                    null_flags > 0 or orphaned_keys > 0
-                    or inconsistent_runs > 0 or dup_current > 0
-                )
-                any_failed = any_failed or failed
-
-                def _cell(n: int) -> str:
-                    return f"[red]{n:,}[/red]" if n else "0"
-
-                table.add_row(
-                    lot_id,
-                    f"{rows:,}",
-                    _cell(null_flags),
-                    _cell(orphaned_keys),
-                    _cell(inconsistent_runs),
-                    _cell(dup_current),
-                )
-
-            console.print(table)
-
-            if any_failed:
-                console.print("[red]FAILED[/red] — retest_flag invariant violations found (see counts above).")
-                sys.exit(1)
-            else:
-                console.print("[green]OK[/green] — all retest_flag invariants hold.")
-
+                df = s.q(sql)
+                if df.empty:
+                    console.print("[yellow]No results[/yellow]")
+                    return
+                table = Table(title="Query Results")
+                for col in df.columns:
+                    table.add_column(str(col))
+                for row in df.head(100).itertuples(index=False):
+                    table.add_row(*["" if v is None else str(v) for v in row])
+                console.print(table)
+                if len(df) > 100:
+                    console.print(f"[dim]... showing 100 of {len(df)} rows[/dim]")
     except Exception as e:
         console.print(f"[red]Error:[/red] {e}")
         sys.exit(1)
@@ -978,50 +738,8 @@ def fetch(ctx, product: tuple, test_type: tuple, limit: int | None, ingest: bool
 
 @main.group(name="export")
 def export_grp():
-    """Export data to CSV or Parquet."""
+    """Export lot test results to CSV (JMP-ready)."""
     pass
-
-
-@export_grp.command(name="csv")
-@click.argument("sql")
-@click.argument("output", type=click.Path(path_type=Path))
-@click.option("--format", "-f", type=click.Choice(["csv", "parquet"]), default="csv", help="Output format")
-@click.pass_context
-def export_csv(ctx, sql: str, output: Path, format: str):
-    """
-    Export query results to CSV or Parquet file.
-
-    SQL: SQL query to execute
-    OUTPUT: Output file path
-
-    Example:
-        stdf export csv "SELECT * FROM test_data" results.csv
-    """
-    config: Config = ctx.obj["config"]
-
-    console.print(f"\n[bold]stdf - Export[/bold]")
-    console.print(f"  Query: {sql[:50]}..." if len(sql) > 50 else f"  Query: {sql}")
-    console.print(f"  Output: {output}")
-    console.print()
-
-    try:
-        with Database(config.storage, config.gross_die_map) as db_conn:
-            df = db_conn.query_df(sql)
-
-            if df.empty:
-                console.print("[yellow]No results to export[/yellow]")
-                return
-
-            if format == "csv":
-                df.to_csv(output, index=False)
-            else:
-                df.to_parquet(output, index=False)
-
-            console.print(f"[green]✓[/green] Exported {len(df):,} rows to {output}")
-
-    except Exception as e:
-        console.print(f"[red]Error:[/red] {e}")
-        sys.exit(1)
 
 
 @export_grp.command(name="lot")
@@ -1051,7 +769,7 @@ def export_lot(ctx, lot_ids: tuple, output: Path, pivot: bool):
     params = list(lot_ids)
 
     try:
-        with Database(config.storage, config.gross_die_map) as db_conn:
+        with AnalysisSession(config.storage.data_dir) as s:
             if pivot:
                 # DuckDB PIVOT with dynamic values cannot use bound parameters.
                 # Fetch long-format first, then pivot via pandas (matches web API).
@@ -1075,7 +793,7 @@ def export_lot(ctx, lot_ids: tuple, output: Path, pivot: bool):
                 WHERE td.lot_id IN ({placeholders})
                 ORDER BY td.lot_id, td.wafer_id, td.part_id, td.test_name
                 """
-                long_df = db_conn.query_df(sql, params)
+                long_df = s.q(sql, params)
                 if long_df.empty:
                     df = long_df
                 else:
@@ -1112,7 +830,7 @@ def export_lot(ctx, lot_ids: tuple, output: Path, pivot: bool):
                 WHERE td.lot_id IN ({placeholders})
                 ORDER BY td.lot_id, td.wafer_id, td.part_id, td.test_num
                 """
-                df = db_conn.query_df(sql, params)
+                df = s.q(sql, params)
 
             if df.empty:
                 console.print("[yellow]No results to export[/yellow]")

@@ -1,9 +1,8 @@
 """Single source of truth for DuckDB view definitions over the Parquet store.
 
-Imported by database.py, web/api/deps.py, cli.py (db verify-flags) and
-query.py so the dedup key and the base/final view SQL exist in exactly one
-place. Paths use .as_posix() so the generated SQL is valid on Windows as well
-as POSIX hosts.
+Imported by analysis/session.py (AnalysisSession) and query.py so the dedup
+key and the base/final view SQL exist in exactly one place. Paths use
+.as_posix() so the generated SQL is valid on Windows as well as POSIX hosts.
 
 test_data dedup happens at ingest time (storage.py writes retest_flag/
 exec_seq per row), so test_data_final below is a plain predicate filter, not

@@ -14,7 +14,6 @@ from click.testing import CliRunner
 from stdf_platform import cli
 from stdf_platform.analysis import AnalysisSession
 from stdf_platform.config import Config, StorageConfig
-from stdf_platform.database import Database
 from stdf_platform.parser import STDFData
 from stdf_platform.storage import ParquetStorage
 from synth_data import _write_cp, _write_ft
@@ -84,51 +83,47 @@ def _write_mixed_lot(tmp_path: Path):
     )
 
 
-# ── database.py ──────────────────────────────────────────────────────
+# ── AnalysisSession.lot_summary / .runs (ex-database.py) ──────────────
 
 def test_get_lot_summary_exposes_job_mixed(tmp_path):
     _write_mixed_lot(tmp_path)
-    cfg = StorageConfig(data_dir=tmp_path, database=tmp_path / "db.duckdb")
-    with Database(cfg) as db:
-        rows = db.get_lot_summary()
-        assert len(rows) == 1
-        row = rows[0]
-        assert row["job_mixed"] is True
+    with AnalysisSession(tmp_path) as s:
+        df = s.lot_summary()
+        assert len(df) == 1
+        row = df.iloc[0]
+        assert row["job_mixed"] == True
         assert row["job_variant_count"] == 2
 
 
 def test_get_lot_summary_job_mixed_false_for_single_program(tmp_path):
     _write_cp(tmp_path)
-    cfg = StorageConfig(data_dir=tmp_path, database=tmp_path / "db.duckdb")
-    with Database(cfg) as db:
-        rows = db.get_lot_summary("LOT1")
-        assert len(rows) == 1
-        assert rows[0]["job_mixed"] is False
-        assert rows[0]["job_variant_count"] == 1
+    with AnalysisSession(tmp_path) as s:
+        df = s.lot_summary("LOT1")
+        assert len(df) == 1
+        assert df.iloc[0]["job_mixed"] == False
+        assert df.iloc[0]["job_variant_count"] == 1
 
 
 def test_get_runs_returns_one_row_per_wafer_retest(tmp_path):
     _write_mixed_lot(tmp_path)
-    cfg = StorageConfig(data_dir=tmp_path, database=tmp_path / "db.duckdb")
-    with Database(cfg) as db:
-        rows = db.get_runs()
-        assert len(rows) == 2
-        by_wafer = {r["wafer_id"]: r for r in rows}
+    with AnalysisSession(tmp_path) as s:
+        df = s.runs()
+        assert len(df) == 2
+        by_wafer = {row["wafer_id"]: row for _, row in df.iterrows()}
         assert by_wafer["W1"]["job_rev"] == "RevA"
         assert by_wafer["W2"]["job_rev"] == "RevB"
-        # ordering: lot_id, wafer_id, retest_num
-        assert [r["wafer_id"] for r in rows] == ["W1", "W2"]
+        # ordering: start_time (W1 run at 1000, W2 run at 3000)
+        assert list(df["wafer_id"]) == ["W1", "W2"]
 
 
 def test_get_runs_lot_filter(tmp_path):
     _write_mixed_lot(tmp_path)
     _write_ft(tmp_path)
-    cfg = StorageConfig(data_dir=tmp_path, database=tmp_path / "db.duckdb")
-    with Database(cfg) as db:
-        rows = db.get_runs("FT1")
-        assert len(rows) == 1
-        assert rows[0]["lot_id"] == "FT1"
-        assert rows[0]["wafer_id"] == ""
+    with AnalysisSession(tmp_path) as s:
+        df = s.runs(lot_id="FT1")
+        assert len(df) == 1
+        assert df.iloc[0]["lot_id"] == "FT1"
+        assert df.iloc[0]["wafer_id"] == ""
 
 
 # ── CLI ──────────────────────────────────────────────────────────────
