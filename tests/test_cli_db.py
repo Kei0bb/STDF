@@ -80,6 +80,24 @@ def test_db_query_prints_null_without_na_literal(tmp_path, synth_store):
     assert "nan" not in r.output.lower()
 
 
+def test_db_query_prints_array_cell_and_null_together(tmp_path, synth_store):
+    """A DuckDB LIST/ARRAY result column comes back from .fetchdf() as a
+    multi-element numpy array; pd.isna() on that raises ValueError ("The
+    truth value of an array with more than one element is ambiguous"),
+    unlike a single-element array (numpy allows bool() on size-1 arrays,
+    so that case "coincidentally" worked before the ndim guard). Pins both:
+    the 3-element array must render its contents, the 1-element array too,
+    and the NULL column alongside them must still render blank.
+    """
+    r = CliRunner().invoke(main, [
+        "db", "query",
+        "SELECT [1,2,3] AS arr, [1] AS single, NULL::INTEGER AS n"],
+        env={"STDF_CONFIG": str(_write_config(tmp_path, synth_store))})
+    assert r.exit_code == 0, r.output
+    assert "1" in r.output and "2" in r.output and "3" in r.output
+    assert "<NA>" not in r.output
+
+
 def test_db_query_usage_error_both_sql_and_file(tmp_path, synth_store):
     sql_file = tmp_path / "q.sql"
     sql_file.write_text("SELECT 1")

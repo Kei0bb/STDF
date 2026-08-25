@@ -7,6 +7,7 @@ import shutil
 from pathlib import Path
 
 import click
+import numpy as np
 import pandas as pd
 from rich.console import Console
 from rich.table import Table
@@ -30,7 +31,16 @@ def _cell(v, default: str = "", fmt=str) -> str:
     `pd.NA` (`TypeError: boolean value of NA is ambiguous`) or silently print
     "<NA>"/"nan". This is the one null check every itertuples()-based table
     renderer in this module goes through.
+
+    `db query` runs arbitrary user SQL, so `v` may also be a DuckDB
+    LIST/ARRAY result, which `.fetchdf()` hands back as a multi-element
+    numpy array — `pd.isna()` on THAT raises `ValueError: The truth value
+    of an array with more than one element is ambiguous`. `np.ndim(v) != 0`
+    (true for any array/list, regardless of length) routes those straight
+    to `fmt(v)` without ever reaching `pd.isna()`.
     """
+    if np.ndim(v) != 0:
+        return fmt(v)
     if v is None or pd.isna(v):
         return default
     return fmt(v)
