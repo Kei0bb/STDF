@@ -803,7 +803,7 @@ ORDER BY cpk;
 | | 8-1 | 8-2 |
 |---|---|---|
 | 母集団 | 1 ロット | 工程 × 試験プログラムで絞ったロット全部 |
-| 現行スペック | 行が持つリミットで `GROUP BY` | **基準ロット**（`start_time` 最大）のリミット。無ければ直近のロットへ遡る |
+| 現行スペック | 行が持つリミットで `GROUP BY` | **基準ロット**（`start_time` 最大）のリミット |
 | 出力 | Cp / Cpk | + 新リミット候補 / fail 件数 / プログラム版 |
 
 > [!IMPORTANT]
@@ -812,15 +812,17 @@ ORDER BY cpk;
 > 読むことになり、集約キーに文字列が 3 本増えて実測 +31% 遅くなります。
 
 > [!NOTE]
-> **現行スペックは基準ロット 1 本に固定していません。** 固定すると、そのロットで
-> そのテストが流れていない（改番・追加削除・条件分岐）、あるいは最初の PTR が
-> `OPT_FLAG` 無効で `(0, 0)` だった（8-6 の原因 3）というだけで `cur_lsl` /
-> `cur_usl` が空欄になり、`cpk_current` も `direction` も出せなくなります。
-> **同じ test プログラムでも `test_num` と `test_name` の対応はロットによって
-> ずれる**ため、これは珍しくありません。そこで**そのテストのリミットを持つ最も
-> 新しいファイル**（基準ロット優先 → 無ければ遡る）を現行スペックとし、出所を
-> `spec_lot_id` / `spec_job_name` / `spec_job_rev` に出します。対応ズレそのものの
-> 洗い出しは **8-7** を使ってください。
+> **`cur_lsl` / `cur_usl` が空欄（`NOT_IN_LATEST_LOT`）になる、同じテストが 2 行に
+> 割れる**場合は、`test_num` と `test_name` の対応がロットによってずれています
+> （同じテストプログラムでも起こります）。派生クエリを使ってください。
+>
+> | | 集約キー | 現行スペック |
+> |---|---|---|
+> | **8-2**（本節） | `test_num` | 基準ロットのみ。無ければ空欄 |
+> | **8-2-1** | `test_num` | 基準ロット優先 → 無ければ直近ロットへ遡る |
+> | **8-2-2** | 代表テスト名 | 8-2-1 と同じ（改番をまたいで 1 行にまとめる） |
+>
+> ズレそのものの洗い出しは **8-7** です。
 
 **このクエリが答える 3 つの問い**
 
@@ -828,13 +830,10 @@ ORDER BY cpk;
   新リミット候補は `direction`（`LOOSEN` / `TIGHTEN` / `MIXED`）付きで出ます。
 - *「そのスペックは最新か」* — リミットは STDF の PTR/MPR にロット（＝ファイル）ごとに
   記録されています。**基準ロット（`start_time` 最大）のリミットを「現行」**とし、Cp / Cpk と
-  `direction` はこれに対して計算します。基準ロットにそのテストが無い場合は
-  **直近のロットまで遡って**採り、`SPEC_FROM_OLDER_LOT` を立てます（上記 NOTE）。
-  全ロットを通してリミットが変わっているかは
+  `direction` はこれに対して計算します。全ロットを通してリミットが変わっているかは
   `limits_changed` / `LIMIT_CHANGED` で示します。
-- *「どのテストプログラムか」* — `lots.job_name` / `job_rev` を join し、**その行の
-  リミットを採ったロットの版**を `spec_lot_id` / `spec_job_name` / `spec_job_rev` に
-  出します。逆に**特定の
+- *「どのテストプログラムか」* — `lots.job_name` / `job_rev` を join し、基準ロットの版を
+  `ref_lot_id` / `latest_job_name` / `latest_job_rev` に出します。逆に**特定の
   プログラム版だけを対象にしたい場合は `params` の `job_name` / `job_rev` に値を
   入れます**（`NULL` なら工程内の全版が対象）。指定するとロット集合・基準ロットの
   両方がその版に揃うので、プログラム改版をまたいだ母集団の混在を避けられます。
@@ -849,16 +848,15 @@ flowchart TD
     TL --> BASE
     BASE["① base<br/>対象ロットの全測定<br/>rec_type = PTR / MPR<br/>test_name ILIKE（任意）<br/>lo_limit &lt; hi_limit<br/>units = V / A 系"]
 
-    BASE --> SP["② spec_pool<br/>ファイル単位のリミット<br/>lot × wafer × retest"]
-    TL --> LL["③ latest_lot<br/>対象ロット内で<br/>start_time 最大の 1 本<br/>= 基準ロット"]
-    SP --> CS["④ current_spec<br/>そのテストのリミットを持つ<br/>最も新しいファイル<br/>基準ロット優先 → 無ければ遡る<br/>= 現行スペック / test_name / units"]
-    LL --> CS
+    TL --> LL["② latest_lot<br/>対象ロット内で<br/>start_time 最大の 1 本<br/>= 基準ロット"]
+    LL --> CS["③ current_spec<br/>基準ロットのリミット<br/>= 現行スペック"]
+    TD -->|"基準ロットのぶんだけ"| CS
 
-    BASE --> ST["⑤ stats<br/>キー: test_num<br/>n / mean / σ / fail 件数"]
-    ST --> CAND["⑥ 目標帯<br/>広げる先 mean ± 3 × cpk_min × σ<br/>締める先 mean ± 3 × cpk_max × σ<br/>有効数字 3 桁・緩い側へ丸め"]
-    CAND --> CL["⑦ clamped<br/>現行スペックを帯で挟む<br/>帯の中ならそのまま"]
+    BASE --> ST["④ stats<br/>キー: test_num<br/>n / mean / σ / fail 件数"]
+    ST --> CAND["⑤ 目標帯<br/>広げる先 mean ± 3 × cpk_min × σ<br/>締める先 mean ± 3 × cpk_max × σ<br/>有効数字 3 桁・緩い側へ丸め"]
+    CAND --> CL["⑥ clamped<br/>現行スペックを帯で挟む<br/>帯の中ならそのまま"]
     CS --> CL
-    CS --> JUDGE["⑧ Cpk 判定・direction・フラグ"]
+    CS --> JUDGE["⑦ Cpk 判定・direction・フラグ"]
     CL --> JUDGE
 ```
 
@@ -866,9 +864,8 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-    S["片側ごとに<br/>現行を目標帯で挟む"] --> A{"基準ロットに<br/>そのテストのリミットがある?"}
-    A -->|"なし"| NB["直近のロットまで遡って採用<br/>flags: SPEC_FROM_OLDER_LOT<br/>spec_lot_id に出所<br/>→ 判定は続行（空欄にしない）"]
-    NB --> B
+    S["片側ごとに<br/>現行を目標帯で挟む"] --> A{"基準ロットに<br/>そのテストがある?"}
+    A -->|"なし"| NB["NO_BASELINE<br/>新規追加 or 削除されたテスト<br/>→ 現行スペックとの比較不可"]
     A -->|"あり"| B{"両側とも外側へ?"}
     B -->|"はい"| L["LOOSEN（緩和候補）<br/>現行が帯より狭い = Cpk 不足<br/>→ cpk_min の線まで広げる"]
     B -->|"いいえ"| C{"両側とも内側へ?"}
@@ -876,6 +873,364 @@ flowchart TD
     C -->|"いいえ"| D{"現行と完全一致?"}
     D -->|"はい"| N["NO_CHANGE<br/>現行が帯の中<br/>= 動かす理由がない"]
     D -->|"いいえ"| M["MIXED<br/>片側は緩め・片側は締め"]
+```
+
+```sql
+WITH params AS (
+    SELECT 'YOUR_PRODUCT'         AS product,
+           'CP'                   AS test_category,   -- 必ず指定（上記 IMPORTANT）
+           'CP1'                  AS sub_process,     -- 必ず指定
+           -- 新リミットの目標帯。現行スペックがこの帯の外にあるときだけ動かす
+           -- （帯の中なら NO_CHANGE）。σ 換算は 3 × Cpk
+           CAST(1.33 AS DOUBLE)   AS cpk_min,   -- 下回るなら広げる（±3.99σ）
+           CAST(3.00 AS DOUBLE)   AS cpk_max,   -- 上回るなら締める（±9σ）
+           30                     AS min_n,             -- これ未満は LOW_SAMPLE
+           -- テスト名のあいまい検索。ILIKE なので大文字小文字を区別しない。
+           -- 例 CAST('%IDD%' AS VARCHAR) / NULL なら全テスト
+           CAST(NULL AS VARCHAR)  AS test_name_like,
+           -- 試験プログラムで絞る。NULL なら工程内の全プログラム版が対象。
+           -- 使える値は 1-1 / 1-2 のクエリで確認できる
+           CAST(NULL AS VARCHAR)  AS job_name,          -- 例 'PROG_A'
+           CAST(NULL AS VARCHAR)  AS job_rev,           -- 例 'Rev04'
+           -- 除外ロット。例 CAST('2620%' AS VARCHAR) / 不要なら NULL のまま
+           CAST(NULL AS VARCHAR)  AS exclude_lot_pattern
+),
+
+-- ⓪ 対象ロット: 工程 + 試験プログラム + 除外パターンで確定させる。
+--    以降の base / latest_lot は必ずこの集合に揃える
+target_lots AS (
+    SELECT l.lot_id, l.job_name, l.job_rev, l.start_time
+    FROM lots l CROSS JOIN params pa
+    WHERE l.product       = pa.product
+      AND l.test_category = pa.test_category
+      AND l.sub_process   = pa.sub_process
+      AND (pa.job_name IS NULL OR l.job_name = pa.job_name)
+      AND (pa.job_rev  IS NULL OR l.job_rev  = pa.job_rev)
+      AND (pa.exclude_lot_pattern IS NULL
+           OR l.lot_id NOT LIKE pa.exclude_lot_pattern)
+),
+
+-- ① 母集団: 対象ロットの全測定（最新 run のみ = test_data_final）
+base AS (
+    SELECT td.test_num, td.test_name, td.units,
+           td.lo_limit, td.hi_limit, td.result, td.passed
+    FROM test_data_final td CROSS JOIN params pa
+    WHERE td.product       = pa.product
+      AND td.test_category = pa.test_category
+      AND td.sub_process   = pa.sub_process
+      AND td.rec_type IN ('PTR', 'MPR')
+      AND td.lot_id IN (SELECT lot_id FROM target_lots)
+      AND (pa.test_name_like IS NULL OR td.test_name ILIKE pa.test_name_like)
+      AND td.result IS NOT NULL   AND isfinite(td.result)
+      AND td.lo_limit IS NOT NULL AND isfinite(td.lo_limit)
+      AND td.hi_limit IS NOT NULL AND isfinite(td.hi_limit)
+      AND td.lo_limit < td.hi_limit   -- リミット無しテストの (0,0) もここで落ちる
+      -- 単位は V / A 系のみ（V, MV, UV, NA, PA … 接頭辞 1 文字まで許容）。
+      -- 全テストを対象にするならこの 1 行を削除
+      AND regexp_matches(UPPER(TRIM(td.units)), '^.?[VA]$')
+),
+
+-- ② 基準ロット: 対象ロット内で start_time 最大の 1 本
+--    lot_id はタイブレーク。start_time が同値のロットがあると基準ロットが
+--    実行ごとに変わり、現行スペックが揺れるため
+latest_lot AS (
+    SELECT lot_id, job_name, job_rev
+    FROM (
+        SELECT l.*, ROW_NUMBER() OVER (
+                   ORDER BY l.start_time DESC, l.lot_id DESC) AS rn
+        FROM target_lots l
+    ) WHERE rn = 1
+),
+
+-- ③ 現行スペック = 基準ロットが持っていたリミット（テスタが実際に適用した値）
+--    lot_id はパーティション列なので、基準ロットのぶんだけ読めば済む（実測 0.02 s）
+current_spec AS (
+    SELECT td.test_num,
+           ANY_VALUE(td.lo_limit) AS cur_lsl,
+           ANY_VALUE(td.hi_limit) AS cur_usl
+    FROM test_data_final td CROSS JOIN params pa
+    WHERE td.product       = pa.product
+      AND td.test_category = pa.test_category
+      AND td.sub_process   = pa.sub_process
+      AND td.lot_id        = (SELECT lot_id FROM latest_lot)
+      AND td.rec_type IN ('PTR', 'MPR')
+      AND td.lo_limit IS NOT NULL AND isfinite(td.lo_limit)
+      AND td.hi_limit IS NOT NULL AND isfinite(td.hi_limit)
+      AND td.lo_limit < td.hi_limit
+    GROUP BY ALL
+),
+
+-- ④ 統計
+stats AS (
+    SELECT
+        test_num,
+        ANY_VALUE(test_name)                 AS test_name,
+        ANY_VALUE(units)                     AS units,
+        COUNT(*)                             AS n,
+        COUNT(*) FILTER (WHERE passed = 'F') AS fail_n,
+        AVG(result)                          AS mean,
+        STDDEV_SAMP(result)                  AS sigma,
+        MIN(result)                          AS min_val,
+        MAX(result)                          AS max_val,
+        -- リミット変更検知。COUNT(DISTINCT ...) は行ごとにハッシュ集合を作るため
+        -- 高い。MIN/MAX の不一致で等価に判定できる
+        MIN(lo_limit)                        AS lo_limit_min,
+        MAX(lo_limit)                        AS lo_limit_max,
+        MIN(hi_limit)                        AS hi_limit_min,
+        MAX(hi_limit)                        AS hi_limit_max
+    FROM base
+    GROUP BY ALL
+    HAVING COUNT(*) > 1
+),
+
+-- ⑤ 新リミット候補 = 目標帯の 2 本の線
+--    広げる先 mean ± 3 × cpk_min × σ / 締める先 mean ± 3 × cpk_max × σ。
+--    現行スペックをこの 2 本で挟む（帯の中ならそのまま）
+candidate AS (
+    SELECT s.*, cs.cur_lsl, cs.cur_usl,
+           ll.lot_id   AS ref_lot_id,
+           ll.job_name AS latest_job_name,
+           ll.job_rev  AS latest_job_rev,
+           pa.cpk_min, pa.cpk_max, pa.min_n,
+           s.mean - 3.0 * pa.cpk_min * s.sigma AS lsl_widen_exact,
+           s.mean - 3.0 * pa.cpk_max * s.sigma AS lsl_tight_exact,
+           s.mean + 3.0 * pa.cpk_min * s.sigma AS usl_widen_exact,
+           s.mean + 3.0 * pa.cpk_max * s.sigma AS usl_tight_exact
+    FROM stats s
+    CROSS JOIN (SELECT cpk_min, cpk_max, min_n FROM params) pa
+    CROSS JOIN latest_lot ll
+    LEFT JOIN current_spec cs USING (test_num)
+    WHERE s.sigma IS NOT NULL AND isfinite(s.sigma) AND s.sigma > 0
+),
+rounded AS (
+    SELECT c.*,
+           -- 表示桁数。ROUND(x, 6) 固定だと ILPP のような 1e-6 〜 1e-9 の
+           -- 微小電流が 0 に丸められてしまうため、そのテスト自身のスケール
+           -- （mean と sigma の小さいほう）から小数桁を決める。
+           -- 例 sigma = 2.5e-9 → 15 桁。1 以上のスケールでは従来どおり 6 桁
+           GREATEST(6, 6 - CAST(FLOOR(LOG10(LEAST(
+               NULLIF(ABS(c.mean), 0), c.sigma))) AS INTEGER)) AS disp_digits,
+           -- 帯の 4 本を有効数字 3 桁へ丸める。LSL は FLOOR / USL は CEIL なので
+           -- 常に「緩い側」に丸まる（丸めで意図せず厳しくならない）。
+           -- 丸めは現行値ではなく帯の線にだけかける。現行値を丸めると、
+           -- 動かさない項目まで cur とズレて NO_CHANGE にならなくなる
+           CASE WHEN lsl_widen_exact = 0 THEN 0 ELSE
+                FLOOR(lsl_widen_exact / POW(10, FLOOR(LOG10(ABS(lsl_widen_exact))) - 2))
+                     * POW(10, FLOOR(LOG10(ABS(lsl_widen_exact))) - 2) END AS lsl_widen,
+           CASE WHEN lsl_tight_exact = 0 THEN 0 ELSE
+                FLOOR(lsl_tight_exact / POW(10, FLOOR(LOG10(ABS(lsl_tight_exact))) - 2))
+                     * POW(10, FLOOR(LOG10(ABS(lsl_tight_exact))) - 2) END AS lsl_tight,
+           CASE WHEN usl_widen_exact = 0 THEN 0 ELSE
+                CEIL(usl_widen_exact / POW(10, FLOOR(LOG10(ABS(usl_widen_exact))) - 2))
+                     * POW(10, FLOOR(LOG10(ABS(usl_widen_exact))) - 2) END AS usl_widen,
+           CASE WHEN usl_tight_exact = 0 THEN 0 ELSE
+                CEIL(usl_tight_exact / POW(10, FLOOR(LOG10(ABS(usl_tight_exact))) - 2))
+                     * POW(10, FLOOR(LOG10(ABS(usl_tight_exact))) - 2) END AS usl_tight
+    FROM candidate c
+),
+
+-- ⑥ 現行スペックを帯で挟む。GREATEST / LEAST は NULL を無視するので、
+--    NOT_IN_LATEST_LOT の行は cpk_min の線がそのまま出る
+clamped AS (
+    SELECT r.*,
+           GREATEST(LEAST(r.cur_lsl, r.lsl_widen), r.lsl_tight) AS new_lsl,
+           LEAST(GREATEST(r.cur_usl, r.usl_widen), r.usl_tight) AS new_usl
+    FROM rounded r
+)
+
+-- ⑦ 判定
+SELECT
+    test_num, test_name, units,
+
+    -- 母集団と pass/fail
+    n, fail_n,
+    ROUND(100.0 * fail_n / NULLIF(n, 0), 3) AS fail_pct,
+
+    -- 分布
+    ROUND(mean, disp_digits)    AS mean,
+    ROUND(sigma, disp_digits)   AS sigma,
+    ROUND(min_val, disp_digits) AS min_val,
+    ROUND(max_val, disp_digits) AS max_val,
+
+    -- 現行スペック（基準ロット）とその出所
+    -- STDF の限界値は元が 32bit float のため、DOUBLE に上がると
+    -- 0.019999999999995529 のような表示になることがある。丸めは表示用のみ
+    -- （cp_current / cpk_current は元の精度のまま計算している）
+    ref_lot_id, latest_job_name, latest_job_rev,
+    ROUND(cur_lsl, disp_digits) AS cur_lsl,
+    ROUND(cur_usl, disp_digits) AS cur_usl,
+    (lo_limit_min <> lo_limit_max
+     OR hi_limit_min <> hi_limit_max) AS limits_changed,
+    ROUND((cur_usl - cur_lsl) / (6 * sigma), 3) AS cp_current,
+    -- LEAST は NULL を無視するため、片側だけ欠けていても値が出てしまう。
+    -- 両側そろっている行だけ Cpk を出す
+    CASE WHEN cur_lsl IS NULL OR cur_usl IS NULL THEN NULL ELSE
+        ROUND(LEAST((cur_usl - mean) / (3 * sigma),
+                    (mean - cur_lsl) / (3 * sigma)), 3) END AS cpk_current,
+
+    -- 新スペック候補
+    ROUND(new_lsl, disp_digits) AS new_lsl,
+    ROUND(new_usl, disp_digits) AS new_usl,
+    ROUND(new_lsl - cur_lsl, disp_digits) AS lsl_change,
+    ROUND(new_usl - cur_usl, disp_digits) AS usl_change,
+
+    CASE
+        WHEN cur_lsl IS NULL OR cur_usl IS NULL       THEN 'NO_BASELINE'
+        WHEN new_lsl <  cur_lsl AND new_usl >  cur_usl THEN 'LOOSEN'
+        WHEN new_lsl >  cur_lsl AND new_usl <  cur_usl THEN 'TIGHTEN'
+        WHEN new_lsl =  cur_lsl AND new_usl =  cur_usl THEN 'NO_CHANGE'
+        ELSE 'MIXED'
+    END AS direction,
+
+    CONCAT_WS(',',
+        CASE WHEN n < min_n                  THEN 'LOW_SAMPLE'        END,
+        CASE WHEN cur_lsl IS NULL
+               OR cur_usl IS NULL            THEN 'NOT_IN_LATEST_LOT' END,
+        CASE WHEN lo_limit_min <> lo_limit_max
+               OR hi_limit_min <> hi_limit_max
+                                             THEN 'LIMIT_CHANGED'     END
+    ) AS flags
+
+FROM clamped
+-- Cpk 不足のものだけ。全件見るならこの WHERE を削除
+WHERE cpk_current IS NULL OR cpk_current < cpk_min
+ORDER BY cpk_current NULLS LAST, test_num;
+```
+
+**読み方**
+
+- `cpk_current` が小さい順に並びます。`NULL`（= `NO_BASELINE`）は基準ロットに
+  そのテストが無く、現行スペックと比較できないものです。
+- `direction = 'LOOSEN'` → 現行が帯より狭い（Cpk 不足）ので `cpk_min` の線まで
+  広げる提案です。`min_val` / `max_val` と見比べて、実測レンジに対して妥当な
+  広げ方かを確認します。データシート上限に当たるならここで手を止めてください。
+- `direction = 'TIGHTEN'` → 現行が帯より広い（spec 過剰）ので `cpk_max` の線まで
+  締める提案です。`min_val` / `max_val` が新リミットの内側に収まっているかが
+  歯止めになります。
+- `direction = 'NO_CHANGE'` → 現行スペックが帯の中に収まっており、動かす理由が
+  ありません。`cpk_min` 〜 `cpk_max` を広く取るほどこれが増えます。
+- `direction = 'MIXED'` → 片側だけ帯の外。分布が偏っていて、USL 側だけ余裕がある
+  ようなケースです。
+- `fail_n` / `fail_pct` はそのテスト単体の fail 件数・率です（`test_data.passed`）。
+- `LIMIT_CHANGED` → そのテストのリミットは対象ロットの間で変更されています。
+  `cur_lsl` / `cur_usl` は基準ロット（`ref_lot_id`、プログラム版は `latest_job_rev`）の
+  ものです。`fail_n` はテスタが各ロットのリミットで判定した結果なので、この
+  フラグが付いた行の `fail_n` は複数基準の混ぜ物になります。
+- データシートとの突き合わせは、この出力を CSV に落として Excel 側で重ねて
+  ください（`test_num` / `test_name` / `cur_lsl` / `cur_usl` / `new_lsl` / `new_usl`
+  が揃っています）。
+
+**既知の限界**
+
+- **母集団は全ダイです**（良品ダイの選別はしていません）。他テストで不良になった
+  ダイの測定値も σ に乗るため、Cpk は実力より**低め＝保守的**に出ます。そのテスト
+  自体の不良は `fail_n` / `fail_pct` で確認できます。
+- 全ロットプールの σ なので、厳密には Cpk ではなく **Ppk（overall performance）**
+  相当です。ロット間シフトも σ に乗ります。
+- `mean ± 3σ` は正規分布を前提にしています。リーク電流のように対数正規・片側裾を
+  引く分布では新リミット候補が実測とかけ離れるので、`min_val` / `max_val` と必ず
+  突き合わせてください。
+- `lots.job_name` / `job_rev` は `runs`（wafer 単位 / FT lot run 単位で MIR を保持する
+  テーブル）から集約した VIEW の値で、**lot 内の最新 run のもの**です（`start_time` が
+  最も新しい run）。lot 内でプログラムが変わったケース（TP 混在）は `lots.job_mixed`
+  で検知でき、どの wafer がどちらの版かは `runs` を直接引けば追跡できます
+  （下記「TP 混在検出」参照）。8-2 のように lot 単位でリミットを比較する場合、
+  `job_mixed` の lot は複数版の測定値が混ざっている点に注意してください。
+- パーサは PTR の `OPT_FLAG` を解釈せずリミット領域を読むため（`parser.py`）、
+  リミット未定義のテストに 0 等が入り得ます。`lo_limit < hi_limit` で大半は
+  落ちますが、`min_val` / `max_val` と突き合わせて確認してください。
+- **`test_name` を突合キーにしないでください**（Excel で重ねるときも `test_num` で
+  VLOOKUP します）。`parser.py` はテスト名をファイルごとに最初の PTR から 1 回だけ
+  取りますが、STDF の TEST_TXT は任意フィールドなので、ロットによって空だったり
+  プログラム改版で変わったりします。逆に、同じ名前のテストが版によって別の
+  `test_num` になる（改番）こともあります。同じ `test_num` に複数の名前がぶら下がると
+  `ANY_VALUE` がどれを返すか不定です。**両方向の対応ズレは 8-7 で洗い出せます。**
+  名前の揺れだけなら次でも確認できます:
+
+  ```sql
+  SELECT test_num, COUNT(DISTINCT test_name) AS name_variants,
+         string_agg(DISTINCT '[' || test_name || ']', ' ') AS names
+  FROM test_data_final
+  WHERE product = 'YOUR_PRODUCT' AND test_category = 'CP' AND sub_process = 'CP1'
+    AND rec_type IN ('PTR', 'MPR')
+  GROUP BY 1 HAVING COUNT(DISTINCT test_name) > 1 ORDER BY 1;
+  ```
+- 集約キーは `test_num` のみで、`pin_num` は含めていません。MPR（ピンごとの測定）の
+  テストは**全ピンが 1 つの分布にまとまります**。ピン別に見る必要がある場合は、
+  `base` / `stats` / `current_spec` のキーと `LEFT JOIN ... USING` に `pin_num`
+  （PTR は NULL なので `COALESCE(pin_num, -1)`）を足してください。
+  対象データに MPR があるかは `SELECT COUNT(*) FROM test_data_final WHERE
+  rec_type = 'MPR'` で確認できます。
+
+**性能上の注意**
+
+合成データ（`test_data` 800 万行）で測った、重い要素の単価です。本クエリは
+`test_data` を 1 パス走査するだけなので、複数回参照によるマテリアライズも起きません
+（メモリ量に依存しない）。
+
+| 要素 | 追加時間 | 本クエリでの扱い |
+|---|---|---|
+| `MEDIAN` + `MAD`（robust 外れ値判定） | +0.95 s | 不採用 |
+| `QUANTILE_CONT` × 2（IQR） | +0.48 s | 不採用 |
+| パーティション列を集約キーに含める | +0.27 s | 不採用（工程を指定して回避） |
+| `COUNT(DISTINCT ...)` × 3 | +0.44 s | 不採用（`MIN`/`MAX` で等価判定） |
+| 分位点 / skewness | +0.34 s | 不採用 |
+| 良品ダイ選別（`parts` との join） | +0.24 s | 不採用 |
+| 逸脱 ppm の再走査 | +0.09 s | 不採用 |
+
+### 8-2-1. 8-2 の派生 — 現行スペックが空欄になるのを防ぐ
+
+8-2 は現行スペックを**基準ロット（`start_time` 最大）1 本**からしか採りません。
+そのため基準ロットで
+
+1. そのテストが**別の `test_num` で流れている**（改番）
+2. そのテストが**流れていない**（追加削除・条件分岐）
+3. 最初の PTR が `OPT_FLAG` 無効で `(0, 0)` だった（8-6 の原因 3）
+
+のどれかが起きているだけで `cur_lsl` / `cur_usl` が空欄になり、`cpk_current` も
+`direction` も出せません（`NOT_IN_LATEST_LOT` / `NO_BASELINE`）。**同じテスト
+プログラムでも `test_num` と `test_name` の対応はロットによってずれる**ので（8-7）、
+これは珍しくありません。
+
+この派生では、現行スペックを**そのテストのリミットを持つ「最も新しいファイル」**から
+採ります。基準ロットにあればそれを使い、無ければ直近のロットへ遡ります。**採った
+ファイルの出所を行ごとに列へ出す**ので、遡った行は一目で分かります。
+
+| | 8-2 | 8-2-1 |
+|---|---|---|
+| 集約キー | `test_num` | `test_num`（同じ） |
+| 現行スペック | 基準ロットのみ。無ければ空欄 | 基準ロット優先 → 無ければ直近ロットへ遡る |
+| 出所の列 | `ref_lot_id` / `latest_job_name` / `latest_job_rev`（全行同じ） | `spec_lot_id` / `spec_job_name` / `spec_job_rev`（**行ごと**） |
+| `test_name` / `units` | `ANY_VALUE`（どれが出るか不定） | スペックを採ったファイルの値。空名は飛ばす |
+| 追加フラグ | — | `SPEC_FROM_OLDER_LOT` / `NAME_VARIES` |
+| `test_data` の走査 | 1 パス + 基準ロット再読み（実測 0.02 s） | 1 パスのみ |
+
+> [!IMPORTANT]
+> 遡って埋めた `cur_lsl` / `cur_usl` は**基準ロットで適用された値ではありません**。
+> `spec_lot_id` を必ず確認してください。`SPEC_FROM_OLDER_LOT` が多数の行に一斉に
+> 付く場合は、母集団の取り方（基準ロットだけ別プログラムだった、など）を
+> 疑ってください。
+
+**データの流れ**（8-2 からの変更は ②〜④）
+
+```mermaid
+flowchart TD
+    LO["lots"] --> TL["⓪ target_lots<br/>工程 + 試験プログラム<br/>job_name / job_rev で絞る"]
+    TD["test_data_final<br/>retest_flag = 0"] --> BASE
+    TL --> BASE
+    BASE["① base<br/>対象ロットの全測定<br/>+ lot_id / wafer_id / retest_num"]
+
+    BASE --> SP["② spec_pool<br/>ファイル単位のリミット<br/>lot × wafer × retest"]
+    TL --> LL["③ latest_lot<br/>start_time 最大の 1 本<br/>= 基準ロット"]
+    SP --> CS["④ current_spec<br/>そのテストのリミットを持つ<br/>最も新しいファイル<br/>基準ロット優先 → 無ければ遡る<br/>= 現行スペック / test_name / units"]
+    LL --> CS
+
+    BASE --> ST["⑤ stats<br/>キー: test_num"]
+    ST --> CAND["⑥ 目標帯"]
+    CAND --> CL["⑦ clamped<br/>現行スペックを帯で挟む"]
+    CS --> CL
+    CS --> JUDGE["⑧ Cpk 判定・direction・フラグ"]
+    CL --> JUDGE
 ```
 
 ```sql
@@ -1144,106 +1499,337 @@ WHERE cpk_current IS NULL OR cpk_current < cpk_min
 ORDER BY cpk_current NULLS LAST, test_num;
 ```
 
-**読み方**
+**8-2 からの読み替え**
 
-- `cpk_current` が小さい順に並びます。母集団の中に有効なリミット（`lo < hi`）を持つ
-  ファイルが 1 本でもあれば現行スペックは必ず埋まるので、`NULL`（= `NO_BASELINE`）は
-  通常出ません。出た場合は `base` のフィルタを緩めた（`lo_limit < hi_limit` を外した等）
-  ときだけです。
 - `spec_lot_id` / `spec_job_name` / `spec_job_rev` — **その行の `cur_lsl` / `cur_usl` を
-  採ったファイルのロットとプログラム版**です。基準ロット以外なら
-  `SPEC_FROM_OLDER_LOT` が付きます。
-- `direction = 'LOOSEN'` → 現行が帯より狭い（Cpk 不足）ので `cpk_min` の線まで
-  広げる提案です。`min_val` / `max_val` と見比べて、実測レンジに対して妥当な
-  広げ方かを確認します。データシート上限に当たるならここで手を止めてください。
-- `direction = 'TIGHTEN'` → 現行が帯より広い（spec 過剰）ので `cpk_max` の線まで
-  締める提案です。`min_val` / `max_val` が新リミットの内側に収まっているかが
-  歯止めになります。
-- `direction = 'NO_CHANGE'` → 現行スペックが帯の中に収まっており、動かす理由が
-  ありません。`cpk_min` 〜 `cpk_max` を広く取るほどこれが増えます。
-- `direction = 'MIXED'` → 片側だけ帯の外。分布が偏っていて、USL 側だけ余裕がある
-  ようなケースです。
-- `fail_n` / `fail_pct` はそのテスト単体の fail 件数・率です（`test_data.passed`）。
-- `SPEC_FROM_OLDER_LOT` → 基準ロットにそのテストの有効なリミットが無かったので、
-  直近のロット（`spec_lot_id`）まで遡って採りました。原因は「改番された」
-  「そのロットでは流れていない」「最初の PTR が `OPT_FLAG` 無効で `(0, 0)`」の
-  いずれかです。切り分けは 8-7（対応ズレ）と 8-6（リミットの揺れ）で行います。
-  **多数の行に一斉に付く場合は母集団の取り方を疑ってください**（基準ロットだけ
-  別プログラムだった、など）。
-- `NAME_VARIES` → その `test_num` が対象ロットの中で複数のテスト名を持っています。
-  表示している `test_name` は「名前を持つ最も新しいファイル」のものです。
-  `test_name` での突合（Excel の VLOOKUP 等）はこの行には使えません。8-7 参照。
-- `LIMIT_CHANGED` → そのテストのリミットは対象ロットの間で変更されています。
-  `cur_lsl` / `cur_usl` は `spec_lot_id` のロット（プログラム版は `spec_job_rev`）の
-  ものです。`fail_n` はテスタが各ロットのリミットで判定した結果なので、この
-  フラグが付いた行の `fail_n` は複数基準の混ぜ物になります。
-- データシートとの突き合わせは、この出力を CSV に落として Excel 側で重ねて
-  ください（`test_num` / `test_name` / `cur_lsl` / `cur_usl` / `new_lsl` / `new_usl`
-  が揃っています）。
+  採ったファイル**のロットとプログラム版です（8-2 の `ref_lot_id` /
+  `latest_job_name` / `latest_job_rev` を置き換えます）。
+- `SPEC_FROM_OLDER_LOT` — 基準ロットにそのテストの有効なリミットが無く、
+  `spec_lot_id` まで遡って採りました。原因の切り分けは 8-7（対応ズレ）と
+  8-6（リミットの揺れ）で行います。
+- `NAME_VARIES` — その `test_num` が対象ロットの中で複数のテスト名を持っています。
+  表示している `test_name` は「名前を持つ最も新しいファイル」のものです。どの
+  ファイルにも名前が無ければ `NULL` になります（8-2 は `ANY_VALUE` なので空文字が
+  出ることがあります）。
+- `NOT_IN_LATEST_LOT` は出ません（遡って埋めるため）。`NO_BASELINE` は、母集団の
+  どのファイルにも有効なリミット（`lo < hi`）が無いときだけの保険で、`base` の
+  フィルタをそのまま使う限り出ません。
+- それ以外の列・フラグ・読み方・既知の限界は 8-2 と同じです。キーは `test_num` の
+  ままなので、8-3（生データ）と 8-4（CSV 検証）もそのまま使えます。
 
-**既知の限界**
+> [!NOTE]
+> 8-4 の `n_newly_fail` は現行スペックを基準ロットから採ります。8-2-1 と数字を
+> 揃えたい場合は、8-4 の `latest_lot` / `current_spec` を上の ②〜④ で置き換えて
+> ください（8-4 の `base` に `lot_id` / `wafer_id` / `retest_num` / `lo_limit` /
+> `hi_limit` を持たせる必要があります）。
 
-- **母集団は全ダイです**（良品ダイの選別はしていません）。他テストで不良になった
-  ダイの測定値も σ に乗るため、Cpk は実力より**低め＝保守的**に出ます。そのテスト
-  自体の不良は `fail_n` / `fail_pct` で確認できます。
-- 全ロットプールの σ なので、厳密には Cpk ではなく **Ppk（overall performance）**
-  相当です。ロット間シフトも σ に乗ります。
-- **集約キーは `test_num` です。** 改番（同じテストが版やロットによって別の
-  `test_num` になる）があると、同じテストが複数行に割れて母集団も割れます。
-  検出と、必要なら 1 本にまとめる方法は 8-7 にあります。
-- `mean ± 3σ` は正規分布を前提にしています。リーク電流のように対数正規・片側裾を
-  引く分布では新リミット候補が実測とかけ離れるので、`min_val` / `max_val` と必ず
-  突き合わせてください。
-- `lots.job_name` / `job_rev` は `runs`（wafer 単位 / FT lot run 単位で MIR を保持する
-  テーブル）から集約した VIEW の値で、**lot 内の最新 run のもの**です（`start_time` が
-  最も新しい run）。lot 内でプログラムが変わったケース（TP 混在）は `lots.job_mixed`
-  で検知でき、どの wafer がどちらの版かは `runs` を直接引けば追跡できます
-  （下記「TP 混在検出」参照）。8-2 のように lot 単位でリミットを比較する場合、
-  `job_mixed` の lot は複数版の測定値が混ざっている点に注意してください。
-- パーサは PTR の `OPT_FLAG` を解釈せずリミット領域を読むため（`parser.py`）、
-  リミット未定義のテストに 0 等が入り得ます。`lo_limit < hi_limit` で大半は
-  落ちますが、`min_val` / `max_val` と突き合わせて確認してください。
-- **`test_name` を突合キーにしないでください**（Excel で重ねるときも `test_num` で
-  VLOOKUP します）。`parser.py` はテスト名をファイルごとに最初の PTR から 1 回だけ
-  取りますが、STDF の TEST_TXT は任意フィールドなので、ロットによって空だったり
-  プログラム改版で変わったりします。逆に、同じ名前のテストが版によって別の
-  `test_num` になる（改番）こともあります。**両方向の対応ズレは 8-7 で洗い出せます。**
-  名前の揺れだけなら次でも確認できます:
+### 8-2-2. 8-2 の派生 — `test_name` で集計する
 
-  ```sql
-  SELECT test_num, COUNT(DISTINCT test_name) AS name_variants,
-         string_agg(DISTINCT '[' || test_name || ']', ' ') AS names
-  FROM test_data_final
-  WHERE product = 'YOUR_PRODUCT' AND test_category = 'CP' AND sub_process = 'CP1'
-    AND rec_type IN ('PTR', 'MPR')
-  GROUP BY 1 HAVING COUNT(DISTINCT test_name) > 1 ORDER BY 1;
-  ```
-- 集約キーは `test_num` のみで、`pin_num` は含めていません。MPR（ピンごとの測定）の
-  テストは**全ピンが 1 つの分布にまとまります**。ピン別に見る必要がある場合は、
-  `base` / `spec_pool` / `spec_ranked`（`PARTITION BY`）/ `current_spec` / `stats` の
-  キーと `LEFT JOIN ... USING` に `pin_num`
-  （PTR は NULL なので `COALESCE(pin_num, -1)`）を足してください。
-  対象データに MPR があるかは `SELECT COUNT(*) FROM test_data_final WHERE
-  rec_type = 'MPR'` で確認できます。
+改番（同じテストがロット / 版によって別の `test_num` になる）を**またいで 1 本の
+分布にまとめたい**ときの派生です。集約キーを `test_num` から**テスト名**に変えます。
+現行スペックの採り方は 8-2-1 と同じ（遡る）です。
 
-**性能上の注意**
+> [!WARNING]
+> **名前が同じだけの別テストも統合します。** STDF の `TEST_TXT` に一意性の保証は
+> ありません（フローの別箇所で同じ名前が使われることがあります）。**使う前に必ず
+> 8-7 の ③' で、番号ごとのロット / 期間が重なっていないことを確認してください。**
+> 重なっていれば改番ではなく別テストなので、8-2 / 8-2-1 のまま読んでください。
+> 誤って統合した行は `RENUMBERED` / `UNIT_VARIES` で気付けます。
 
-合成データ（`test_data` 800 万行）で測った、重い要素の単価です。本クエリは
-`test_data` を 1 パス走査するだけなので、複数回参照によるマテリアライズも起きません
-（メモリ量に依存しない）。現行スペックも `base` から作るため、以前あった基準ロットの
-再読み込み（実測 0.02 s）は無くなりました。代わりに `base` が
-`lot_id` / `wafer_id` / `retest_num` を運びますが、前 2 つはパーティション列で、
-`spec_pool` の集約はファイル数 × テスト数までしか行が増えません。
+**キーの決め方**
 
-| 要素 | 追加時間 | 本クエリでの扱い |
+`test_name` をそのままキーにすると、`TEST_TXT` が空のファイルが丸ごと母集団から
+落ちます（`parser.py` はファイル内で最初の PTR / MPR から名前を 1 回だけ採るので、
+そこに名前が無ければ**そのファイル全体が空名**になります）。そこで**一度
+`test_num` → 代表名を決めてから**名前で集計します。
+
+```mermaid
+flowchart TD
+    B["base<br/>8-2 と同じ母集団"] --> FN["② file_names<br/>ファイル × test_num の名前"]
+    FN --> NN["③ name_of_num<br/>test_num → 代表名<br/>= 名前を持つ<br/>最も新しいファイルの名前"]
+    NN --> K["④ keyed<br/>test_key = 代表名<br/>名前が一度も無ければ #test_num"]
+    B --> K
+    K --> SP["⑤⑦ current_spec<br/>キーごとの現行スペック<br/>遡り方は 8-2-1 と同じ"]
+    K --> ST["⑧ stats<br/>キー: test_key"]
+```
+
+これで空名のファイルも `test_num` 経由で代表名にぶら下がり、母集団から落ちません。
+名前の正規化は `UPPER(TRIM(...))` だけです（大文字小文字と前後の空白のみ吸収）。
+
+| | 8-2 | 8-2-2 |
 |---|---|---|
-| `MEDIAN` + `MAD`（robust 外れ値判定） | +0.95 s | 不採用 |
-| `QUANTILE_CONT` × 2（IQR） | +0.48 s | 不採用 |
-| パーティション列を集約キーに含める | +0.27 s | 不採用（工程を指定して回避） |
-| `COUNT(DISTINCT ...)` × 3 | +0.44 s | 不採用（`MIN`/`MAX` で等価判定） |
-| 分位点 / skewness | +0.34 s | 不採用 |
-| 良品ダイ選別（`parts` との join） | +0.24 s | 不採用 |
-| 逸脱 ppm の再走査 | +0.09 s | 不採用 |
+| 集約キー | `test_num` | 代表テスト名（`UPPER(TRIM(test_name))`） |
+| 改番されたテスト | 2 行に割れる | **1 行にまとまる**（`test_nums` に旧番号も出る） |
+| 名前が変わったテスト | 1 行（表示名が不定） | 1 行（最新の名前でまとまる → `NAME_CHANGED`） |
+| 名前が一度も無いテスト | 1 行 | 1 行（キーは `#1234` → `NO_NAME`） |
+| 現行スペック | 基準ロットのみ | 8-2-1 と同じ（遡る） |
+| `test_num` 列 | 集約キー | **最新ファイルでの番号**（参考値。全量は `test_nums`） |
+
+```sql
+WITH params AS (
+    SELECT 'YOUR_PRODUCT'         AS product,
+           'CP'                   AS test_category,   -- 必ず指定（8-2 の IMPORTANT）
+           'CP1'                  AS sub_process,     -- 必ず指定
+           -- 意味・使い方は 8-2 の params と同一
+           CAST(1.33 AS DOUBLE)   AS cpk_min,            -- 下回るなら広げる（±3.99σ）
+           CAST(3.00 AS DOUBLE)   AS cpk_max,            -- 上回るなら締める（±9σ）
+           30                     AS min_n,              -- これ未満は LOW_SAMPLE
+           CAST(NULL AS VARCHAR)  AS test_name_like,     -- 例 CAST('%IDD%' AS VARCHAR)
+           CAST(NULL AS VARCHAR)  AS job_name,           -- 例 'PROG_A'
+           CAST(NULL AS VARCHAR)  AS job_rev,            -- 例 'Rev04'
+           CAST(NULL AS VARCHAR)  AS exclude_lot_pattern
+),
+-- ⓪ 対象ロット（8-2 と同一）
+target_lots AS (
+    SELECT l.lot_id, l.job_name, l.job_rev, l.start_time
+    FROM lots l CROSS JOIN params pa
+    WHERE l.product       = pa.product
+      AND l.test_category = pa.test_category
+      AND l.sub_process   = pa.sub_process
+      AND (pa.job_name IS NULL OR l.job_name = pa.job_name)
+      AND (pa.job_rev  IS NULL OR l.job_rev  = pa.job_rev)
+      AND (pa.exclude_lot_pattern IS NULL
+           OR l.lot_id NOT LIKE pa.exclude_lot_pattern)
+),
+-- ① 母集団（8-2 と同一。ファイルを識別する 3 列を追加）
+base AS (
+    SELECT td.lot_id, td.wafer_id, td.retest_num,
+           td.test_num, td.test_name, td.units,
+           td.lo_limit, td.hi_limit, td.result, td.passed
+    FROM test_data_final td CROSS JOIN params pa
+    WHERE td.product       = pa.product
+      AND td.test_category = pa.test_category
+      AND td.sub_process   = pa.sub_process
+      AND td.rec_type IN ('PTR', 'MPR')
+      AND td.lot_id IN (SELECT lot_id FROM target_lots)
+      AND (pa.test_name_like IS NULL OR td.test_name ILIKE pa.test_name_like)
+      AND td.result IS NOT NULL   AND isfinite(td.result)
+      AND td.lo_limit IS NOT NULL AND isfinite(td.lo_limit)
+      AND td.hi_limit IS NOT NULL AND isfinite(td.hi_limit)
+      AND td.lo_limit < td.hi_limit
+      AND regexp_matches(UPPER(TRIM(td.units)), '^.?[VA]$')
+),
+-- ② ファイル × test_num の名前。parser.py はファイル内で最初の PTR / MPR から
+--    名前を 1 回だけ採るので、ファイル内では定数（8-6 参照）
+file_names AS (
+    SELECT b.test_num, b.lot_id, b.wafer_id, b.retest_num,
+           ANY_VALUE(UPPER(TRIM(b.test_name))) AS name_key
+    FROM base b
+    GROUP BY ALL
+),
+-- ③ test_num → 代表名 = 「名前を持つ最も新しいファイル」の名前。
+--    arg_min は NULL を無視するので、空名のファイルは自動的に飛ばされる
+name_of_num AS (
+    SELECT test_num,
+           arg_min(NULLIF(name_key, ''), rn)    AS name_key,
+           COUNT(DISTINCT NULLIF(name_key, '')) AS name_variants
+    FROM (
+        SELECT fn.*, ROW_NUMBER() OVER (
+                   PARTITION BY fn.test_num
+                   ORDER BY tl.start_time DESC, fn.lot_id DESC,
+                            fn.wafer_id DESC, fn.retest_num DESC) AS rn
+        FROM file_names fn JOIN target_lots tl USING (lot_id)
+    )
+    GROUP BY test_num
+),
+-- ④ 集約キーを差し替える。名前が一度も無い test_num は '#1234' を仮キーにして
+--    残す（黙って母集団から落とさない → flags の NO_NAME で気付ける）
+keyed AS (
+    SELECT COALESCE(nn.name_key, '#' || CAST(b.test_num AS VARCHAR)) AS test_key,
+           COALESCE(nn.name_variants, 0) AS name_variants,
+           b.*
+    FROM base b LEFT JOIN name_of_num nn USING (test_num)
+),
+-- ⑤ 現行スペックの候補プール。キー × test_num × ファイルで 1 行
+spec_pool AS (
+    SELECT k.test_key, k.test_num, k.lot_id, k.wafer_id, k.retest_num,
+           ANY_VALUE(k.lo_limit)      AS lo,
+           ANY_VALUE(k.hi_limit)      AS hi,
+           ANY_VALUE(k.units)         AS units,
+           ANY_VALUE(k.name_variants) AS name_variants
+    FROM keyed k
+    WHERE k.lo_limit IS NOT NULL AND k.hi_limit IS NOT NULL
+      AND k.lo_limit < k.hi_limit
+    GROUP BY ALL
+),
+-- ⑥ 基準ロット（8-2 と同一）
+latest_lot AS (
+    SELECT lot_id, job_name, job_rev
+    FROM (
+        SELECT l.*, ROW_NUMBER() OVER (
+                   ORDER BY l.start_time DESC, l.lot_id DESC) AS rn
+        FROM target_lots l
+    ) WHERE rn = 1
+),
+-- ⑦ 現行スペック = そのキーのリミットを持つ最も新しいファイル。
+--    基準ロット優先 → 無ければ直近のロットへ遡る（8-2-1 と同じ）。
+--    同一ファイルに複数の番号があるときは大きい番号（＝新しい採番）を採る
+spec_ranked AS (
+    SELECT sp.*, tl.job_name, tl.job_rev,
+           ROW_NUMBER() OVER (
+               PARTITION BY sp.test_key
+               ORDER BY (sp.lot_id = ll.lot_id) DESC,
+                        tl.start_time DESC, sp.lot_id DESC,
+                        sp.wafer_id DESC, sp.retest_num DESC,
+                        sp.test_num DESC) AS rn
+    FROM spec_pool sp
+    JOIN target_lots tl USING (lot_id)
+    CROSS JOIN latest_lot ll
+),
+current_spec AS (
+    SELECT test_key,
+           arg_min(lo, rn)                                     AS cur_lsl,
+           arg_min(hi, rn)                                     AS cur_usl,
+           arg_min(test_num, rn)                               AS ref_test_num,
+           arg_min(lot_id, rn)                                 AS spec_lot_id,
+           arg_min(job_name, rn)                               AS spec_job_name,
+           arg_min(job_rev, rn)                                AS spec_job_rev,
+           arg_min(NULLIF(TRIM(units), ''), rn)                AS units,
+           COUNT(DISTINCT test_num)                            AS num_variants,
+           string_agg(DISTINCT CAST(test_num AS VARCHAR), ', ') AS test_nums,
+           COUNT(DISTINCT UPPER(TRIM(units)))                  AS unit_variants,
+           MAX(name_variants)                                  AS name_variants
+    FROM spec_ranked
+    GROUP BY test_key
+),
+-- ⑧ 統計。キーは test_key
+stats AS (
+    SELECT
+        test_key,
+        COUNT(*)                             AS n,
+        COUNT(*) FILTER (WHERE passed = 'F') AS fail_n,
+        AVG(result)                          AS mean,
+        STDDEV_SAMP(result)                  AS sigma,
+        MIN(result)                          AS min_val,
+        MAX(result)                          AS max_val,
+        MIN(lo_limit)                        AS lo_limit_min,
+        MAX(lo_limit)                        AS lo_limit_max,
+        MIN(hi_limit)                        AS hi_limit_min,
+        MAX(hi_limit)                        AS hi_limit_max
+    FROM keyed
+    GROUP BY ALL
+    HAVING COUNT(*) > 1
+),
+-- ⑨ 新リミット候補 = 目標帯の 2 本の線（8-2 と同一）
+candidate AS (
+    SELECT s.*,
+           cs.units, cs.ref_test_num, cs.test_nums,
+           cs.num_variants, cs.unit_variants, cs.name_variants,
+           cs.cur_lsl, cs.cur_usl,
+           cs.spec_lot_id, cs.spec_job_name, cs.spec_job_rev,
+           (cs.spec_lot_id = ll.lot_id) AS spec_from_ref_lot,
+           pa.cpk_min, pa.cpk_max, pa.min_n,
+           s.mean - 3.0 * pa.cpk_min * s.sigma AS lsl_widen_exact,
+           s.mean - 3.0 * pa.cpk_max * s.sigma AS lsl_tight_exact,
+           s.mean + 3.0 * pa.cpk_min * s.sigma AS usl_widen_exact,
+           s.mean + 3.0 * pa.cpk_max * s.sigma AS usl_tight_exact
+    FROM stats s
+    CROSS JOIN (SELECT cpk_min, cpk_max, min_n FROM params) pa
+    CROSS JOIN latest_lot ll
+    LEFT JOIN current_spec cs USING (test_key)
+    WHERE s.sigma IS NOT NULL AND isfinite(s.sigma) AND s.sigma > 0
+),
+rounded AS (
+    SELECT c.*,
+           GREATEST(6, 6 - CAST(FLOOR(LOG10(LEAST(
+               NULLIF(ABS(c.mean), 0), c.sigma))) AS INTEGER)) AS disp_digits,
+           CASE WHEN lsl_widen_exact = 0 THEN 0 ELSE
+                FLOOR(lsl_widen_exact / POW(10, FLOOR(LOG10(ABS(lsl_widen_exact))) - 2))
+                     * POW(10, FLOOR(LOG10(ABS(lsl_widen_exact))) - 2) END AS lsl_widen,
+           CASE WHEN lsl_tight_exact = 0 THEN 0 ELSE
+                FLOOR(lsl_tight_exact / POW(10, FLOOR(LOG10(ABS(lsl_tight_exact))) - 2))
+                     * POW(10, FLOOR(LOG10(ABS(lsl_tight_exact))) - 2) END AS lsl_tight,
+           CASE WHEN usl_widen_exact = 0 THEN 0 ELSE
+                CEIL(usl_widen_exact / POW(10, FLOOR(LOG10(ABS(usl_widen_exact))) - 2))
+                     * POW(10, FLOOR(LOG10(ABS(usl_widen_exact))) - 2) END AS usl_widen,
+           CASE WHEN usl_tight_exact = 0 THEN 0 ELSE
+                CEIL(usl_tight_exact / POW(10, FLOOR(LOG10(ABS(usl_tight_exact))) - 2))
+                     * POW(10, FLOOR(LOG10(ABS(usl_tight_exact))) - 2) END AS usl_tight
+    FROM candidate c
+),
+-- ⑩ 現行スペックを帯で挟む（8-2 と同一）
+clamped AS (
+    SELECT r.*,
+           GREATEST(LEAST(r.cur_lsl, r.lsl_widen), r.lsl_tight) AS new_lsl,
+           LEAST(GREATEST(r.cur_usl, r.usl_widen), r.usl_tight) AS new_usl
+    FROM rounded r
+)
+-- ⑪ 判定
+SELECT
+    test_key AS test_name,
+    ref_test_num AS test_num,
+    test_nums,
+    units,
+    n, fail_n,
+    ROUND(100.0 * fail_n / NULLIF(n, 0), 3) AS fail_pct,
+    ROUND(mean, disp_digits)    AS mean,
+    ROUND(sigma, disp_digits)   AS sigma,
+    ROUND(min_val, disp_digits) AS min_val,
+    ROUND(max_val, disp_digits) AS max_val,
+    spec_lot_id, spec_job_name, spec_job_rev,
+    ROUND(cur_lsl, disp_digits) AS cur_lsl,
+    ROUND(cur_usl, disp_digits) AS cur_usl,
+    (lo_limit_min <> lo_limit_max
+     OR hi_limit_min <> hi_limit_max) AS limits_changed,
+    ROUND((cur_usl - cur_lsl) / (6 * sigma), 3) AS cp_current,
+    CASE WHEN cur_lsl IS NULL OR cur_usl IS NULL THEN NULL ELSE
+        ROUND(LEAST((cur_usl - mean) / (3 * sigma),
+                    (mean - cur_lsl) / (3 * sigma)), 3) END AS cpk_current,
+    ROUND(new_lsl, disp_digits) AS new_lsl,
+    ROUND(new_usl, disp_digits) AS new_usl,
+    ROUND(new_lsl - cur_lsl, disp_digits) AS lsl_change,
+    ROUND(new_usl - cur_usl, disp_digits) AS usl_change,
+    CASE
+        WHEN cur_lsl IS NULL OR cur_usl IS NULL        THEN 'NO_BASELINE'
+        WHEN new_lsl <  cur_lsl AND new_usl >  cur_usl THEN 'LOOSEN'
+        WHEN new_lsl >  cur_lsl AND new_usl <  cur_usl THEN 'TIGHTEN'
+        WHEN new_lsl =  cur_lsl AND new_usl =  cur_usl THEN 'NO_CHANGE'
+        ELSE 'MIXED'
+    END AS direction,
+    CONCAT_WS(',',
+        CASE WHEN n < min_n              THEN 'LOW_SAMPLE'          END,
+        CASE WHEN cur_lsl IS NULL
+               OR cur_usl IS NULL        THEN 'NO_BASELINE'         END,
+        CASE WHEN NOT spec_from_ref_lot  THEN 'SPEC_FROM_OLDER_LOT' END,
+        CASE WHEN num_variants > 1       THEN 'RENUMBERED'          END,
+        CASE WHEN unit_variants > 1      THEN 'UNIT_VARIES'         END,
+        CASE WHEN name_variants > 1      THEN 'NAME_CHANGED'        END,
+        CASE WHEN test_key LIKE '#%'     THEN 'NO_NAME'             END,
+        CASE WHEN lo_limit_min <> lo_limit_max
+               OR hi_limit_min <> hi_limit_max
+                                         THEN 'LIMIT_CHANGED'       END
+    ) AS flags
+FROM clamped
+-- Cpk 不足のものだけ。全件見るならこの WHERE を削除
+WHERE cpk_current IS NULL OR cpk_current < cpk_min
+ORDER BY cpk_current NULLS LAST, test_name;
+```
+
+**出力の違い**
+
+| 列 / フラグ | 意味 |
+|---|---|
+| `test_name` | 代表名（集約キー）。名前が一度も無ければ `#1234` |
+| `test_num` | そのキーの**最新ファイルでの番号**。突合の起点に使います |
+| `test_nums` | まとまった `test_num` の全量。改番の行はここが 2 つ以上になります |
+| `RENUMBERED` | 複数の `test_num` を統合した = 改番。8-7 ③' で妥当性を確認してください |
+| `UNIT_VARIES` | 統合した中で単位が食い違う（例 `V` と `MV`）。**別テストを掴んだ疑いが濃厚**、または桁が混ざっているので `mean` / `sigma` は信用できません |
+| `NAME_CHANGED` | その番号のテスト名が途中で変わっている（最新の名前に寄せています） |
+| `NO_NAME` | どのファイルにも `TEST_TXT` が無い。`test_num` で読んでください |
+| `LIMIT_CHANGED` | 8-2 と同じ意味ですが、**改番をまたいだリミット差**でも立ちます |
+
+**制約**
+
+- **8-4（CSV 検証）とは直結できません。** 8-4 は `test_num` で CSV と突合します。
+  8-2-2 の出力を回すなら CSV 側の `test_num` に 8-2-2 の `test_num`（最新ファイルの
+  番号）を入れ、8-4 側も同じキーで集計するよう書き換える必要があります。単純に
+  検証したいだけなら 8-2-1 を使ってください。
+- `fail_n` はテスタが各ロットのリミットで判定した結果です。改番をまたぐと複数基準の
+  混ぜ物になります（`LIMIT_CHANGED` を確認してください）。
+- `test_data` の走査が 1 パスなのは 8-2 と同じですが、`file_names` / `name_of_num` /
+  `keyed` のぶん集約が増えます（いずれもファイル数 × テスト数までしか行が
+  増えません）。
+- 既知の限界（母集団は全ダイ / Ppk 相当 / 正規分布前提）は 8-2 と同じです。
 
 ### 8-3. 確認用 — 8-2 と同じ母集団の生データ取得
 
@@ -1363,8 +1949,7 @@ CSV に落として Excel でソートするか、`ORDER BY td.result` に変え
 8-4 → 同じ母集団に当てて cpk_rev / fail 件数 / 新たに落ちるダイ数を出す
 ```
 
-**現行スペックは 8-2 と同じ採り方**です（そのテストのリミットを持つ最も新しい
-ファイル。基準ロット優先 → 無ければ直近のロットへ遡り、出所を `spec_lot_id` に出す）。
+**現行スペックは 8-2 と同じく基準ロット（`start_time` 最大）のリミット**です。
 `n_newly_fail` は「現行では通っていたか」の判定にこれを使います。データシートとの
 突き合わせ（`SPEC_DIFF`）は 8-2 側で見てください。
 
@@ -1458,9 +2043,7 @@ target_lots AS (
            OR l.lot_id NOT LIKE pa.exclude_lot_pattern)
 ),
 base AS (
-    SELECT td.lot_id, td.wafer_id, td.retest_num,
-           td.test_num, td.test_name, td.units,
-           td.lo_limit, td.hi_limit, td.result, td.passed
+    SELECT td.test_num, td.test_name, td.units, td.result, td.passed
     FROM test_data_final td CROSS JOIN params pa
     WHERE td.product       = pa.product
       AND td.test_category = pa.test_category
@@ -1481,33 +2064,21 @@ latest_lot AS (
         FROM target_lots l
     ) WHERE rn = 1
 ),
--- 現行スペック = そのテストのリミットを持つ最も新しいファイル（8-2 の ②〜④ と同一）。
--- 基準ロットにあればそれ、無ければ直近のロットへ遡る
-spec_pool AS (
-    SELECT b.test_num, b.lot_id, b.wafer_id, b.retest_num,
-           ANY_VALUE(b.lo_limit) AS lo,
-           ANY_VALUE(b.hi_limit) AS hi
-    FROM base b
-    WHERE b.lo_limit IS NOT NULL AND b.hi_limit IS NOT NULL
-      AND b.lo_limit < b.hi_limit
-    GROUP BY ALL
-),
+-- 現行スペック = 基準ロットのリミット（8-2 と同じ）
 current_spec AS (
-    SELECT test_num,
-           arg_min(lo, rn)     AS cur_lsl,
-           arg_min(hi, rn)     AS cur_usl,
-           arg_min(lot_id, rn) AS spec_lot_id
-    FROM (
-        SELECT sp.*, ROW_NUMBER() OVER (
-                   PARTITION BY sp.test_num
-                   ORDER BY (sp.lot_id = ll.lot_id) DESC,
-                            tl.start_time DESC, sp.lot_id DESC,
-                            sp.wafer_id DESC, sp.retest_num DESC) AS rn
-        FROM spec_pool sp
-        JOIN target_lots tl USING (lot_id)
-        CROSS JOIN latest_lot ll
-    )
-    GROUP BY test_num
+    SELECT td.test_num,
+           ANY_VALUE(td.lo_limit) AS cur_lsl,
+           ANY_VALUE(td.hi_limit) AS cur_usl
+    FROM test_data_final td CROSS JOIN params pa
+    WHERE td.product       = pa.product
+      AND td.test_category = pa.test_category
+      AND td.sub_process   = pa.sub_process
+      AND td.lot_id        = (SELECT lot_id FROM latest_lot)
+      AND td.rec_type IN ('PTR', 'MPR')
+      AND td.lo_limit IS NOT NULL AND isfinite(td.lo_limit)
+      AND td.hi_limit IS NOT NULL AND isfinite(td.hi_limit)
+      AND td.lo_limit < td.hi_limit
+    GROUP BY ALL
 ),
 
 -- 手直し後リミットを同じ母集団に当てる
@@ -1520,9 +2091,8 @@ agg AS (
            STDDEV_SAMP(b.result)  AS sigma,
            MIN(b.result)          AS min_val,
            MAX(b.result)          AS max_val,
-           ANY_VALUE(cs.cur_lsl)     AS cur_lsl,
-           ANY_VALUE(cs.cur_usl)     AS cur_usl,
-           ANY_VALUE(cs.spec_lot_id) AS spec_lot_id,
+           ANY_VALUE(cs.cur_lsl)  AS cur_lsl,
+           ANY_VALUE(cs.cur_usl)  AS cur_usl,
            ANY_VALUE(r.rev_lsl)   AS rev_lsl,
            ANY_VALUE(r.rev_usl)   AS rev_usl,
            ANY_VALUE(r.csv_rows)  AS csv_rows,
@@ -1566,7 +2136,6 @@ SELECT
     ROUND(max_val, disp_digits) AS max_val,
     ROUND(cur_lsl, disp_digits) AS cur_lsl,
     ROUND(cur_usl, disp_digits) AS cur_usl,
-    spec_lot_id,
     rev_lsl, rev_usl,
     ROUND(cpk_rev, 3) AS cpk_rev,
     fail_n_cur, fail_n_rev, n_newly_fail,
@@ -1595,9 +2164,8 @@ ORDER BY n_newly_fail DESC, cpk_rev NULLS FIRST, test_num;
 - `flags`
   - `MISSING_IN_CSV` — 母集団にはあるが CSV に無い（手直し漏れ、または意図的に除外）。
     このとき `fail_n_rev` / `n_newly_fail` は `0` ではなく `NULL` になります
-  - `NO_CURRENT_SPEC` — 対象ロットのどのファイルにもその `test_num` の有効な
-    リミットが無い。比較対象が無いので `n_newly_fail` は `NULL` になります
-    （8-2 の `NO_BASELINE` と同じく、通常は出ません）
+  - `NO_CURRENT_SPEC` — 基準ロットにその `test_num` が無い（新規追加テストなど）。
+    比較対象が無いので `n_newly_fail` は `NULL` になります
   - `DUP_IN_CSV` — `spec_review.csv` に同じ `test_num` の行が複数ある。どの値が使われたか不定なので
     CSV を直して再実行してください
   - `INVERTED` — `rev_lsl >= rev_usl`。Excel での編集ミス
@@ -1880,16 +2448,18 @@ ORDER BY files DESC;
 原因 4（本物のリミット変更）です。原因 1 なら 8-2 の `params` に `job_name` も
 入れて絞り直してください。
 
+---
+
 ### 8-7. 確認用 — `test_num` と `test_name` の対応ズレ（改番 / 名前の揺れ）
 
 **同じテストプログラムでも `test_num` と `test_name` の対応は 1 : 1 とは限りません。**
-8-2 で「同じテストが 2 行に割れる」「片方だけ現行スペックが入り、もう片方が空欄になる」
-「`SPEC_FROM_OLDER_LOT` が付く」の原因はほぼこれです。ズレは 2 方向あります。
+8-2 で「同じテストが 2 行に割れる」「片方だけ現行スペックが入り、もう片方が空欄になる」の
+原因はほぼこれです。ズレは 2 方向あります。
 
 | 方向 | 何が起きているか | 8-2 での見え方 |
 |---|---|---|
-| **改番**（1 名前 → 複数 `test_num`） | 同じテストがロット / 版によって別の番号で流れている | 同じ `test_name` の行が 2 本。母集団（`n`）も割れる。古い番号側は `SPEC_FROM_OLDER_LOT` |
-| **名前の揺れ**（1 `test_num` → 複数名） | `TEST_TXT` が空だったり改版で変わったりする | 1 行のまま。表示名だけ揺れる → `NAME_VARIES` |
+| **改番**（1 名前 → 複数 `test_num`） | 同じテストがロット / 版によって別の番号で流れている | 同じ `test_name` の行が 2 本。母集団（`n`）も割れる。基準ロットに無い側は現行スペックが空欄（8-2-1 なら `SPEC_FROM_OLDER_LOT`） |
+| **名前の揺れ**（1 `test_num` → 複数名） | `TEST_TXT` が空だったり改版で変わったりする | 1 行のまま。表示名だけ揺れる（8-2-1 なら `NAME_VARIES`） |
 
 **なぜ起きるか**（`parser.py` / `storage.py`）
 
@@ -1906,16 +2476,16 @@ PTR / MPR から 1 回だけ**採られ、そのファイルの全行にコピ�
 
 ```mermaid
 flowchart TD
-    Q["8-2 で同じテストが<br/>2 行に割れている / 空欄がある"] --> A{"① で<br/>同じ名前が複数の<br/>test_num を持つ?"}
-    A -->|"はい"| R{"③ で<br/>ロット / 期間が<br/>重なっていない?"}
-    R -->|"重ならない"| C1["改番<br/>→ ④ で 1 本にまとめる<br/>or job_name / job_rev で母集団を絞る"]
+    Q["8-2 で同じテストが<br/>2 行に割れている / 空欄がある"] --> A{"①' で<br/>同じ名前が複数の<br/>test_num を持つ?"}
+    A -->|"はい"| R{"③' で<br/>ロット / 期間が<br/>重なっていない?"}
+    R -->|"重ならない"| C1["改番<br/>→ 8-2-2 で 1 本にまとめる<br/>or job_name / job_rev で母集団を絞る"]
     R -->|"重なる"| C2["別テストが同じ名前<br/>（フローの別箇所）<br/>→ まとめてはいけない"]
-    A -->|"いいえ"| B{"② で<br/>同じ test_num が<br/>複数の名前を持つ?"}
-    B -->|"はい"| C3["名前の揺れ<br/>→ 突合は test_num で行う<br/>8-2 は NAME_VARIES を表示"]
+    A -->|"いいえ"| B{"②' で<br/>同じ test_num が<br/>複数の名前を持つ?"}
+    B -->|"はい"| C3["名前の揺れ<br/>→ 突合は test_num で行う<br/>8-2-1 は NAME_VARIES を表示"]
     B -->|"いいえ"| C4["対応ズレではない<br/>→ 8-6 でリミット側を見る"]
 ```
 
-`params` / `target_lots` / `per_file` / `named` は ①②③ で共通です。まずこれを貼り、
+`params` / `target_lots` / `per_file` / `named` は ①' ②' ③' で共通です。まずこれを貼り、
 末尾の `SELECT` だけ差し替えてください。
 
 ```sql
@@ -2003,8 +2573,9 @@ HAVING COUNT(DISTINCT name_key) > 1
 ORDER BY name_variants DESC, test_num;
 ```
 
-こちらは 8-2 の `NAME_VARIES` と同じ集合です。8-2 の表示名は「名前を持つ最も新しい
-ファイル」のものになります。**突合は必ず `test_num` で行ってください。**
+こちらは 8-2-1 の `NAME_VARIES` と同じ集合です（8-2-1 の表示名は「名前を持つ最も
+新しいファイル」のものになります）。8-2 は `ANY_VALUE` なのでどれが出るか不定です。
+**突合は必ず `test_num` で行ってください。**
 
 **③' 1 つの名前を掘る — 改番か、別テストの同名か**（末尾だけ差し替え）
 
@@ -2021,70 +2592,17 @@ GROUP BY ALL
 ORDER BY last_seen DESC;
 ```
 
-- **期間・ロットがきれいに分かれる**（古い番号 → 新しい番号）= 改番。④' でまとめられます。
+- **期間・ロットがきれいに分かれる**（古い番号 → 新しい番号）= 改番。8-2-2 でまとめられます。
 - **同じロット・同じ期間に両方出る** = 同じ名前の別テスト（フローの別箇所）です。
-  **まとめてはいけません。** 8-2 はそのまま 2 行で読んでください。
+  **まとめてはいけません**（8-2-2 は誤って統合します）。8-2 / 8-2-1 のまま 2 行で
+  読んでください。
 
-**④' 改番を 1 本にまとめる（8-2 へのパッチ・任意）**
+**④' まとめたい場合**
 
-③' で改番と確認できたときだけ使ってください。8-2 の `target_lots` と `base` の間に
-次の `num_map` を差し込み、`base` の頭を 2 行だけ書き換えると、**古い番号の測定値が
-最新の番号に寄せられ**、母集団も現行スペックも 1 本にまとまります。
-
-```sql
--- ⓪' 改番マップ: 同じ test_name を持つ test_num を「最も新しいファイルの番号」へ寄せる
---    test_num ごとに 1 行しか返さないので、base に join しても行は増えない
-num_map AS (
-    SELECT test_num, canon_num FROM (
-        SELECT pf.test_num,
-               FIRST_VALUE(pf.test_num) OVER (
-                   PARTITION BY UPPER(TRIM(pf.test_name))
-                   ORDER BY tl.start_time DESC, pf.lot_id DESC,
-                            pf.wafer_id DESC, pf.test_num DESC)  AS canon_num,
-               ROW_NUMBER() OVER (
-                   PARTITION BY pf.test_num
-                   ORDER BY tl.start_time DESC, pf.lot_id DESC,
-                            pf.wafer_id DESC)                     AS rn
-        FROM (
-            SELECT td.test_num, td.lot_id, td.wafer_id,
-                   ANY_VALUE(td.test_name) AS test_name
-            FROM test_data_final td CROSS JOIN params pa
-            WHERE td.product       = pa.product
-              AND td.test_category = pa.test_category
-              AND td.sub_process   = pa.sub_process
-              AND td.rec_type IN ('PTR', 'MPR')
-              AND td.lot_id IN (SELECT lot_id FROM target_lots)
-            GROUP BY ALL
-        ) pf JOIN target_lots tl USING (lot_id)
-        WHERE NULLIF(TRIM(pf.test_name), '') IS NOT NULL
-    ) WHERE rn = 1
-),
-```
-
-`base` の頭（`SELECT` の 1 行目と `FROM` 直後）を次のように変えます。
-
-```sql
-base AS (
-    SELECT COALESCE(nm.canon_num, td.test_num) AS test_num,   -- ← 改番を寄せる
-           td.lot_id, td.wafer_id, td.retest_num,
-           td.test_name, td.units,
-           td.lo_limit, td.hi_limit, td.result, td.passed
-    FROM test_data_final td CROSS JOIN params pa
-    LEFT JOIN num_map nm ON nm.test_num = td.test_num         -- ← 追加
-    WHERE td.product       = pa.product
-    -- 以降は 8-2 のまま
-```
-
-> [!WARNING]
-> - **`test_data` をもう 1 パス走査します**（`num_map` 用）。8-2 単体の倍近くかかります。
-> - 名前が同じだけの**別テストまで統合します**。必ず ③' で期間の重なりが無いことを
->   確認してから使ってください。
-> - 統合後の `test_num` は**最新ファイルの番号**です。古い番号で突合している資料とは
->   合わなくなります。
-> - 名前が空のファイルは統合対象外です（元の `test_num` のまま残ります）。
-
-まとめずに済ませたい場合は、8-2 の `params` の `job_name` / `job_rev` / 
-`exclude_lot_pattern` で**片方の採番だけが入るように母集団を絞る**のが最も安全です。
+③' で改番と確認できたら、**8-2-2**（`test_name` で集計する派生）を使うと、
+古い番号の測定値も 1 本の分布にまとまります。まとめずに済ませたい場合は、8-2 /
+8-2-1 の `params` の `job_name` / `job_rev` / `exclude_lot_pattern` で
+**片方の採番だけが入るように母集団を絞る**のが最も安全です。
 
 ---
 
