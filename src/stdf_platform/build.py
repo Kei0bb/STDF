@@ -34,19 +34,31 @@ def _dbt(cmd: list[str], env_extra: dict[str, str]) -> None:
 
 
 def _replace_dir_with_retry(src: Path, dst: Path, attempts: int = 5) -> None:
+    """Rename src -> dst, preserving the previous dst as a fallback.
+
+    The dst -> old backup rename happens exactly ONCE (not inside the retry
+    loop): only the src -> dst rename is retried. If every retry of
+    src -> dst fails, the backup is restored to dst (old -> dst) before
+    re-raising, so a failed build never leaves dst missing or in a
+    half-swapped state — the previous good marts/ survives.
+    """
     old = dst.with_name(dst.name + "_old")
+    if old.exists():
+        shutil.rmtree(old)
+    moved_old = False
+    if dst.exists():
+        dst.rename(old)
+        moved_old = True
     for i in range(attempts):
         try:
-            if old.exists():
-                shutil.rmtree(old)
-            if dst.exists():
-                dst.rename(old)
             src.rename(dst)
-            if old.exists():
+            if moved_old:
                 shutil.rmtree(old, ignore_errors=True)
             return
         except OSError:
             if i == attempts - 1:
+                if moved_old:
+                    old.rename(dst)
                 raise
             time.sleep(0.5 * (i + 1))
 

@@ -3,6 +3,6 @@ stdf:
   outputs:
     default:
       type: duckdb
-      path: "{{ env_var('STDF_BUILD_DB', '.dbt_build.duckdb') }}"
+      path: "{{ env_var('STDF_BUILD_DB', 'dbt_build.duckdb') }}"
       external_root: "{{ env_var('STDF_MARTS_DIR', 'data/marts') }}"
       threads: 4
