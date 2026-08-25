@@ -7,6 +7,7 @@ import shutil
 from pathlib import Path
 
 import click
+import pandas as pd
 from rich.console import Console
 from rich.table import Table
 from rich.progress import Progress, SpinnerColumn, TextColumn
@@ -18,6 +19,21 @@ from .sync_manager import SyncManager
 
 
 console = Console()
+
+
+def _cell(v, default: str = "", fmt=str) -> str:
+    """Render one DataFrame scalar for table display.
+
+    `.fetchdf()` surfaces SQL NULL as `None`, float NaN, or pandas' nullable
+    `pd.NA` depending on dtype — unlike the old dict-based `Database.query()`,
+    which always gave plain `None`. `v or 0` / `v is not None` break on
+    `pd.NA` (`TypeError: boolean value of NA is ambiguous`) or silently print
+    "<NA>"/"nan". This is the one null check every itertuples()-based table
+    renderer in this module goes through.
+    """
+    if v is None or pd.isna(v):
+        return default
+    return fmt(v)
 
 
 @click.group()
@@ -268,10 +284,10 @@ def lots(ctx, lot: str | None):
                     row.lot_id,
                     row.part_type or "",
                     job_cell,
-                    str(row.wafer_count or 0),
-                    f"{row.total_parts or 0:,}",
-                    f"{row.good_parts or 0:,}",
-                    f"{row.yield_pct or 0:.2f}%",
+                    _cell(row.wafer_count, "0"),
+                    _cell(row.total_parts, "0", lambda v: f"{v:,}"),
+                    _cell(row.good_parts, "0", lambda v: f"{v:,}"),
+                    _cell(row.yield_pct, "0.00%", lambda v: f"{v:.2f}%"),
                 )
 
             console.print(table)
@@ -317,7 +333,7 @@ def programs(ctx, lot: str | None):
                     str(row.retest_num),
                     row.job_name or "",
                     row.job_rev or "",
-                    str(row.start_time) if row.start_time is not None else "",
+                    _cell(row.start_time),
                     row.source_file or "",
                 )
 
@@ -356,7 +372,7 @@ def query(ctx, sql: str | None, output: Path | None, sql_file: Path | None):
                 for col in df.columns:
                     table.add_column(str(col))
                 for row in df.head(100).itertuples(index=False):
-                    table.add_row(*["" if v is None else str(v) for v in row])
+                    table.add_row(*[_cell(v) for v in row])
                 console.print(table)
                 if len(df) > 100:
                     console.print(f"[dim]... showing 100 of {len(df)} rows[/dim]")

@@ -37,3 +37,58 @@ def test_db_query_from_file(tmp_path, synth_store):
 def test_analyze_group_removed():
     r = CliRunner().invoke(main, ["analyze", "yield", "LOT1"])
     assert r.exit_code != 0   # コマンドが存在しない
+
+
+# ── review round 1: pd.NA / NaN rendering fixes ────────────────────────
+
+def test_db_lots_lot_with_no_parts_renders_zero(tmp_path, synth_store):
+    """A lot with a `runs` row but zero rows in `wafer_yield_final` (e.g. an
+    MIR/WIR-only run, no probed dies) must render 0 / 0.00%, not crash.
+
+    lot_summary()'s LEFT JOIN against wafer_yield_final leaves
+    wafer_count/total_parts/good_parts/yield_pct NULL for such a lot;
+    .fetchdf() surfaces that as pd.NA (not the plain None the old
+    dict-based Database.query() gave), which used to blow up `v or 0`
+    with `TypeError: boolean value of NA is ambiguous`.
+    """
+    from conftest import _cp_run
+    from stdf_platform.config import StorageConfig
+    from stdf_platform.storage import ParquetStorage
+
+    storage = ParquetStorage(StorageConfig(data_dir=synth_store, database=synth_store / "db.duckdb"))
+    storage.save_stdf_data(
+        _cp_run("LOTNOPARTS", "W1", "JOB", "RevA", 1000, 2000, parts=[], test_results=[]),
+        product="PROD", test_category="CP", sub_process="CP1", source_file="norun.stdf",
+    )
+
+    r = CliRunner().invoke(main, ["db", "lots"],
+        env={"STDF_CONFIG": str(_write_config(tmp_path, synth_store))})
+    assert r.exit_code == 0, r.output
+    assert "LOTNOPARTS" in r.output
+    assert "ambiguous" not in r.output
+    assert "0.00%" in r.output
+
+
+def test_db_query_prints_null_without_na_literal(tmp_path, synth_store):
+    """A NULL in an integer result column must render blank, not the pandas
+    nullable-dtype repr "<NA>" (or "nan" for a float column)."""
+    r = CliRunner().invoke(main, [
+        "db", "query", "SELECT NULL::BIGINT AS n, 1 AS x"],
+        env={"STDF_CONFIG": str(_write_config(tmp_path, synth_store))})
+    assert r.exit_code == 0, r.output
+    assert "<NA>" not in r.output
+    assert "nan" not in r.output.lower()
+
+
+def test_db_query_usage_error_both_sql_and_file(tmp_path, synth_store):
+    sql_file = tmp_path / "q.sql"
+    sql_file.write_text("SELECT 1")
+    r = CliRunner().invoke(main, ["db", "query", "SELECT 1", "-f", str(sql_file)],
+        env={"STDF_CONFIG": str(_write_config(tmp_path, synth_store))})
+    assert r.exit_code != 0
+
+
+def test_db_query_usage_error_neither_sql_nor_file(tmp_path, synth_store):
+    r = CliRunner().invoke(main, ["db", "query"],
+        env={"STDF_CONFIG": str(_write_config(tmp_path, synth_store))})
+    assert r.exit_code != 0
