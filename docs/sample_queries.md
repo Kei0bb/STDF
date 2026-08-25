@@ -1534,8 +1534,9 @@ ORDER BY cpk_current NULLS LAST, test_num;
 改版で採番が変わるのはよくあるので、**改番をまたぐ = 複数プログラムをまたぐ**に
 なりがちです。そのため本クエリは 8-2 / 8-2-1 と違う点が 2 つあります。
 
-1. **プログラムの指定がリスト**（`job_names` / `job_revs` / `job_pairs`）。
-   1 版だけでなく「Rev04 と Rev05」のようにまとめて対象にできます。
+1. **プログラムを複数指定できます**（`job_names` / `job_revs` / `job_pairs` に
+   カンマ区切りで書く）。1 版だけでなく「Rev09_02_00 と Rev10_00_00」のように
+   まとめて対象にできます。
 2. **母集団を `lots` ではなく `runs`（ファイル単位）で絞ります。**
    `lots.job_name` / `job_rev` は**ロット内で最も新しいランの値**なので、ロット内で
    プログラムが変わっているロット（`lots.job_mixed`）では版を取り違えます。
@@ -1550,13 +1551,19 @@ ORDER BY cpk_current NULLS LAST, test_num;
 
 **プログラムの指定**
 
-3 つとも AND で効き、`NULL` なら絞りません。使える値は 1-1 / 1-2 のクエリで確認できます。
+**カンマ区切りの文字列**で複数書けます（前後の空白は無視。1 つだけならそのまま
+書きます）。3 つとも AND で効き、`NULL` なら絞りません。使える値は 1-1 / 1-2 の
+クエリで確認できます。
 
-| params | 例 | 意味 |
+| params | 書き方 | 意味 |
 |---|---|---|
-| `job_names` | `['PROG_A','PROG_B']` | プログラム名で絞る |
-| `job_revs` | `['Rev04','Rev05']` | 版で絞る |
-| `job_pairs` | `['PROG_A/Rev04','PROG_A/Rev05']` | **名前と版の組**で厳密に絞る |
+| `job_names` | `CAST('PROG_A,PROG_B' AS VARCHAR)` | プログラム名で絞る |
+| `job_revs` | `CAST('Rev09_02_00,Rev10_00_00' AS VARCHAR)` | 版で絞る |
+| `job_pairs` | `CAST('PROG_A/Rev09_02_00' AS VARCHAR)` | **名前と版の組**で厳密に絞る |
+
+> [!TIP]
+> 他の `params` と同じく `CAST(... AS VARCHAR)` のまま値だけ差し替えれば動きます。
+> 配列リテラル（`['Rev09_02_00']`）は不要です。
 
 `job_names` と `job_revs` を別々に指定すると、`PROG_A/Rev05` と `PROG_B/Rev05` の
 ような**意図しない組み合わせ**も入ります（8-6 の原因 1）。狙った版だけを集めたい
@@ -1603,14 +1610,15 @@ WITH params AS (
     SELECT 'YOUR_PRODUCT'          AS product,
            'CP'                    AS test_category,  -- 必ず指定（8-2 の IMPORTANT）
            'CP1'                   AS sub_process,    -- 必ず指定
-           -- 試験プログラムの指定。3 つとも AND で効き、NULL なら絞らない。
-           -- 複数版をまとめて対象にできる（改番をまたぐのが本クエリの目的）。
-           -- job_pairs は名前と版の組で厳密に指定する形。job_names / job_revs を
-           -- 別々に指定すると PROG_A/Rev05 と PROG_B/Rev05 のような
-           -- 意図しない組み合わせも入る（8-6 の原因 1）
-           CAST(NULL AS VARCHAR[]) AS job_names,      -- 例 ['PROG_A','PROG_B']
-           CAST(NULL AS VARCHAR[]) AS job_revs,       -- 例 ['Rev04','Rev05']
-           CAST(NULL AS VARCHAR[]) AS job_pairs,      -- 例 ['PROG_A/Rev04','PROG_A/Rev05']
+           -- 試験プログラムの指定。**カンマ区切りの文字列**で複数書ける
+           -- （前後の空白は無視。1 つだけならそのまま書く）。3 つとも AND で効き、
+           -- NULL なら絞らない。複数版をまとめて対象にできる（改番をまたぐのが
+           -- 本クエリの目的）。job_pairs は名前と版の組で厳密に指定する形。
+           -- job_names / job_revs を別々に指定すると PROG_A/Rev05 と
+           -- PROG_B/Rev05 のような意図しない組み合わせも入る（8-6 の原因 1）
+           CAST(NULL AS VARCHAR)   AS job_names,      -- 例 CAST('PROG_A,PROG_B' AS VARCHAR)
+           CAST(NULL AS VARCHAR)   AS job_revs,       -- 例 CAST('Rev09_02_00,Rev10_00_00' AS VARCHAR)
+           CAST(NULL AS VARCHAR)   AS job_pairs,      -- 例 CAST('PROG_A/Rev09_02_00' AS VARCHAR)
            -- 意味・使い方は 8-2 の params と同一
            CAST(1.33 AS DOUBLE)    AS cpk_min,        -- 下回るなら広げる（±3.99σ）
            CAST(3.00 AS DOUBLE)    AS cpk_max,        -- 上回るなら締める（±9σ）
@@ -1618,20 +1626,29 @@ WITH params AS (
            CAST(NULL AS VARCHAR)   AS exclude_lot_pattern
 ),
 
--- ⓪ 対象ラン: 8-2 は lots（ロット単位）で絞るが、ここは runs（ファイル単位）で
---    絞る。lot 内でプログラムが変わっているロット（lots.job_mixed）でも、
---    どのウェーハがどの版かを取り違えない
+-- ⓪-1 プログラム指定をリストへ開く。'A, B' → ['A','B']。
+--      NULL はそのまま NULL（= 絞らない）
+job_filter AS (
+    SELECT list_transform(string_split(job_names, ','), x -> TRIM(x)) AS job_names,
+           list_transform(string_split(job_revs,  ','), x -> TRIM(x)) AS job_revs,
+           list_transform(string_split(job_pairs, ','), x -> TRIM(x)) AS job_pairs
+    FROM params
+),
+
+-- ⓪-2 対象ラン: 8-2 は lots（ロット単位）で絞るが、ここは runs（ファイル単位）で
+--      絞る。lot 内でプログラムが変わっているロット（lots.job_mixed）でも、
+--      どのウェーハがどの版かを取り違えない
 target_runs AS (
     SELECT r.lot_id, r.wafer_id, r.retest_num, r.start_time,
            CONCAT_WS('/', r.job_name, r.job_rev) AS job_key
-    FROM runs r CROSS JOIN params pa
+    FROM runs r CROSS JOIN params pa CROSS JOIN job_filter jf
     WHERE r.product       = pa.product
       AND r.test_category = pa.test_category
       AND r.sub_process   = pa.sub_process
-      AND (pa.job_names IS NULL OR list_contains(pa.job_names, r.job_name))
-      AND (pa.job_revs  IS NULL OR list_contains(pa.job_revs,  r.job_rev))
-      AND (pa.job_pairs IS NULL
-           OR list_contains(pa.job_pairs, CONCAT_WS('/', r.job_name, r.job_rev)))
+      AND (jf.job_names IS NULL OR list_contains(jf.job_names, r.job_name))
+      AND (jf.job_revs  IS NULL OR list_contains(jf.job_revs,  r.job_rev))
+      AND (jf.job_pairs IS NULL
+           OR list_contains(jf.job_pairs, CONCAT_WS('/', r.job_name, r.job_rev)))
       AND (pa.exclude_lot_pattern IS NULL
            OR r.lot_id NOT LIKE pa.exclude_lot_pattern)
 ),
@@ -2606,7 +2623,8 @@ flowchart TD
     B -->|"いいえ"| C4["対応ズレではない<br/>→ 8-6 でリミット側を見る"]
 ```
 
-`params` / `target_runs` / `per_file` / `named` は ①' ②' ③' で共通です。まずこれを貼り、
+`params` / `job_filter` / `target_runs` / `per_file` / `named` は ①' ②' ③' で
+共通です。まずこれを貼り、
 末尾の `SELECT` だけ差し替えてください。
 
 ```sql
@@ -2615,27 +2633,36 @@ WITH params AS (
            'CP'                    AS test_category,   -- 8-2 と同じ値にする
            'CP1'                   AS sub_process,     -- 8-2 と同じ値にする
            -- 改番は改版に伴って起きることが多いので、複数版をまとめて見られる
-           -- ようにしてある。3 つとも AND で効き、NULL なら絞らない（8-2-2 と同じ）
-           CAST(NULL AS VARCHAR[]) AS job_names,       -- 例 ['PROG_A']
-           CAST(NULL AS VARCHAR[]) AS job_revs,        -- 例 ['Rev04','Rev05']
-           CAST(NULL AS VARCHAR[]) AS job_pairs,       -- 例 ['PROG_A/Rev04','PROG_A/Rev05']
+           -- ようにしてある。カンマ区切りで複数書ける（前後の空白は無視）。
+           -- 3 つとも AND で効き、NULL なら絞らない（8-2-2 と同じ）
+           CAST(NULL AS VARCHAR)   AS job_names,       -- 例 CAST('PROG_A' AS VARCHAR)
+           CAST(NULL AS VARCHAR)   AS job_revs,        -- 例 CAST('Rev09_02_00,Rev10_00_00' AS VARCHAR)
+           CAST(NULL AS VARCHAR)   AS job_pairs,       -- 例 CAST('PROG_A/Rev09_02_00' AS VARCHAR)
            CAST(NULL AS VARCHAR)   AS exclude_lot_pattern
 ),
 
--- ⓪ 対象ラン（8-2-2 の target_runs と同一）。lots ではなく runs で絞るので、
---    ロット内でプログラムが変わっていても（lots.job_mixed）版を取り違えない。
---    どのウェーハがどの版かを 1 枚単位で判定できるのがここでは重要
+-- ⓪-1 プログラム指定をリストへ開く（8-2-2 と同一）。'A, B' → ['A','B']
+job_filter AS (
+    SELECT list_transform(string_split(job_names, ','), x -> TRIM(x)) AS job_names,
+           list_transform(string_split(job_revs,  ','), x -> TRIM(x)) AS job_revs,
+           list_transform(string_split(job_pairs, ','), x -> TRIM(x)) AS job_pairs
+    FROM params
+),
+
+-- ⓪-2 対象ラン（8-2-2 の target_runs と同一）。lots ではなく runs で絞るので、
+--      ロット内でプログラムが変わっていても（lots.job_mixed）版を取り違えない。
+--      どのウェーハがどの版かを 1 枚単位で判定できるのがここでは重要
 target_runs AS (
     SELECT r.lot_id, r.wafer_id, r.retest_num, r.start_time,
            CONCAT_WS('/', r.job_name, r.job_rev) AS job_key
-    FROM runs r CROSS JOIN params pa
+    FROM runs r CROSS JOIN params pa CROSS JOIN job_filter jf
     WHERE r.product       = pa.product
       AND r.test_category = pa.test_category
       AND r.sub_process   = pa.sub_process
-      AND (pa.job_names IS NULL OR list_contains(pa.job_names, r.job_name))
-      AND (pa.job_revs  IS NULL OR list_contains(pa.job_revs,  r.job_rev))
-      AND (pa.job_pairs IS NULL
-           OR list_contains(pa.job_pairs, CONCAT_WS('/', r.job_name, r.job_rev)))
+      AND (jf.job_names IS NULL OR list_contains(jf.job_names, r.job_name))
+      AND (jf.job_revs  IS NULL OR list_contains(jf.job_revs,  r.job_rev))
+      AND (jf.job_pairs IS NULL
+           OR list_contains(jf.job_pairs, CONCAT_WS('/', r.job_name, r.job_rev)))
       AND (pa.exclude_lot_pattern IS NULL
            OR r.lot_id NOT LIKE pa.exclude_lot_pattern)
 ),
