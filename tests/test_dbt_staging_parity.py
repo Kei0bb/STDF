@@ -32,10 +32,16 @@ def _run_dbt(data_dir: Path, build_db: Path, tmp_path: Path,
 
 
 PAIRS = [  # (views.py 側ビュー, dbt staging モデル, ソート列)
-    ("parts_final", "stg_parts_final", "lot_id, wafer_id, x_coord, y_coord"),
-    ("test_data_final", "stg_test_data_final", "lot_id, wafer_id, test_num"),
+    # x_coord/y_coord だけだと FT(x=y=-32768 センチネル)の複数パッケージが
+    # 同着になり順序が不定になるため、part_id まで含めてソートキーを一意に
+    # 近づける。
+    ("parts_final", "stg_parts_final", "lot_id, wafer_id, x_coord, y_coord, part_id"),
+    # test_num だけだと同一キーで複数行(loop測定/PTR+MPR混在)が起きうり同着で
+    # 順序が不定になるため、part_id まで含めてソートキーを一意に近づける。
+    ("test_data_final", "stg_test_data_final", "lot_id, wafer_id, test_num, part_id"),
     ("lots", "stg_lots", "lot_id"),
     ("wafer_yield_final", "stg_wafer_yield", "lot_id, wafer_id"),
+    ("chipid_final", "stg_chipid_final", "lot_id, efuse_raw"),
 ]
 
 
