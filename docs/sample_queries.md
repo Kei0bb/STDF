@@ -820,7 +820,7 @@ ORDER BY cpk;
 > |---|---|---|
 > | **8-2**（本節） | `test_num` | 基準ロットのみ。無ければ空欄 |
 > | **8-2-1** | `test_num` | 基準ロット優先 → 無ければ直近ロットへ遡る |
-> | **8-2-2** | 代表テスト名 | 8-2-1 と同じ（改番をまたいで 1 行にまとめる）。**複数プログラム版を同時に対象にできる** |
+> | **8-2-2** | 代表テスト名 | そのリミットを持つ最新ファイル。改番をまたいで 1 行にまとめる。**複数プログラム版に対応。判定はせず統計値だけ返す** |
 >
 > ズレそのものの洗い出しは **8-7** です。
 
@@ -1524,12 +1524,17 @@ ORDER BY cpk_current NULLS LAST, test_num;
 > ください（8-4 の `base` に `lot_id` / `wafer_id` / `retest_num` / `lo_limit` /
 > `hi_limit` を持たせる必要があります）。
 
-### 8-2-2. 8-2 の派生 — `test_name` で集計する（複数テストプログラム対応）
+### 8-2-2. 8-2 の派生 — `test_name` で集計した素データ（複数テストプログラム対応）
 
 改番（同じテストがロット / プログラム版によって別の `test_num` になる）を**またいで
 1 本の分布にまとめたい**ときの派生です。集約キーを `test_num` から**テスト名**に変え、
-**複数の試験プログラムを同時に対象にできます**。現行スペックの採り方は 8-2-1 と
-同じ考え方（無ければ遡る）です。
+**複数の試験プログラムを同時に対象にできます**。
+
+> [!NOTE]
+> **このクエリは判定をしません。** 目標帯・新リミット候補・`direction`・丸めは
+> 入れず、**母集団の統計値と現行スペックを生の値で返すだけ**です。Cpk の計算や
+> 合否の線引きは出力を受け取ってから行ってください。判定込みで見たい場合は
+> 8-2 / 8-2-1 を使います。
 
 改版で採番が変わるのはよくあるので、**改番をまたぐ = 複数プログラムをまたぐ**に
 なりがちです。そのため本クエリは 8-2 / 8-2-1 と違う点が 2 つあります。
@@ -1545,9 +1550,10 @@ ORDER BY cpk_current NULLS LAST, test_num;
 > [!WARNING]
 > **名前が同じだけの別テストも統合します。** STDF の `TEST_TXT` に一意性の保証は
 > ありません（フローの別箇所で同じ名前が使われることがあります）。**使う前に必ず
-> 8-7 の ③' で、番号ごとの**版と期間**が重なっていないことを確認してください。**
+> 8-7 の ③' で、番号ごとの版と期間が重なっていないことを確認してください。**
 > 重なっていれば改番ではなく別テストなので、8-2 / 8-2-1 のまま読んでください。
-> 誤って統合した行は `RENUMBERED` / `UNIT_VARIES` で気付けます。
+> 統合の内訳を出力で確認したいときは、下の「足せる列」の `nums_by_job` /
+> `num_variants` / `unit_variants` を `SELECT` に足します。
 
 **プログラムの指定**
 
@@ -1565,10 +1571,6 @@ ORDER BY cpk_current NULLS LAST, test_num;
 > 他の `params` と同じく `CAST(... AS VARCHAR)` のまま値だけ差し替えれば動きます。
 > 配列リテラル（`['Rev09_02_00']`）は不要です。
 
-`job_names` と `job_revs` を別々に指定すると、`PROG_A/Rev05` と `PROG_B/Rev05` の
-ような**意図しない組み合わせ**も入ります（8-6 の原因 1）。狙った版だけを集めたい
-ときは `job_pairs` を使ってください。
-
 **キーの決め方**
 
 `test_name` をそのままキーにすると、`TEST_TXT` が空のファイルが丸ごと母集団から
@@ -1585,10 +1587,8 @@ flowchart TD
     FN --> NN["③ name_of_num<br/>test_num → 代表名<br/>= 名前を持つ<br/>最も新しいファイルの名前"]
     NN --> K["④ keyed<br/>test_key = 代表名<br/>名前が一度も無ければ #test_num"]
     B --> K
-    K --> FS["⑤ file_specs<br/>ファイル × test_num の<br/>リミット / 版"]
-    FS --> CS["⑦ current_spec<br/>キーごとの現行スペック<br/>基準ラン → 無ければ遡る"]
-    FS --> JM["⑧ job_map<br/>版ごとの test_num<br/>= nums_by_job"]
-    K --> ST["⑨ stats<br/>キー: test_key"]
+    K --> FS["⑤ file_specs → ⑥ current_spec<br/>キーごとの現行スペック<br/>= そのリミットを持つ<br/>最も新しいファイルの値"]
+    K --> ST["⑦ stats<br/>キー: test_key<br/>n / mean / σ / min / max"]
 ```
 
 これで空名のファイルも `test_num` 経由で代表名にぶら下がり、母集団から落ちません。
@@ -1597,13 +1597,14 @@ flowchart TD
 | | 8-2 | 8-2-2 |
 |---|---|---|
 | 集約キー | `test_num` | 代表テスト名（`UPPER(TRIM(test_name))`） |
-| プログラム指定 | `job_name` / `job_rev` を 1 つずつ | **リストで複数**（`job_pairs` は組で厳密に） |
+| プログラム指定 | `job_name` / `job_rev` を 1 つずつ | **カンマ区切りで複数** |
 | 母集団の絞り込み | `lots`（ロット単位） | `runs`（**ファイル単位**。`job_mixed` に強い） |
-| 改番されたテスト | 2 行に割れる | **1 行にまとまる**（`RENUMBERED`。版ごとの番号は `nums_by_job` を足せば見える） |
-| 名前が変わったテスト | 1 行（表示名が不定） | 1 行（最新の名前でまとまる → `NAME_CHANGED`） |
-| 名前が一度も無いテスト | 1 行 | 1 行（キーは `#1234` → `NO_NAME`） |
-| 現行スペックの基準 | 基準ロット（無ければ空欄） | **基準ラン**（無ければ直近のランへ遡る） |
-| `test_num` 列 | 集約キー | **既定では出しません**（必要なら `ref_test_num` を足す） |
+| 改番されたテスト | 2 行に割れる | **1 行にまとまる** |
+| 名前が変わったテスト | 1 行（表示名が不定） | 1 行（最新の名前でまとまる） |
+| 名前が一度も無いテスト | 1 行 | 1 行（キーは `#1234`） |
+| 現行スペック | 基準ロット。無ければ空欄 | そのリミットを持つ**最も新しいファイル**の値 |
+| 出力 | Cp / Cpk / 新リミット候補 / 判定 | **統計値と現行スペックのみ**（生の値） |
+| 絞り込み | `cpk_current < cpk_min` の行だけ | **全テスト**（`WHERE` なし） |
 
 ```sql
 WITH params AS (
@@ -1619,9 +1620,6 @@ WITH params AS (
            CAST(NULL AS VARCHAR)   AS job_names,      -- 例 CAST('PROG_A,PROG_B' AS VARCHAR)
            CAST(NULL AS VARCHAR)   AS job_revs,       -- 例 CAST('Rev09_02_00,Rev10_00_00' AS VARCHAR)
            CAST(NULL AS VARCHAR)   AS job_pairs,      -- 例 CAST('PROG_A/Rev09_02_00' AS VARCHAR)
-           -- 意味・使い方は 8-2 の params と同一
-           CAST(1.33 AS DOUBLE)    AS cpk_min,        -- 下回るなら広げる（±3.99σ）
-           CAST(3.00 AS DOUBLE)    AS cpk_max,        -- 上回るなら締める（±9σ）
            CAST(NULL AS VARCHAR)   AS test_name_like, -- 例 CAST('%IDD%' AS VARCHAR)
            CAST(NULL AS VARCHAR)   AS exclude_lot_pattern
 ),
@@ -1704,7 +1702,7 @@ name_of_num AS (
 ),
 
 -- ④ 集約キーを代表名に差し替える。名前が一度も無い test_num は '#1234' を
---    仮キーにして残す（黙って母集団から落とさない → flags の NO_NAME）
+--    仮キーにして残す（黙って母集団から落とさない）
 keyed AS (
     SELECT COALESCE(nn.name_key, '#' || CAST(b.test_num AS VARCHAR)) AS test_key,
            COALESCE(nn.name_variants, 0) AS name_variants,
@@ -1712,8 +1710,7 @@ keyed AS (
     FROM base b LEFT JOIN name_of_num nn USING (test_num)
 ),
 
--- ⑤ ファイル × test_num のリミット。キーごとの現行スペック（⑦）と
---    プログラム版の内訳（⑧）の両方がここから出る
+-- ⑤ ファイル × test_num のリミット。ファイル内では定数なので ANY_VALUE で厳密
 file_specs AS (
     SELECT k.test_key, k.test_num, k.job_key,
            k.lot_id, k.wafer_id, k.retest_num,
@@ -1726,32 +1723,14 @@ file_specs AS (
     GROUP BY ALL
 ),
 
--- ⑥ 基準ラン = 対象ランのうち最も新しいファイル 1 本。
---    lot_id / wafer_id はタイブレーク（同時刻でも結果を固定する）
-latest_run AS (
-    SELECT lot_id, wafer_id, retest_num, job_key
-    FROM (
-        SELECT tr.*, ROW_NUMBER() OVER (
-                   ORDER BY tr.start_time DESC, tr.lot_id DESC,
-                            tr.wafer_id DESC, tr.retest_num DESC) AS rn
-        FROM target_runs tr
-    ) WHERE rn = 1
-),
-
--- ⑦ 現行スペック = そのキーのリミットを持つ最も新しいファイルの値。
---    基準ランにあればそれ、無ければ直近のランへ遡る（8-2-1 と同じ考え方。
---    ただし単位がロットではなくラン）。同一ファイルに複数の番号があるときは
---    大きい番号（＝新しい採番）を採る
+-- ⑥ 現行スペック = そのキーのリミットを持つ最も新しいファイルの値。
+--    同一ファイルに複数の番号があるときは大きい番号（＝新しい採番）を採る
 spec_ranked AS (
-    SELECT fs.*,
-           (fs.lot_id     = lr.lot_id
-            AND fs.wafer_id   = lr.wafer_id
-            AND fs.retest_num = lr.retest_num) AS is_ref_run,
-           ROW_NUMBER() OVER (
+    SELECT fs.*, ROW_NUMBER() OVER (
                PARTITION BY fs.test_key
                ORDER BY fs.start_time DESC, fs.lot_id DESC, fs.wafer_id DESC,
                         fs.retest_num DESC, fs.test_num DESC) AS rn
-    FROM file_specs fs CROSS JOIN latest_run lr
+    FROM file_specs fs
     -- base と同条件。base のフィルタを緩めても無効リミットを拾わないための保険
     WHERE fs.lo IS NOT NULL AND fs.hi IS NOT NULL AND fs.lo < fs.hi
 ),
@@ -1760,214 +1739,89 @@ current_spec AS (
            -- arg_min(値, rn) = rn が最小の行（= 採用ファイル）の値
            arg_min(lo, rn)                      AS cur_lsl,
            arg_min(hi, rn)                      AS cur_usl,
+           arg_min(NULLIF(TRIM(units), ''), rn) AS units,
+           -- ここから下は既定では出力していない。必要なら最後の SELECT に足す
            arg_min(test_num, rn)                AS ref_test_num,
            arg_min(lot_id, rn)                  AS spec_lot_id,
            arg_min(wafer_id, rn)                AS spec_wafer_id,
            arg_min(job_key, rn)                 AS spec_job,
-           arg_min(is_ref_run, rn)              AS spec_from_ref_run,
-           arg_min(NULLIF(TRIM(units), ''), rn) AS units,
            COUNT(DISTINCT test_num)             AS num_variants,
+           COUNT(DISTINCT job_key)              AS job_variants,
            COUNT(DISTINCT UPPER(TRIM(units)))   AS unit_variants,
-           MAX(name_variants)                   AS name_variants
+           MAX(name_variants)                   AS name_variants,
+           string_agg(DISTINCT job_key || '=' || CAST(test_num AS VARCHAR), ', '
+                      ORDER BY job_key || '=' || CAST(test_num AS VARCHAR))
+                                                AS nums_by_job
     FROM spec_ranked
     GROUP BY test_key
 ),
 
--- ⑧ プログラム版の内訳。どの版でどの番号だったかが nums_by_job に出る
-job_map AS (
-    SELECT test_key,
-           COUNT(DISTINCT job_key)                        AS job_variants,
-           string_agg(DISTINCT job_key, ', ' ORDER BY job_key) AS jobs,
-           string_agg(DISTINCT job_key || '=' || CAST(test_num AS VARCHAR), ', '
-                      ORDER BY job_key || '=' || CAST(test_num AS VARCHAR))
-                                                          AS nums_by_job
-    FROM file_specs
-    GROUP BY test_key
-),
-
--- ⑨ 統計。キーは test_key
+-- ⑦ 統計。キーは test_key。n = 1 のテストは sigma が NULL になる
 stats AS (
-    SELECT
-        test_key,
-        COUNT(*)                             AS n,
-        COUNT(*) FILTER (WHERE passed = 'F') AS fail_n,
-        AVG(result)                          AS mean,
-        STDDEV_SAMP(result)                  AS sigma,
-        MIN(result)                          AS min_val,
-        MAX(result)                          AS max_val,
-        MIN(lo_limit)                        AS lo_limit_min,
-        MAX(lo_limit)                        AS lo_limit_max,
-        MIN(hi_limit)                        AS hi_limit_min,
-        MAX(hi_limit)                        AS hi_limit_max
+    SELECT test_key,
+           COUNT(*)                             AS n,
+           COUNT(*) FILTER (WHERE passed = 'F') AS fail_n,
+           AVG(result)                          AS mean,
+           STDDEV_SAMP(result)                  AS sigma,
+           MIN(result)                          AS min_val,
+           MAX(result)                          AS max_val
     FROM keyed
     GROUP BY ALL
-    HAVING COUNT(*) > 1
-),
-
--- ⑩ 新リミット候補 = 目標帯の 2 本の線（8-2 と同一）
-candidate AS (
-    SELECT s.*,
-           cs.units, cs.ref_test_num,
-           cs.num_variants, cs.unit_variants, cs.name_variants,
-           cs.cur_lsl, cs.cur_usl,
-           cs.spec_lot_id, cs.spec_wafer_id, cs.spec_job, cs.spec_from_ref_run,
-           jm.jobs, jm.job_variants, jm.nums_by_job,
-           -- 目標帯の 4 本。しきい値はここで使い切り、以降の CTE へは持ち回さない
-           -- （最後の SELECT で使う cpk_min は params から直接読む）
-           s.mean - 3.0 * pa.cpk_min * s.sigma AS lsl_widen_exact,
-           s.mean - 3.0 * pa.cpk_max * s.sigma AS lsl_tight_exact,
-           s.mean + 3.0 * pa.cpk_min * s.sigma AS usl_widen_exact,
-           s.mean + 3.0 * pa.cpk_max * s.sigma AS usl_tight_exact
-    FROM stats s
-    CROSS JOIN (SELECT cpk_min, cpk_max FROM params) pa
-    LEFT JOIN current_spec cs USING (test_key)
-    LEFT JOIN job_map      jm USING (test_key)
-    WHERE s.sigma IS NOT NULL AND isfinite(s.sigma) AND s.sigma > 0
-),
-rounded AS (
-    SELECT c.*,
-           -- 表示桁数（理由は 8-2 の disp_digits と同じ）
-           GREATEST(6, 6 - CAST(FLOOR(LOG10(LEAST(
-               NULLIF(ABS(c.mean), 0), c.sigma))) AS INTEGER)) AS disp_digits,
-           CASE WHEN lsl_widen_exact = 0 THEN 0 ELSE
-                FLOOR(lsl_widen_exact / POW(10, FLOOR(LOG10(ABS(lsl_widen_exact))) - 2))
-                     * POW(10, FLOOR(LOG10(ABS(lsl_widen_exact))) - 2) END AS lsl_widen,
-           CASE WHEN lsl_tight_exact = 0 THEN 0 ELSE
-                FLOOR(lsl_tight_exact / POW(10, FLOOR(LOG10(ABS(lsl_tight_exact))) - 2))
-                     * POW(10, FLOOR(LOG10(ABS(lsl_tight_exact))) - 2) END AS lsl_tight,
-           CASE WHEN usl_widen_exact = 0 THEN 0 ELSE
-                CEIL(usl_widen_exact / POW(10, FLOOR(LOG10(ABS(usl_widen_exact))) - 2))
-                     * POW(10, FLOOR(LOG10(ABS(usl_widen_exact))) - 2) END AS usl_widen,
-           CASE WHEN usl_tight_exact = 0 THEN 0 ELSE
-                CEIL(usl_tight_exact / POW(10, FLOOR(LOG10(ABS(usl_tight_exact))) - 2))
-                     * POW(10, FLOOR(LOG10(ABS(usl_tight_exact))) - 2) END AS usl_tight
-    FROM candidate c
-),
-
--- ⑪ 現行スペックを帯で挟む（8-2 と同一）
-clamped AS (
-    SELECT r.*,
-           GREATEST(LEAST(r.cur_lsl, r.lsl_widen), r.lsl_tight) AS new_lsl,
-           LEAST(GREATEST(r.cur_usl, r.usl_widen), r.usl_tight) AS new_usl
-    FROM rounded r
 )
 
--- ⑫ 判定
---    出力は 8-2 と同じ並び（キーが test_name になっただけ）。
---    出所や版の内訳が要るときは、次を SELECT に足してください:
---      ref_test_num / nums_by_job / jobs / job_variants /
---      spec_lot_id / spec_wafer_id / spec_job / limits_changed
+-- 判定・丸め・新リミット候補は入れない。値は生のまま返す
 SELECT
-    test_key AS test_name,
-    units,
-
-    -- 母集団と pass/fail
-    n, fail_n,
-    ROUND(100.0 * fail_n / NULLIF(n, 0), 3) AS fail_pct,
-
-    -- 分布
-    ROUND(mean, disp_digits)    AS mean,
-    ROUND(sigma, disp_digits)   AS sigma,
-    ROUND(min_val, disp_digits) AS min_val,
-    ROUND(max_val, disp_digits) AS max_val,
-
-    -- 現行スペック（採ったファイルは spec_lot_id / spec_wafer_id / spec_job）
-    ROUND(cur_lsl, disp_digits) AS cur_lsl,
-    ROUND(cur_usl, disp_digits) AS cur_usl,
-    ROUND((cur_usl - cur_lsl) / (6 * sigma), 3) AS cp_current,
-    CASE WHEN cur_lsl IS NULL OR cur_usl IS NULL THEN NULL ELSE
-        ROUND(LEAST((cur_usl - mean) / (3 * sigma),
-                    (mean - cur_lsl) / (3 * sigma)), 3) END AS cpk_current,
-
-    -- 新スペック候補
-    ROUND(new_lsl, disp_digits) AS new_lsl,
-    ROUND(new_usl, disp_digits) AS new_usl,
-
-    CASE
-        WHEN cur_lsl IS NULL OR cur_usl IS NULL        THEN 'NO_BASELINE'
-        WHEN new_lsl <  cur_lsl AND new_usl >  cur_usl THEN 'LOOSEN'
-        WHEN new_lsl >  cur_lsl AND new_usl <  cur_usl THEN 'TIGHTEN'
-        WHEN new_lsl =  cur_lsl AND new_usl =  cur_usl THEN 'NO_CHANGE'
-        ELSE 'MIXED'
-    END AS direction,
-
-    CONCAT_WS(',',
-        CASE WHEN cur_lsl IS NULL
-               OR cur_usl IS NULL        THEN 'NO_BASELINE'         END,
-        CASE WHEN NOT spec_from_ref_run  THEN 'SPEC_FROM_OLDER_RUN' END,
-        CASE WHEN job_variants > 1       THEN 'MULTI_JOB'           END,
-        CASE WHEN num_variants > 1       THEN 'RENUMBERED'          END,
-        CASE WHEN unit_variants > 1      THEN 'UNIT_VARIES'         END,
-        CASE WHEN name_variants > 1      THEN 'NAME_CHANGED'        END,
-        CASE WHEN test_key LIKE '#%'     THEN 'NO_NAME'             END,
-        CASE WHEN lo_limit_min <> lo_limit_max
-               OR hi_limit_min <> hi_limit_max
-                                         THEN 'LIMIT_CHANGED'       END
-    ) AS flags
-
-FROM clamped
--- Cpk 不足のものだけ。全件見るならこの WHERE を削除
-WHERE cpk_current IS NULL OR cpk_current < (SELECT cpk_min FROM params)
-ORDER BY cpk_current NULLS LAST, test_name;
+    s.test_key AS test_name,
+    cs.units,
+    s.n, s.fail_n,
+    s.mean, s.sigma, s.min_val, s.max_val,
+    cs.cur_lsl, cs.cur_usl
+FROM stats s
+LEFT JOIN current_spec cs USING (test_key)
+ORDER BY s.test_key;
 ```
 
 **出力**
 
-列の並びは 8-2 と同じで、キーが `test_num` から `test_name` に変わっただけです
-（`test_name` / `units` / `n` 〜 `max_val` / 現行スペック / 新スペック候補 /
-`direction` / `flags`）。`LOW_SAMPLE` と `params.min_n` は 8-2-1 と同じく
-廃止しています（母集団の大小は `n` を直接見れば分かるため）。版や出所の内訳は既定では出さず、**フラグで気付ける**形に
-しています。必要になったら最後の `SELECT` に足してください。
+| 列 | 意味 |
+|---|---|
+| `test_name` | 代表名（集約キー）。名前が一度も無ければ `#1234` |
+| `units` | 現行スペックを採ったファイルの単位 |
+| `n` / `fail_n` | 母集団の測定数と、テスタが fail と判定した数 |
+| `mean` / `sigma` / `min_val` / `max_val` | 母集団の統計値。`sigma` は `STDDEV_SAMP`（`n` = 1 なら `NULL`） |
+| `cur_lsl` / `cur_usl` | 現行スペック |
 
-| 足せる列 | 意味 |
+**丸めていません。** 8-2 は表示用に有効数字を揃えていますが、ここは後段で処理する
+前提なので `DOUBLE` のまま返します。
+
+**足せる列**
+
+`current_spec` が持っているので、必要なら最後の `SELECT` に足すだけです。
+
+| 列 | 意味 |
 |---|---|
 | `ref_test_num` | そのキーの**最新ファイルでの番号**。他の資料との突合の起点 |
-| `nums_by_job` | **どの版でどの番号だったか**（例 `PROG_A/Rev04=1003, PROG_A/Rev05=1013`）。改番の全体像がこの 1 列で分かります |
-| `jobs` / `job_variants` | その行の母集団に入っているプログラム版とその数 |
-| `spec_lot_id` / `spec_wafer_id` / `spec_job` | 現行スペックを採った**ファイル**とその版 |
-| `limits_changed` | `LIMIT_CHANGED` と同じ内容の真偽値 |
-
-**フラグ**
-
-| フラグ | 意味 |
-|---|---|
-| `MULTI_JOB` | 複数の版の測定値が 1 行にまとまっている。版間シフトが σ に乗ります |
-| `RENUMBERED` | 複数の `test_num` を統合した = 改番。8-7 ③' で妥当性を確認してください |
-| `SPEC_FROM_OLDER_RUN` | 基準ラン（対象ランのうち最も新しいファイル）にそのテストの有効なリミットが無く、`spec_lot_id` / `spec_wafer_id` まで遡って採りました |
-| `UNIT_VARIES` | 統合した中で単位が食い違う（例 `V` と `MV`）。**別テストを掴んだ疑いが濃厚**、または桁が混ざっているので `mean` / `sigma` は信用できません |
-| `NAME_CHANGED` | その番号のテスト名が途中で変わっている（最新の名前に寄せています） |
-| `NO_NAME` | どのファイルにも `TEST_TXT` が無い。`test_num` で読んでください |
-| `LIMIT_CHANGED` | 8-2 と同じ意味ですが、**版をまたいだリミット差**でも立ちます |
-
-**読み方の勘所**
-
-- `MULTI_JOB` + `LIMIT_CHANGED` が同時に立つ行は、**版ごとにリミットが違うものを
-  1 つの分布として見ている**状態です。現行スペックは 1 つの版の値なので、他の版の
-  ダイはその値で判定されていません（`fail_n` は複数基準の混ぜ物）。版ごとに
-  分けたいときは `job_pairs` を 1 版に絞って 2 回流してください。
-- `MULTI_JOB` が付いていても `RENUMBERED` が無ければ、番号は全版で同じです
-  （統合の副作用を気にする必要はありません）。内訳を見たいときだけ
-  `nums_by_job` を足してください。
-- `SPEC_FROM_OLDER_RUN` が**ほぼ全行に付く**場合は、基準ラン（最新の 1 ファイル）が
-  特殊なもの（別品種の試し打ち、途中で止まったラン）である可能性があります。
-  `exclude_lot_pattern` で外すか、`job_pairs` を見直してください。
+| `nums_by_job` | **どの版でどの番号だったか**（例 `PROG_A/Rev04=1003, PROG_A/Rev05=1013`） |
+| `num_variants` | 統合した `test_num` の数。2 以上 = 改番をまたいでいる |
+| `job_variants` | 母集団に入っているプログラム版の数 |
+| `unit_variants` | 単位の種類数。2 以上（例 `V` と `MV`）は**別テストを掴んだ疑いが濃厚**、または桁が混ざっているので `mean` / `sigma` は信用できません |
+| `name_variants` | その番号のテスト名が途中で変わった数 |
+| `spec_lot_id` / `spec_wafer_id` / `spec_job` | 現行スペックを採ったファイルとその版 |
 
 **制約**
 
+- 現行スペックはキーごとに**別々のファイル**から採られます（そのリミットを持つ
+  最も新しいファイル）。全行が同じロット・同じ版とは限りません。出所が要るときは
+  `spec_lot_id` / `spec_wafer_id` / `spec_job` を足してください。
+- `fail_n` はテスタが**各ランのリミット**で判定した結果です。版やロットをまたぐと
+  複数基準の混ぜ物になります。リミットが揺れているかは 8-6 で確認できます。
 - **8-4（CSV 検証）とは直結できません。** 8-4 は `test_num` で CSV と突合します。
-  8-2-2 の出力を回すなら `ref_test_num` を出力に足して CSV 側の `test_num` に入れ、
-  8-4 側も同じキーで集計するよう書き換える必要があります。単純に検証したいだけなら
-  8-2-1 を使ってください。
-- 現行スペックの基準が**ラン単位**なので、8-2 / 8-2-1（ロット単位）とは
-  `cur_lsl` / `cur_usl` が一致しないことがあります。`SPEC_FROM_OLDER_RUN` が
-  立っている行は、出所（`spec_lot_id` / `spec_wafer_id` / `spec_job`）を足して
-  確認してください。
+  8-2-2 の出力を回すなら `ref_test_num` を足して CSV 側の `test_num` に入れ、
+  8-4 側も同じキーで集計するよう書き換える必要があります。
 - `runs` は CP では 1 ウェーハ = 1 行、FT では 1 FT lot run = 1 行
   （`wafer_id` は空）です。FT でもそのまま動きます。
-- `test_data` の走査が 1 パスなのは 8-2 と同じですが、`file_names` /
-  `name_of_num` / `keyed` / `file_specs` のぶん集約が増えます（いずれも
-  ファイル数 × テスト数までしか行が増えません）。
-- 既知の限界（母集団は全ダイ / Ppk 相当 / 正規分布前提）は 8-2 と同じです。
+- 母集団は全ダイです（良品ダイの選別はしていません）。σ には他テストで不良に
+  なったダイの測定値も乗ります。全ロットプールなので厳密には Ppk 相当です。
 
 ### 8-3. 確認用 — 8-2 と同じ母集団の生データ取得
 
