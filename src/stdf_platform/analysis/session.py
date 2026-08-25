@@ -20,6 +20,16 @@ from ..mounts import setup_views
 class AnalysisSession:
     def __init__(self, data_dir: Path | None = None) -> None:
         config = Config.load()
+        # workspace/ (VSCode Jupytext cell scripts, dbt/analyses/ SQL runs,
+        # etc.) is not the repo root, so a bare Config.load() above resolves
+        # against the wrong cwd and silently defaults to ./data. Fall back to
+        # the repo-root config.yaml when the caller passed no data_dir and
+        # cwd has no config.yaml of its own. data_dir passed explicitly, or a
+        # cwd config.yaml existing, both keep the behavior above unchanged.
+        if data_dir is None and not Path("config.yaml").exists():
+            repo_cfg = Path(__file__).resolve().parents[3] / "config.yaml"
+            if repo_cfg.exists():
+                config = Config.load(repo_cfg)
         if data_dir is None:
             data_dir = config.storage.data_dir
         self.data_dir = Path(data_dir)

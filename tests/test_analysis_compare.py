@@ -9,6 +9,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from synth_data import _write_cp, _cpk  # noqa: E402
 from stdf_platform.analysis import AnalysisSession  # noqa: E402
 from stdf_platform.analysis import compare  # noqa: E402
+from stdf_platform.build import run_build  # noqa: E402
+from stdf_platform.config import Config, StorageConfig  # noqa: E402
 
 
 def _write_cp_lot2(data_dir: Path):
@@ -108,3 +110,37 @@ def test_test_distribution_fig_smoke(tmp_path):
         fig = compare.test_distribution_fig(s, "PROD", ["LOT1", "LOT2"], "CP", 1001)
         assert isinstance(fig, go.Figure)
         assert len(fig.data) == 2      # one histogram trace per lot
+
+
+def test_yield_by_lot_uses_mart_when_present(synth_store):
+    # Before `stdf build`, no mart is mounted: yield_by_lot falls back to the
+    # current wafer-grain query over wafer_yield_final (per-wafer rows).
+    # LOT1/W1 after dedup: die(1,1) retest-1 passes, die(2,2) passes,
+    # die(3,3) fails (never retested) -> total=3, good=2 (see conftest's
+    # synth_store docstring; matches test_dbt_marts.test_lot_yield_summary_values).
+    with AnalysisSession(synth_store) as s_pre:
+        assert "lot_yield_summary" not in s_pre.registered
+        fallback = compare.yield_by_lot(s_pre, "PROD", ["LOT1"], "CP")
+        assert {"lot_id", "wafer_id", "total", "good", "yield_pct"} <= set(fallback.columns)
+        row = fallback[(fallback.lot_id == "LOT1") & (fallback.wafer_id == "W1")].iloc[0]
+        wafer_total, wafer_good = int(row.total), int(row.good)
+        assert (wafer_total, wafer_good) == (3, 2)
+
+    # After `stdf build`, lot_yield_summary is mounted and yield_by_lot
+    # delegates to it. LOT1 has exactly one wafer (W1), so the mart's
+    # lot-grain total_parts/good_parts/yield_pct carry the same underlying
+    # yield numbers as the wafer-grain fallback above — this is the "same
+    # value" Step 4 asks for; the column *set* legitimately differs (the
+    # mart is one row per lot with no wafer_id, since it aggregates across
+    # all of a lot's wafers) and is not reconciled to match the fallback's
+    # shape (see task-8-report.md for why).
+    run_build(Config(storage=StorageConfig(
+        data_dir=synth_store, database=synth_store / "db.duckdb")))
+    with AnalysisSession(synth_store) as s_post:
+        assert "lot_yield_summary" in s_post.registered
+        mart = compare.yield_by_lot(s_post, "PROD", ["LOT1"], "CP")
+        assert list(mart.lot_id) == ["LOT1"]
+        row = mart.iloc[0]
+        assert int(row.total_parts) == wafer_total
+        assert int(row.good_parts) == wafer_good
+        assert float(row.yield_pct) == 66.67
