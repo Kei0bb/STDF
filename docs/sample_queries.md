@@ -1242,7 +1242,6 @@ WITH params AS (
            -- （帯の中なら NO_CHANGE）。σ 換算は 3 × Cpk
            CAST(1.33 AS DOUBLE)   AS cpk_min,   -- 下回るなら広げる（±3.99σ）
            CAST(3.00 AS DOUBLE)   AS cpk_max,   -- 上回るなら締める（±9σ）
-           30                     AS min_n,             -- これ未満は LOW_SAMPLE
            -- テスト名のあいまい検索。ILIKE なので大文字小文字を区別しない。
            -- 例 CAST('%IDD%' AS VARCHAR) / NULL なら全テスト
            CAST(NULL AS VARCHAR)  AS test_name_like,
@@ -1389,7 +1388,7 @@ candidate AS (
            cs.spec_lot_id, cs.spec_job_name, cs.spec_job_rev,
            (cs.spec_lot_id = ll.lot_id) AS spec_from_ref_lot,
            -- 目標帯の 4 本。しきい値はここで使い切り、以降の CTE へは持ち回さない
-           -- （min_n / cpk_min は最後の SELECT で params から直接読む）
+           -- （最後の SELECT で使う cpk_min は params から直接読む）
            s.mean - 3.0 * pa.cpk_min * s.sigma AS lsl_widen_exact,
            s.mean - 3.0 * pa.cpk_max * s.sigma AS lsl_tight_exact,
            s.mean + 3.0 * pa.cpk_min * s.sigma AS usl_widen_exact,
@@ -1482,8 +1481,6 @@ SELECT
     END AS direction,
 
     CONCAT_WS(',',
-        CASE WHEN n < (SELECT min_n FROM params)
-                                             THEN 'LOW_SAMPLE'          END,
         CASE WHEN cur_lsl IS NULL
                OR cur_usl IS NULL            THEN 'NO_BASELINE'         END,
         -- 基準ロットに無く、直近のロットまで遡って採ったリミット
@@ -1513,6 +1510,8 @@ ORDER BY cpk_current NULLS LAST, test_num;
   表示している `test_name` は「名前を持つ最も新しいファイル」のものです。どの
   ファイルにも名前が無ければ `NULL` になります（8-2 は `ANY_VALUE` なので空文字が
   出ることがあります）。
+- `LOW_SAMPLE` と `params.min_n` は廃止しました（母集団の大小は `n` を直接見れば
+  分かるため）。8-2 には残っています。
 - `NOT_IN_LATEST_LOT` は出ません（遡って埋めるため）。`NO_BASELINE` は、母集団の
   どのファイルにも有効なリミット（`lo < hi`）が無いときだけの保険で、`base` の
   フィルタをそのまま使う限り出ません。
@@ -1615,7 +1614,6 @@ WITH params AS (
            -- 意味・使い方は 8-2 の params と同一
            CAST(1.33 AS DOUBLE)    AS cpk_min,        -- 下回るなら広げる（±3.99σ）
            CAST(3.00 AS DOUBLE)    AS cpk_max,        -- 上回るなら締める（±9σ）
-           30                      AS min_n,          -- これ未満は LOW_SAMPLE
            CAST(NULL AS VARCHAR)   AS test_name_like, -- 例 CAST('%IDD%' AS VARCHAR)
            CAST(NULL AS VARCHAR)   AS exclude_lot_pattern
 ),
@@ -1798,7 +1796,7 @@ candidate AS (
            cs.spec_lot_id, cs.spec_wafer_id, cs.spec_job, cs.spec_from_ref_run,
            jm.jobs, jm.job_variants, jm.nums_by_job,
            -- 目標帯の 4 本。しきい値はここで使い切り、以降の CTE へは持ち回さない
-           -- （min_n / cpk_min は最後の SELECT で params から直接読む）
+           -- （最後の SELECT で使う cpk_min は params から直接読む）
            s.mean - 3.0 * pa.cpk_min * s.sigma AS lsl_widen_exact,
            s.mean - 3.0 * pa.cpk_max * s.sigma AS lsl_tight_exact,
            s.mean + 3.0 * pa.cpk_min * s.sigma AS usl_widen_exact,
@@ -1877,8 +1875,6 @@ SELECT
     END AS direction,
 
     CONCAT_WS(',',
-        CASE WHEN n < (SELECT min_n FROM params)
-                                         THEN 'LOW_SAMPLE'          END,
         CASE WHEN cur_lsl IS NULL
                OR cur_usl IS NULL        THEN 'NO_BASELINE'         END,
         CASE WHEN NOT spec_from_ref_run  THEN 'SPEC_FROM_OLDER_RUN' END,
@@ -1902,7 +1898,8 @@ ORDER BY cpk_current NULLS LAST, test_name;
 
 列の並びは 8-2 と同じで、キーが `test_num` から `test_name` に変わっただけです
 （`test_name` / `units` / `n` 〜 `max_val` / 現行スペック / 新スペック候補 /
-`direction` / `flags`）。版や出所の内訳は既定では出さず、**フラグで気付ける**形に
+`direction` / `flags`）。`LOW_SAMPLE` と `params.min_n` は 8-2-1 と同じく
+廃止しています（母集団の大小は `n` を直接見れば分かるため）。版や出所の内訳は既定では出さず、**フラグで気付ける**形に
 しています。必要になったら最後の `SELECT` に足してください。
 
 | 足せる列 | 意味 |
