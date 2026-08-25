@@ -820,7 +820,7 @@ ORDER BY cpk;
 > |---|---|---|
 > | **8-2**（本節） | `test_num` | 基準ロットのみ。無ければ空欄 |
 > | **8-2-1** | `test_num` | 基準ロット優先 → 無ければ直近ロットへ遡る |
-> | **8-2-2** | 代表テスト名 | そのリミットを持つ最新ファイル。改番をまたいで 1 行にまとめる。**複数プログラム版に対応。判定はせず統計値だけ返す** |
+> | **8-2-2** | 代表テスト名 | 出さない。改番をまたいで 1 行にまとめ、**統計値だけを生の値で返す**（複数プログラム版に対応） |
 >
 > ズレそのものの洗い出しは **8-7** です。
 
@@ -1526,40 +1526,24 @@ ORDER BY cpk_current NULLS LAST, test_num;
 
 ### 8-2-2. 8-2 の派生 — `test_name` で集計した素データ（複数テストプログラム対応）
 
-改番（同じテストがロット / プログラム版によって別の `test_num` になる）を**またいで
-1 本の分布にまとめたい**ときの派生です。集約キーを `test_num` から**テスト名**に変え、
-**複数の試験プログラムを同時に対象にできます**。
+集約キーを `test_num` から**テスト名**に変えて、改番（同じテストが版によって別の
+`test_num` になる）をまたいで 1 本の分布にまとめます。**複数の試験プログラムを
+同時に対象にできます。**
 
-> [!NOTE]
-> **このクエリは判定をしません。** 目標帯・新リミット候補・`direction`・丸めは
-> 入れず、**母集団の統計値と現行スペックを生の値で返すだけ**です。Cpk の計算や
-> 合否の線引きは出力を受け取ってから行ってください。判定込みで見たい場合は
-> 8-2 / 8-2-1 を使います。
-
-改版で採番が変わるのはよくあるので、**改番をまたぐ = 複数プログラムをまたぐ**に
-なりがちです。そのため本クエリは 8-2 / 8-2-1 と違う点が 2 つあります。
-
-1. **プログラムを複数指定できます**（`job_names` / `job_revs` / `job_pairs` に
-   カンマ区切りで書く）。1 版だけでなく「Rev09_02_00 と Rev10_00_00」のように
-   まとめて対象にできます。
-2. **母集団を `lots` ではなく `runs`（ファイル単位）で絞ります。**
-   `lots.job_name` / `job_rev` は**ロット内で最も新しいランの値**なので、ロット内で
-   プログラムが変わっているロット（`lots.job_mixed`）では版を取り違えます。
-   `runs` で絞れば、どのウェーハがどの版かを 1 枚単位で正しく扱えます。
+**判定はしません。** Cp / Cpk・現行スペック・新リミット候補・丸めは入れず、
+`n` / `mean` / `sigma` / `min` / `max` を生の値で返すだけです。判定込みで見たい
+場合は 8-2 / 8-2-1 を使ってください。
 
 > [!WARNING]
 > **名前が同じだけの別テストも統合します。** STDF の `TEST_TXT` に一意性の保証は
-> ありません（フローの別箇所で同じ名前が使われることがあります）。**使う前に必ず
-> 8-7 の ③' で、番号ごとの版と期間が重なっていないことを確認してください。**
-> 重なっていれば改番ではなく別テストなので、8-2 / 8-2-1 のまま読んでください。
-> 統合の内訳を出力で確認したいときは、下の「足せる列」の `nums_by_job` /
-> `num_variants` / `unit_variants` を `SELECT` に足します。
+> ありません。**使う前に 8-7 の ③' で、番号ごとの版と期間が重なっていないことを
+> 確認してください。** 重なっていれば改番ではなく別テストです。
 
 **プログラムの指定**
 
-**カンマ区切りの文字列**で複数書けます（前後の空白は無視。1 つだけならそのまま
-書きます）。3 つとも AND で効き、`NULL` なら絞りません。使える値は 1-1 / 1-2 の
-クエリで確認できます。
+`job_names` / `job_revs` / `job_pairs` に**カンマ区切りの文字列**で書きます（前後の
+空白は無視。1 つだけならそのまま）。3 つとも AND で効き、`NULL` なら絞りません。
+使える値は 1-1 / 1-2 のクエリで確認できます。
 
 | params | 書き方 | 意味 |
 |---|---|---|
@@ -1567,56 +1551,31 @@ ORDER BY cpk_current NULLS LAST, test_num;
 | `job_revs` | `CAST('Rev09_02_00,Rev10_00_00' AS VARCHAR)` | 版で絞る |
 | `job_pairs` | `CAST('PROG_A/Rev09_02_00' AS VARCHAR)` | **名前と版の組**で厳密に絞る |
 
-> [!TIP]
-> 他の `params` と同じく `CAST(... AS VARCHAR)` のまま値だけ差し替えれば動きます。
-> 配列リテラル（`['Rev09_02_00']`）は不要です。
+`job_names` と `job_revs` を別々に指定すると `PROG_A/Rev05` と `PROG_B/Rev05` の
+ような意図しない組み合わせも入ります（8-6 の原因 1）。狙った版だけを集めるなら
+`job_pairs` を使ってください。配列リテラル（`['Rev09_02_00']`）は不要です。
+
+母集団は `lots` ではなく **`runs`（ファイル単位）**で絞ります。`lots.job_name` /
+`job_rev` はロット内で最も新しいランの値なので、ロット内でプログラムが変わって
+いるロット（`lots.job_mixed`）では版を取り違えるためです。
 
 **キーの決め方**
 
 `test_name` をそのままキーにすると、`TEST_TXT` が空のファイルが丸ごと母集団から
 落ちます（`parser.py` はファイル内で最初の PTR / MPR から名前を 1 回だけ採るので、
-そこに名前が無ければ**そのファイル全体が空名**になります）。そこで**一度
-`test_num` → 代表名を決めてから**名前で集計します。
-
-```mermaid
-flowchart TD
-    R["runs"] --> TR["⓪ target_runs<br/>ファイル単位で絞る<br/>job_names / job_revs / job_pairs<br/>job_mixed のロットも正しく扱える"]
-    TD["test_data_final"] --> B
-    TR --> B["① base<br/>各行に job_key と<br/>ラン実施時刻が付く"]
-    B --> FN["② file_names<br/>ファイル × test_num の名前"]
-    FN --> NN["③ name_of_num<br/>test_num → 代表名<br/>= 名前を持つ<br/>最も新しいファイルの名前"]
-    NN --> K["④ keyed<br/>test_key = 代表名<br/>名前が一度も無ければ #test_num"]
-    B --> K
-    K --> FS["⑤ file_specs → ⑥ current_spec<br/>キーごとの現行スペック<br/>= そのリミットを持つ<br/>最も新しいファイルの値"]
-    K --> ST["⑦ stats<br/>キー: test_key<br/>n / mean / σ / min / max"]
-```
-
-これで空名のファイルも `test_num` 経由で代表名にぶら下がり、母集団から落ちません。
-名前の正規化は `UPPER(TRIM(...))` だけです（大文字小文字と前後の空白のみ吸収）。
-
-| | 8-2 | 8-2-2 |
-|---|---|---|
-| 集約キー | `test_num` | 代表テスト名（`UPPER(TRIM(test_name))`） |
-| プログラム指定 | `job_name` / `job_rev` を 1 つずつ | **カンマ区切りで複数** |
-| 母集団の絞り込み | `lots`（ロット単位） | `runs`（**ファイル単位**。`job_mixed` に強い） |
-| 改番されたテスト | 2 行に割れる | **1 行にまとまる** |
-| 名前が変わったテスト | 1 行（表示名が不定） | 1 行（最新の名前でまとまる） |
-| 名前が一度も無いテスト | 1 行 | 1 行（キーは `#1234`） |
-| 現行スペック | 基準ロット。無ければ空欄 | そのリミットを持つ**最も新しいファイル**の値 |
-| 出力 | Cp / Cpk / 新リミット候補 / 判定 | **統計値と現行スペックのみ**（生の値） |
-| 絞り込み | `cpk_current < cpk_min` の行だけ | **全テスト**（`WHERE` なし） |
+そこに名前が無ければ**そのファイル全体が空名**になります）。そこで**先に
+`test_num` → 代表名**（名前を持つ最も新しいファイルの名前）を決め、それをキーに
+集計します。これで空名のファイルも `test_num` 経由でぶら下がります。名前が一度も
+無い `test_num` はキーが `#1234` になります。名前の正規化は `UPPER(TRIM(...))`
+だけです。
 
 ```sql
 WITH params AS (
     SELECT 'YOUR_PRODUCT'          AS product,
            'CP'                    AS test_category,  -- 必ず指定（8-2 の IMPORTANT）
            'CP1'                   AS sub_process,    -- 必ず指定
-           -- 試験プログラムの指定。**カンマ区切りの文字列**で複数書ける
-           -- （前後の空白は無視。1 つだけならそのまま書く）。3 つとも AND で効き、
-           -- NULL なら絞らない。複数版をまとめて対象にできる（改番をまたぐのが
-           -- 本クエリの目的）。job_pairs は名前と版の組で厳密に指定する形。
-           -- job_names / job_revs を別々に指定すると PROG_A/Rev05 と
-           -- PROG_B/Rev05 のような意図しない組み合わせも入る（8-6 の原因 1）
+           -- 試験プログラムの指定。カンマ区切りで複数書ける（前後の空白は無視。
+           -- 1 つだけならそのまま書く）。3 つとも AND で効き、NULL なら絞らない
            CAST(NULL AS VARCHAR)   AS job_names,      -- 例 CAST('PROG_A,PROG_B' AS VARCHAR)
            CAST(NULL AS VARCHAR)   AS job_revs,       -- 例 CAST('Rev09_02_00,Rev10_00_00' AS VARCHAR)
            CAST(NULL AS VARCHAR)   AS job_pairs,      -- 例 CAST('PROG_A/Rev09_02_00' AS VARCHAR)
@@ -1624,8 +1583,7 @@ WITH params AS (
            CAST(NULL AS VARCHAR)   AS exclude_lot_pattern
 ),
 
--- ⓪-1 プログラム指定をリストへ開く。'A, B' → ['A','B']。
---      NULL はそのまま NULL（= 絞らない）
+-- ① プログラム指定をリストへ開く。'A, B' → ['A','B']。NULL は NULL のまま
 job_filter AS (
     SELECT list_transform(string_split(job_names, ','), x -> TRIM(x)) AS job_names,
            list_transform(string_split(job_revs,  ','), x -> TRIM(x)) AS job_revs,
@@ -1633,12 +1591,10 @@ job_filter AS (
     FROM params
 ),
 
--- ⓪-2 対象ラン: 8-2 は lots（ロット単位）で絞るが、ここは runs（ファイル単位）で
---      絞る。lot 内でプログラムが変わっているロット（lots.job_mixed）でも、
---      どのウェーハがどの版かを取り違えない
+-- ② 対象ラン。lots ではなく runs（ファイル単位）で絞るので、ロット内で
+--    プログラムが変わっていても（lots.job_mixed）版を取り違えない
 target_runs AS (
-    SELECT r.lot_id, r.wafer_id, r.retest_num, r.start_time,
-           CONCAT_WS('/', r.job_name, r.job_rev) AS job_key
+    SELECT r.lot_id, r.wafer_id, r.retest_num, r.start_time
     FROM runs r CROSS JOIN params pa CROSS JOIN job_filter jf
     WHERE r.product       = pa.product
       AND r.test_category = pa.test_category
@@ -1651,13 +1607,11 @@ target_runs AS (
            OR r.lot_id NOT LIKE pa.exclude_lot_pattern)
 ),
 
--- ① 母集団。フィルタは 8-2 と同じ。各行にその測定を出したランの
---    プログラム版（job_key）と実施時刻が付く
+-- ③ 母集団。フィルタは 8-2 と同じ
 base AS (
-    SELECT tr.job_key, tr.start_time,
+    SELECT tr.start_time,
            td.lot_id, td.wafer_id, td.retest_num,
-           td.test_num, td.test_name, td.units,
-           td.lo_limit, td.hi_limit, td.result, td.passed
+           td.test_num, td.test_name, td.units, td.result, td.passed
     FROM test_data_final td CROSS JOIN params pa
     JOIN target_runs tr USING (lot_id, wafer_id, retest_num)
     WHERE td.product       = pa.product
@@ -1675,153 +1629,56 @@ base AS (
       AND regexp_matches(UPPER(TRIM(td.units)), '^.?[VA]$')
 ),
 
--- ② ファイル × test_num の名前。parser.py はファイル内で最初に出てきた
+-- ④ ファイル × test_num の名前。parser.py はファイル内で最初に出てきた
 --    PTR / MPR から名前を 1 回だけ採るので、ファイル内では定数（8-6 参照）
 file_names AS (
-    SELECT b.test_num, b.lot_id, b.wafer_id, b.retest_num,
-           ANY_VALUE(UPPER(TRIM(b.test_name))) AS name_key,
-           ANY_VALUE(b.start_time)             AS start_time
-    FROM base b
+    SELECT test_num, lot_id, wafer_id, retest_num,
+           ANY_VALUE(UPPER(TRIM(test_name))) AS name_key,
+           ANY_VALUE(start_time)             AS start_time
+    FROM base
     GROUP BY ALL
 ),
 
--- ③ test_num → 代表名 = 「名前を持つ最も新しいファイル」の名前。
---    arg_min は NULL を無視するので、空名のファイルは自動的に飛ばされる
+-- ⑤ test_num → 代表名 = 「名前を持つ最も新しいファイル」の名前。
+--    空名のファイルは候補から外すので、TEST_TXT が空でも母集団は落ちない
 name_of_num AS (
-    SELECT test_num,
-           arg_min(NULLIF(name_key, ''), rn)    AS name_key,
-           COUNT(DISTINCT NULLIF(name_key, '')) AS name_variants
-    FROM (
-        SELECT fn.*, ROW_NUMBER() OVER (
-                   PARTITION BY fn.test_num
-                   ORDER BY fn.start_time DESC, fn.lot_id DESC,
-                            fn.wafer_id DESC, fn.retest_num DESC) AS rn
-        FROM file_names fn
-    )
-    GROUP BY test_num
-),
-
--- ④ 集約キーを代表名に差し替える。名前が一度も無い test_num は '#1234' を
---    仮キーにして残す（黙って母集団から落とさない）
-keyed AS (
-    SELECT COALESCE(nn.name_key, '#' || CAST(b.test_num AS VARCHAR)) AS test_key,
-           COALESCE(nn.name_variants, 0) AS name_variants,
-           b.*
-    FROM base b LEFT JOIN name_of_num nn USING (test_num)
-),
-
--- ⑤ ファイル × test_num のリミット。ファイル内では定数なので ANY_VALUE で厳密
-file_specs AS (
-    SELECT k.test_key, k.test_num, k.job_key,
-           k.lot_id, k.wafer_id, k.retest_num,
-           ANY_VALUE(k.start_time)    AS start_time,
-           ANY_VALUE(k.lo_limit)      AS lo,
-           ANY_VALUE(k.hi_limit)      AS hi,
-           ANY_VALUE(k.units)         AS units,
-           ANY_VALUE(k.name_variants) AS name_variants
-    FROM keyed k
-    GROUP BY ALL
-),
-
--- ⑥ 現行スペック = そのキーのリミットを持つ最も新しいファイルの値。
---    同一ファイルに複数の番号があるときは大きい番号（＝新しい採番）を採る
-spec_ranked AS (
-    SELECT fs.*, ROW_NUMBER() OVER (
-               PARTITION BY fs.test_key
-               ORDER BY fs.start_time DESC, fs.lot_id DESC, fs.wafer_id DESC,
-                        fs.retest_num DESC, fs.test_num DESC) AS rn
-    FROM file_specs fs
-    -- base と同条件。base のフィルタを緩めても無効リミットを拾わないための保険
-    WHERE fs.lo IS NOT NULL AND fs.hi IS NOT NULL AND fs.lo < fs.hi
-),
-current_spec AS (
-    SELECT test_key,
-           -- arg_min(値, rn) = rn が最小の行（= 採用ファイル）の値
-           arg_min(lo, rn)                      AS cur_lsl,
-           arg_min(hi, rn)                      AS cur_usl,
-           arg_min(NULLIF(TRIM(units), ''), rn) AS units,
-           -- ここから下は既定では出力していない。必要なら最後の SELECT に足す
-           arg_min(test_num, rn)                AS ref_test_num,
-           arg_min(lot_id, rn)                  AS spec_lot_id,
-           arg_min(wafer_id, rn)                AS spec_wafer_id,
-           arg_min(job_key, rn)                 AS spec_job,
-           COUNT(DISTINCT test_num)             AS num_variants,
-           COUNT(DISTINCT job_key)              AS job_variants,
-           COUNT(DISTINCT UPPER(TRIM(units)))   AS unit_variants,
-           MAX(name_variants)                   AS name_variants,
-           string_agg(DISTINCT job_key || '=' || CAST(test_num AS VARCHAR), ', '
-                      ORDER BY job_key || '=' || CAST(test_num AS VARCHAR))
-                                                AS nums_by_job
-    FROM spec_ranked
-    GROUP BY test_key
-),
-
--- ⑦ 統計。キーは test_key。n = 1 のテストは sigma が NULL になる
-stats AS (
-    SELECT test_key,
-           COUNT(*)                             AS n,
-           COUNT(*) FILTER (WHERE passed = 'F') AS fail_n,
-           AVG(result)                          AS mean,
-           STDDEV_SAMP(result)                  AS sigma,
-           MIN(result)                          AS min_val,
-           MAX(result)                          AS max_val
-    FROM keyed
-    GROUP BY ALL
+    SELECT test_num, name_key
+    FROM file_names
+    WHERE NULLIF(name_key, '') IS NOT NULL
+    QUALIFY ROW_NUMBER() OVER (
+                PARTITION BY test_num
+                ORDER BY start_time DESC, lot_id DESC,
+                         wafer_id DESC, retest_num DESC) = 1
 )
 
--- 判定・丸め・新リミット候補は入れない。値は生のまま返す
+-- ⑥ 代表名で集計。値は丸めずそのまま返す
 SELECT
-    s.test_key AS test_name,
-    cs.units,
-    s.n, s.fail_n,
-    s.mean, s.sigma, s.min_val, s.max_val,
-    cs.cur_lsl, cs.cur_usl
-FROM stats s
-LEFT JOIN current_spec cs USING (test_key)
-ORDER BY s.test_key;
+    COALESCE(nn.name_key, '#' || CAST(b.test_num AS VARCHAR)) AS test_name,
+    ANY_VALUE(b.units)                       AS units,
+    COUNT(*)                                 AS n,
+    COUNT(*) FILTER (WHERE b.passed = 'F')   AS fail_n,
+    AVG(b.result)                            AS mean,
+    STDDEV_SAMP(b.result)                    AS sigma,
+    MIN(b.result)                            AS min_val,
+    MAX(b.result)                            AS max_val
+FROM base b
+LEFT JOIN name_of_num nn USING (test_num)
+GROUP BY 1
+ORDER BY 1;
 ```
 
 **出力**
 
 | 列 | 意味 |
 |---|---|
-| `test_name` | 代表名（集約キー）。名前が一度も無ければ `#1234` |
-| `units` | 現行スペックを採ったファイルの単位 |
-| `n` / `fail_n` | 母集団の測定数と、テスタが fail と判定した数 |
-| `mean` / `sigma` / `min_val` / `max_val` | 母集団の統計値。`sigma` は `STDDEV_SAMP`（`n` = 1 なら `NULL`） |
-| `cur_lsl` / `cur_usl` | 現行スペック |
+| `test_name` | 代表名。名前が一度も無ければ `#1234` |
+| `units` | 単位（母集団内のいずれか 1 つ） |
+| `n` / `fail_n` | 測定数と、テスタが fail と判定した数 |
+| `mean` / `sigma` / `min_val` / `max_val` | 統計値。`sigma` は `STDDEV_SAMP`（`n` = 1 なら `NULL`） |
 
-**丸めていません。** 8-2 は表示用に有効数字を揃えていますが、ここは後段で処理する
-前提なので `DOUBLE` のまま返します。
-
-**足せる列**
-
-`current_spec` が持っているので、必要なら最後の `SELECT` に足すだけです。
-
-| 列 | 意味 |
-|---|---|
-| `ref_test_num` | そのキーの**最新ファイルでの番号**。他の資料との突合の起点 |
-| `nums_by_job` | **どの版でどの番号だったか**（例 `PROG_A/Rev04=1003, PROG_A/Rev05=1013`） |
-| `num_variants` | 統合した `test_num` の数。2 以上 = 改番をまたいでいる |
-| `job_variants` | 母集団に入っているプログラム版の数 |
-| `unit_variants` | 単位の種類数。2 以上（例 `V` と `MV`）は**別テストを掴んだ疑いが濃厚**、または桁が混ざっているので `mean` / `sigma` は信用できません |
-| `name_variants` | その番号のテスト名が途中で変わった数 |
-| `spec_lot_id` / `spec_wafer_id` / `spec_job` | 現行スペックを採ったファイルとその版 |
-
-**制約**
-
-- 現行スペックはキーごとに**別々のファイル**から採られます（そのリミットを持つ
-  最も新しいファイル）。全行が同じロット・同じ版とは限りません。出所が要るときは
-  `spec_lot_id` / `spec_wafer_id` / `spec_job` を足してください。
-- `fail_n` はテスタが**各ランのリミット**で判定した結果です。版やロットをまたぐと
-  複数基準の混ぜ物になります。リミットが揺れているかは 8-6 で確認できます。
-- **8-4（CSV 検証）とは直結できません。** 8-4 は `test_num` で CSV と突合します。
-  8-2-2 の出力を回すなら `ref_test_num` を足して CSV 側の `test_num` に入れ、
-  8-4 側も同じキーで集計するよう書き換える必要があります。
-- `runs` は CP では 1 ウェーハ = 1 行、FT では 1 FT lot run = 1 行
-  （`wafer_id` は空）です。FT でもそのまま動きます。
-- 母集団は全ダイです（良品ダイの選別はしていません）。σ には他テストで不良に
-  なったダイの測定値も乗ります。全ロットプールなので厳密には Ppk 相当です。
+丸めていません（`DOUBLE` のまま）。`fail_n` はテスタが**各ランのリミット**で
+判定した結果なので、版やロットをまたぐと複数基準の混ぜ物になります。母集団は
+全ダイで、全ロットプールの σ なので厳密には Ppk 相当です。
 
 ### 8-3. 確認用 — 8-2 と同じ母集団の生データ取得
 
