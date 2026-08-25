@@ -246,10 +246,19 @@ def setup_views(
     # 唯一の持ち主 — ここは名前を貼るだけ。
     marts_dir = data_dir / "marts"
     if marts_dir.exists():
+        # "gross_die" is a TABLE (not a VIEW), created above regardless of
+        # whether any mart exists — CREATE OR REPLACE VIEW over it would
+        # raise duckdb.CatalogException (table vs view) and abort
+        # setup_views() entirely. A mart named after any already-registered
+        # canonical view (e.g. "parts", "lots") would otherwise silently
+        # CREATE OR REPLACE it, last-registration-wins, and mask the real
+        # table. Reserve both: the names already in `registered` plus
+        # "gross_die".
+        reserved = set(registered) | {"gross_die"}
         for f in sorted(marts_dir.glob("*.parquet")):
             name = f.stem
-            if not name.isidentifier():
-                continue  # 想定外のファイル名は黙って飛ばさず登録もしない
+            if not name.isidentifier() or name in reserved:
+                continue  # 想定外のファイル名・予約名は黙って飛ばさず登録もしない
             conn.execute(
                 f"CREATE OR REPLACE VIEW {name} AS "
                 f"SELECT * FROM read_parquet('{f.as_posix()}')"

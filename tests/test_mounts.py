@@ -88,3 +88,31 @@ def test_marts_are_mounted(tmp_path):
     registered = setup_views(conn, tmp_path)
     assert "lot_yield_summary" in registered
     assert conn.execute("SELECT yield_pct FROM lot_yield_summary").fetchone()[0] == 99.0
+
+
+def test_mart_name_colliding_with_core_table_or_gross_die_is_skipped(tmp_path):
+    """A mart file named after an already-registered canonical view (e.g.
+    "parts") must not CREATE OR REPLACE that view — last-registration-wins
+    would silently mask real data. A mart named "gross_die" must not raise
+    (gross_die is a TABLE, not a VIEW; CREATE OR REPLACE VIEW over a table
+    name raises duckdb.CatalogException)."""
+    _write_parts(tmp_path)
+    marts = tmp_path / "marts"
+    marts.mkdir()
+    # Colliding mart names: a fake "parts" mart with different data, and a
+    # fake "gross_die" mart (gross_die is always created as a TABLE above).
+    pq.write_table(pa.table({"lot_id": ["FAKE"]}), marts / "parts.parquet")
+    pq.write_table(pa.table({"lot_id": ["FAKE"]}), marts / "gross_die.parquet")
+
+    conn = duckdb.connect(":memory:")
+    registered = setup_views(conn, tmp_path)  # must not raise
+
+    # "parts" view still serves the real table, not the mart file.
+    rows = conn.execute("SELECT COUNT(*) FROM parts").fetchone()[0]
+    assert rows == 2  # from _write_parts, not the 1-row FAKE mart
+
+    # Neither collision name was double-registered.
+    assert registered.count("parts") == 1
+    assert registered.count("gross_die") == 0  # gross_die table is never
+    # added to `registered` in the first place (see setup_views); the mart
+    # of the same name must not add it either.
