@@ -1,0 +1,12 @@
+name: stdf
+version: "1.0"
+profile: stdf
+model-paths: ["models"]
+analysis-paths: ["analyses"]
+test-paths: ["tests"]
+models:
+  stdf:
+    staging:
+      +materialized: view
+    marts:
+      +materialized: external

@@ -1,0 +1,14 @@
+version: 2
+sources:
+  - name: stdf
+    schema: main
+    meta:
+      external_location: "read_parquet('{{ env_var('STDF_DATA_DIR') }}/{name}/**/*.parquet', hive_partitioning=true)"
+    tables:
+      - name: runs
+      - name: wafers
+      - name: parts
+      - name: chipid
+      - name: test_data
+        meta:
+          external_location: "read_parquet('{{ env_var('STDF_DATA_DIR') }}/test_data/**/*.parquet', hive_partitioning=true, union_by_name=true)"
