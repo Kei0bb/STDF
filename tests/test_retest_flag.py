@@ -16,7 +16,7 @@ import pytest
 from stdf_platform.config import StorageConfig
 from stdf_platform.parser import STDFData
 from stdf_platform.storage import ParquetStorage, TEST_DATA_SCHEMA
-from stdf_platform.views import setup_views
+from stdf_platform.mounts import setup_views
 
 
 def _make_storage(tmp_path: Path) -> ParquetStorage:

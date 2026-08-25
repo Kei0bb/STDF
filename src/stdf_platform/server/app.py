@@ -2,7 +2,7 @@
 
 A thin FastAPI layer over AnalysisSession: one request = one :memory: DuckDB
 session with the canonical views (setup_views), so every consumer computes
-yield/Cpk from the same definitions in views.py. No analysis logic lives here.
+yield/Cpk from the same definitions in mounts.py. No analysis logic lives here.
 
 Built as an APIRouter so a future dashboard backend can mount it via
 app.include_router(router); `stdf serve` wraps it in a standalone app

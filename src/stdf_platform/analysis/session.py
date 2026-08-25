@@ -14,7 +14,7 @@ import duckdb
 import pandas as pd
 
 from ..config import Config
-from ..views import setup_views
+from ..mounts import setup_views
 
 
 class AnalysisSession:

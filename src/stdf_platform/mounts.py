@@ -241,4 +241,19 @@ def setup_views(
         """)
         registered.append("wafer_yield_final")
 
+    # 分析マート(dbt が data/marts/ に external materialization した Parquet)
+    # をファイル名 = ビュー名でマウントする。定義の中身は dbt/models/marts/ が
+    # 唯一の持ち主 — ここは名前を貼るだけ。
+    marts_dir = data_dir / "marts"
+    if marts_dir.exists():
+        for f in sorted(marts_dir.glob("*.parquet")):
+            name = f.stem
+            if not name.isidentifier():
+                continue  # 想定外のファイル名は黙って飛ばさず登録もしない
+            conn.execute(
+                f"CREATE OR REPLACE VIEW {name} AS "
+                f"SELECT * FROM read_parquet('{f.as_posix()}')"
+            )
+            registered.append(name)
+
     return registered

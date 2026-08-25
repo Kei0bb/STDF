@@ -11,7 +11,7 @@ from pathlib import Path
 
 from stdf_platform.storage import ParquetStorage
 from stdf_platform.config import StorageConfig, Config
-from stdf_platform.views import setup_views
+from stdf_platform.mounts import setup_views
 from stdf_platform.parser import STDFData
 
 

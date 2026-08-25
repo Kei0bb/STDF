@@ -1,11 +1,11 @@
-"""Tests for the single-source DuckDB view module (stdf_platform.views)."""
+"""Tests for the single-source DuckDB view module (stdf_platform.mounts)."""
 
 import duckdb
 import pyarrow as pa
 import pyarrow.parquet as pq
 from pathlib import Path
 
-from stdf_platform.views import setup_views
+from stdf_platform.mounts import setup_views
 
 
 def _write_parts(data_dir: Path):
@@ -76,3 +76,15 @@ def test_setup_views_registers_base_and_final(tmp_path):
 def test_setup_views_empty_dir_returns_empty(tmp_path):
     conn = duckdb.connect(":memory:")
     assert setup_views(conn, tmp_path) == []
+
+
+def test_marts_are_mounted(tmp_path):
+    import pyarrow as pa, pyarrow.parquet as pq
+    marts = tmp_path / "marts"
+    marts.mkdir()
+    pq.write_table(pa.table({"lot_id": ["L1"], "yield_pct": [99.0]}),
+                   marts / "lot_yield_summary.parquet")
+    conn = duckdb.connect(":memory:")
+    registered = setup_views(conn, tmp_path)
+    assert "lot_yield_summary" in registered
+    assert conn.execute("SELECT yield_pct FROM lot_yield_summary").fetchone()[0] == 99.0

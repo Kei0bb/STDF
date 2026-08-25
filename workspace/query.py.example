@@ -33,7 +33,7 @@ DATA_DIR = Path(_storage.get("data_dir", "./data"))
 print(f"Data dir: {DATA_DIR}")
 
 from stdf_platform.analysis import AnalysisSession
-from stdf_platform.views import _DEDUP_UNIT  # still used by use_lot/_make_final_views
+from stdf_platform.mounts import _DEDUP_UNIT  # still used by use_lot/_make_final_views
 
 _session = AnalysisSession(DATA_DIR)
 con = _session.conn

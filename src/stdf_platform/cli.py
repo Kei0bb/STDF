@@ -15,7 +15,7 @@ from . import __version__
 from .config import Config
 from .database import Database
 from .sync_manager import SyncManager
-from .views import _DEDUP_UNIT
+from .mounts import _DEDUP_UNIT
 
 
 console = Console()

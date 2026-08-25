@@ -1,4 +1,4 @@
-"""dbt staging と views.py(runtime views)のセマンティクス一致を機械検証する。"""
+"""dbt staging と mounts.py(runtime views)のセマンティクス一致を機械検証する。"""
 import os
 import subprocess
 from pathlib import Path
@@ -6,7 +6,7 @@ from pathlib import Path
 import duckdb
 import pytest
 
-from stdf_platform.views import setup_views  # Task 6 以降は stdf_platform.mounts
+from stdf_platform.mounts import setup_views
 
 REPO = Path(__file__).resolve().parent.parent
 
@@ -31,7 +31,7 @@ def _run_dbt(data_dir: Path, build_db: Path, tmp_path: Path,
     assert r.returncode == 0, r.stdout + r.stderr
 
 
-PAIRS = [  # (views.py 側ビュー, dbt staging モデル, ソート列)
+PAIRS = [  # (mounts.py 側ビュー, dbt staging モデル, ソート列)
     # x_coord/y_coord だけだと FT(x=y=-32768 センチネル)の複数パッケージが
     # 同着になり順序が不定になるため、part_id まで含めてソートキーを一意に
     # 近づける。

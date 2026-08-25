@@ -3,7 +3,7 @@
 import duckdb
 
 from .config import StorageConfig
-from .views import setup_views
+from .mounts import setup_views
 
 
 class Database:
@@ -47,7 +47,7 @@ class Database:
         return self._conn
 
     def _create_views(self) -> None:
-        """Create views for Parquet datasets (delegates to stdf_platform.views)."""
+        """Create views for Parquet datasets (delegates to stdf_platform.mounts)."""
         setup_views(self.conn, self.data_dir, self.gross_die_map)
 
     def query(self, sql: str, params: list | None = None) -> list[dict]:
