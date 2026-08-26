@@ -66,18 +66,6 @@ def _test_values(conn, lot_id, test_num) -> dict:
 
 def yield_by_lot(s, product, lot_ids, test_category):
     ph = _in_clause(lot_ids)
-    # Prefer the dbt mart once `stdf build` has run: same source data, one
-    # DuckDB scan of a materialized Parquet file instead of a live
-    # wafer_yield_final aggregation. NOTE: the mart is lot-grain (one row per
-    # lot, wafer_count/total_parts/good_parts aggregated across all of a
-    # lot's wafers, plus MIR columns) while the fallback below is wafer-grain
-    # (one row per lot+wafer). These are genuinely different shapes, not
-    # reconciled to a common column set — see task-8-report.md.
-    if "lot_yield_summary" in s.registered:
-        return s.q(
-            f"SELECT * FROM lot_yield_summary WHERE lot_id IN ({ph}) ORDER BY lot_id",
-            list(lot_ids),
-        )
     return s.conn.execute(
         f"""
         SELECT lot_id, wafer_id, total, good, yield_pct

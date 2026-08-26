@@ -56,19 +56,55 @@ def test_session_falls_back_to_repo_config_from_other_cwd(monkeypatch, tmp_path)
     config.yaml in cwd (e.g. launched from workspace/ in VSCode) falls back to
     the repo-root config.yaml (session.py Step 2) instead of silently
     defaulting to ./data relative to the wrong cwd.
+
+    Never touches the real repo config.yaml: instead of writing to the real
+    file, this fakes the module's own __file__ so `parents[3] / "config.yaml"`
+    resolves into a scratch "repo root" under tmp_path. Path.resolve() does
+    not require the intermediate directories to exist for this to work.
     """
     _write_cp(tmp_path)
-    repo_cfg = Path(session_mod.__file__).resolve().parents[3] / "config.yaml"
-    original = repo_cfg.read_bytes() if repo_cfg.exists() else None
+    fake_repo = tmp_path / "fake_repo"
+    fake_session_file = fake_repo / "src" / "stdf_platform" / "analysis" / "session.py"
+    monkeypatch.setattr(session_mod, "__file__", str(fake_session_file))
+    repo_cfg = fake_repo / "config.yaml"
+    repo_cfg.parent.mkdir(parents=True, exist_ok=True)
     repo_cfg.write_text(f"storage:\n  data_dir: {tmp_path.as_posix()}\n", encoding="utf-8")
+
+    cwd = tmp_path / "workdir"   # cwd has no config.yaml of its own
+    cwd.mkdir()
     monkeypatch.delenv("STDF_CONFIG", raising=False)
-    monkeypatch.chdir(tmp_path)   # cwd has no config.yaml of its own
-    try:
-        with AnalysisSession() as s:   # data_dir=None → falls back to repo_cfg
-            assert s.data_dir == tmp_path
-            assert "parts_final" in s.registered
-    finally:
-        if original is None:
-            repo_cfg.unlink()
-        else:
-            repo_cfg.write_bytes(original)
+    monkeypatch.chdir(cwd)
+    with session_mod.AnalysisSession() as s:   # data_dir=None → falls back to repo_cfg
+        assert s.data_dir == tmp_path
+        assert "parts_final" in s.registered
+
+
+def test_session_stdf_config_wins_over_repo_config_fallback(monkeypatch, tmp_path):
+    """STDF_CONFIG must take priority over the repo-root fallback: the
+    fallback in session.py only applies when no STDF_CONFIG is set, matching
+    Config.load()'s documented resolution order (explicit arg -> STDF_CONFIG
+    -> cwd config.yaml; config.py:142). A cwd lacking config.yaml must not
+    make the repo-root config.yaml clobber a valid STDF_CONFIG resolution.
+    """
+    _write_cp(tmp_path)
+    fake_repo = tmp_path / "fake_repo"
+    fake_session_file = fake_repo / "src" / "stdf_platform" / "analysis" / "session.py"
+    monkeypatch.setattr(session_mod, "__file__", str(fake_session_file))
+    repo_cfg = fake_repo / "config.yaml"
+    repo_cfg.parent.mkdir(parents=True, exist_ok=True)
+    # Repo-root config points at a directory with no data at all — if the
+    # fallback wrongly wins, s.registered would be empty (no tables found).
+    wrong_dir = tmp_path / "wrong_data"
+    wrong_dir.mkdir()
+    repo_cfg.write_text(f"storage:\n  data_dir: {wrong_dir.as_posix()}\n", encoding="utf-8")
+
+    stdf_cfg = tmp_path / "stdf_config.yaml"
+    stdf_cfg.write_text(f"storage:\n  data_dir: {tmp_path.as_posix()}\n", encoding="utf-8")
+
+    cwd = tmp_path / "workdir"   # cwd has no config.yaml of its own either
+    cwd.mkdir()
+    monkeypatch.setenv("STDF_CONFIG", str(stdf_cfg))
+    monkeypatch.chdir(cwd)
+    with session_mod.AnalysisSession() as s:   # data_dir=None → STDF_CONFIG must win
+        assert s.data_dir == tmp_path
+        assert "parts_final" in s.registered

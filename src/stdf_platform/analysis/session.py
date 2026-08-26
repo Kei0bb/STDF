@@ -8,6 +8,7 @@ read session.conn. Parquet is the source of truth; this layer never writes.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import duckdb
@@ -23,10 +24,15 @@ class AnalysisSession:
         # workspace/ (VSCode Jupytext cell scripts, dbt/analyses/ SQL runs,
         # etc.) is not the repo root, so a bare Config.load() above resolves
         # against the wrong cwd and silently defaults to ./data. Fall back to
-        # the repo-root config.yaml when the caller passed no data_dir and
-        # cwd has no config.yaml of its own. data_dir passed explicitly, or a
-        # cwd config.yaml existing, both keep the behavior above unchanged.
-        if data_dir is None and not Path("config.yaml").exists():
+        # the repo-root config.yaml only when the caller passed no data_dir,
+        # AND no STDF_CONFIG env var is set (Config.load()'s own resolution
+        # order is explicit arg -> STDF_CONFIG -> cwd config.yaml; this
+        # fallback must not override an STDF_CONFIG resolution — see
+        # config.py:142), AND cwd has no config.yaml of its own. Any of
+        # data_dir passed explicitly, STDF_CONFIG set, or a cwd config.yaml
+        # existing keeps the behavior above unchanged.
+        if (data_dir is None and not os.environ.get("STDF_CONFIG")
+                and not Path("config.yaml").exists()):
             repo_cfg = Path(__file__).resolve().parents[3] / "config.yaml"
             if repo_cfg.exists():
                 config = Config.load(repo_cfg)
