@@ -1757,13 +1757,34 @@ test_list AS (
     FROM read_csv('test_list.csv', header = true)
 ),
 
--- ④ 代表名の解決に使う母集団。条件は 8-2-2 の base と同じで、列だけ絞ってある
+-- ④ CSV の名前を 1 度でも名乗ったことがある test_num。ここで対象を数本まで
+--    落としてから⑤で代表名を確定させる（全テストを走査しないための絞り込み）。
+--    代表名は「名前を持つ最も新しいファイル」の名前なので、CSV の名前が
+--    代表名になる test_num は必ずこの集合に含まれる
+candidates AS (
+    SELECT DISTINCT td.test_num
+    FROM test_data_final td CROSS JOIN params pa
+    WHERE td.product       = pa.product
+      AND td.test_category = pa.test_category
+      AND td.sub_process   = pa.sub_process
+      AND td.rec_type IN ('PTR', 'MPR')
+      AND td.lot_id IN (SELECT lot_id FROM target_runs)
+      AND UPPER(TRIM(td.test_name)) IN (SELECT test_key FROM test_list)
+    UNION
+    -- 名前が一度も無いテストのキー（#1234）は名前で引けないので番号で拾う
+    SELECT TRY_CAST(SUBSTR(test_key, 2) AS BIGINT)
+    FROM test_list
+    WHERE test_key LIKE '#%' AND TRY_CAST(SUBSTR(test_key, 2) AS BIGINT) IS NOT NULL
+),
+
+-- ⑤ 代表名の解決。条件は 8-2-2 の base と同じだが、④ の test_num だけを読む
 name_src AS (
     SELECT tr.start_time, td.lot_id, td.wafer_id, td.retest_num,
            td.test_num, td.test_name
     FROM test_data_final td CROSS JOIN params pa
     JOIN target_runs tr USING (lot_id, wafer_id, retest_num)
-    WHERE td.product       = pa.product
+    WHERE td.test_num IN (SELECT test_num FROM candidates)
+      AND td.product       = pa.product
       AND td.test_category = pa.test_category
       AND td.sub_process   = pa.sub_process
       AND td.rec_type IN ('PTR', 'MPR')
@@ -1791,7 +1812,7 @@ name_of_num AS (
                          wafer_id DESC, retest_num DESC) = 1
 ),
 
--- ⑤ CSV に挙がっているテスト → 対象の test_num。改番があると 1 つの名前に
+-- ⑥ CSV に挙がっているテスト → 対象の test_num。改番があると 1 つの名前に
 --    複数の番号がぶら下がる（8-2-2 が 1 行にまとめているのと同じ集合）
 wanted AS (
     SELECT DISTINCT ns.test_num,
@@ -1802,7 +1823,7 @@ wanted AS (
           IN (SELECT test_key FROM test_list)
 )
 
--- ⑥ 行レベルのダンプ。test_name が 8-2-2 の集約キー
+-- ⑦ 行レベルのダンプ。test_name が 8-2-2 の集約キー
 SELECT
     w.test_key AS test_name,
     td.test_num,
@@ -1827,7 +1848,8 @@ FROM test_data_final td
 CROSS JOIN params pa
 JOIN target_runs tr USING (lot_id, wafer_id, retest_num)
 JOIN wanted w ON w.test_num = td.test_num
-WHERE td.product       = pa.product
+WHERE td.test_num IN (SELECT test_num FROM wanted)
+  AND td.product       = pa.product
   AND td.test_category = pa.test_category
   AND td.sub_process   = pa.sub_process
   AND td.rec_type IN ('PTR', 'MPR')
@@ -1837,7 +1859,7 @@ WHERE td.product       = pa.product
   AND td.hi_limit IS NOT NULL AND isfinite(td.hi_limit)
   AND td.lo_limit < td.hi_limit
   AND regexp_matches(UPPER(TRIM(td.units)), '^.?[VA]$')
-ORDER BY 1, td.lot_id, td.wafer_id, td.x_coord, td.y_coord, td.exec_seq;
+ORDER BY 1, td.lot_id, td.wafer_id, td.x_coord, td.y_coord, td.exec_seq
 ```
 
 **出力列**
@@ -1917,10 +1939,26 @@ COPY (/* ↑ 8-2-3 のクエリをそのまま貼る */) TO 'check.csv' (HEADER,
 です。改番をまたいでいる場合は `test_num` 列も見てください（古い番号の測定だけが
 外れている、ということがあります）。
 
+**性能**
+
+走査は 3 段階ですが、**全テストを読むのは 1 段目だけ**で、そこは `test_num` /
+`test_name` の 2 列しか要りません。
+
+| 段 | 何をするか | 読む範囲 |
+|---|---|---|
+| ④ `candidates` | CSV の名前を名乗ったことがある `test_num` を拾う | 全行 × 2 列 |
+| ⑤ `name_src` → `name_of_num` | その番号だけで代表名を確定 | ④ の番号のみ |
+| ⑦ ダンプ | 確定した番号の行を全列で出す | ⑥ の番号のみ |
+
+④ で候補を絞らないと、⑤ が全テストに対してリミット・単位の判定まで行うことに
+なり、`test_data` を実質 2 周します。合成データ（`test_data` 480 万行 /
+テスト 330 本 / ラン 40 本、CSV に 3 テスト）で **0.90 s → 0.25 s**。CSV に
+挙げるテスト数を増やすとダンプ側が支配的になります。
+
 > [!NOTE]
-> 代表名の解決（`name_src`）とダンプで `test_data` を 2 回走査します。1 回目は
-> `test_num` / `test_name` を中心にした軽い読み出しで、重いダンプ側は CSV で
-> 選ばれた `test_num` だけに絞られます。
+> ④ は「CSV の名前を 1 度でも名乗った `test_num`」を集めるだけで、代表名が
+> 本当にその名前かは ⑥ で確定させています。代表名は必ずどこかのファイルの
+> `TEST_TXT` なので、この絞り込みで対象を取りこぼすことはありません。
 
 ### 8-3. 確認用 — 8-2 と同じ母集団の生データ取得
 
