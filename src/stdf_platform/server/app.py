@@ -18,10 +18,11 @@ SELECT statement is accepted. Result size is capped at server.max_rows.
 import math
 from datetime import date, datetime
 from decimal import Decimal
+from importlib.resources import files
 
 import duckdb
 from fastapi import APIRouter, FastAPI, HTTPException, Request
-from fastapi.responses import PlainTextResponse, Response
+from fastapi.responses import HTMLResponse, PlainTextResponse, Response
 from pydantic import BaseModel
 
 from .. import __version__
@@ -105,7 +106,17 @@ def schema(request: Request):
     try:
         tables = []
         for name in session.registered:
-            cols = session.conn.execute(f"DESCRIBE {name}").fetchall()
+            # A view is registered when its backing directory exists at
+            # session-open time, but read_parquet globs are resolved lazily
+            # on each query — a view whose files vanish or were never
+            # written (e.g. an empty chipid/ dir mid-ingest) can still be
+            # registered yet fail here. Isolate that failure to this one
+            # entry instead of 500-ing the whole sidebar.
+            try:
+                cols = session.conn.execute(f"DESCRIBE {name}").fetchall()
+            except duckdb.Error as exc:
+                tables.append({"name": name, "error": str(exc)})
+                continue
             tables.append({
                 "name": name,
                 "columns": [{"name": c[0], "type": c[1]} for c in cols],
@@ -160,15 +171,22 @@ def query(req: QueryRequest, request: Request):
     }
 
 
-@router.get("/", response_class=PlainTextResponse)
+@router.get("/", response_class=HTMLResponse)
 def index():
+    return (files("stdf_platform.server") / "console.html").read_text(encoding="utf-8")
+
+
+@router.get("/api", response_class=PlainTextResponse)
+def api_index():
     return (
         f"stdf query server {__version__}\n"
         "\n"
         "POST /api/query   {\"sql\": \"SELECT ...\", \"limit\": 100, \"format\": \"json|csv\"}\n"
         "GET  /api/views   available views\n"
+        "GET  /api/schema  tables + columns\n"
         "GET  /health      liveness\n"
         "\n"
+        "Browser: GET /  — self-contained SQL console\n"
         "VSCode: use client/stdf_client.py  (see docs/multi-user-server.md)\n"
     )
 

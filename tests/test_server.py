@@ -114,3 +114,68 @@ def test_invalid_sql_returns_duckdb_message(tmp_path):
     )
     assert resp.status_code == 400
     assert "no_such_view" in resp.json()["detail"]
+
+
+def test_index_serves_console(tmp_path):
+    resp = _client(tmp_path).get("/")
+    assert resp.status_code == 200
+    assert resp.headers["content-type"].startswith("text/html")
+    assert "stdf" in resp.text and "SELECT" in resp.text
+
+
+def test_console_asset_ships_in_wheel():
+    from importlib.resources import files
+
+    assert (files("stdf_platform.server") / "console.html").is_file()
+
+
+def test_api_index_serves_plaintext(tmp_path):
+    resp = _client(tmp_path).get("/api")
+    assert resp.status_code == 200
+    assert resp.headers["content-type"].startswith("text/plain")
+    assert "stdf query server" in resp.text
+    assert "POST /api/query" in resp.text
+
+
+def test_schema_survives_broken_view(tmp_path, monkeypatch):
+    """A view registered at session-open time can still fail DESCRIBE later,
+    since read_parquet globs resolve lazily on each query (not at CREATE VIEW
+    time) — e.g. its backing file vanishes between registration and the
+    schema() DESCRIBE loop. That must surface as one error entry, not a 500
+    that blanks the whole sidebar.
+    """
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    chipid_file = (
+        tmp_path / "chipid" / "product=PROD" / "test_category=CP"
+        / "lot_id=LOT1" / "data.parquet"
+    )
+    chipid_file.parent.mkdir(parents=True, exist_ok=True)
+    pq.write_table(pa.table({
+        "lot_id": ["LOT1"], "part_id": ["A"], "part_txt": [""],
+        "chip_occurrence_index": [0], "efuse_raw": ["0b" + "0" * 64],
+        "valid": [True], "origin_fab_code": [1], "origin_fab": ["TSMC1"],
+        "origin_lot": ["LOT1"], "origin_wafer": [1],
+        "origin_x": [0], "origin_y": [0],
+        "reserved_bits": ["00"], "retest_num": [0],
+    }), chipid_file)
+
+    import stdf_platform.server.app as app_module
+
+    real_open_session = app_module._open_locked_session
+
+    def broken_open_session(config):
+        session = real_open_session(config)
+        chipid_file.unlink()  # break the glob after "chipid" was registered
+        return session
+
+    monkeypatch.setattr(app_module, "_open_locked_session", broken_open_session)
+
+    resp = _client(tmp_path).get("/api/schema")
+    assert resp.status_code == 200
+    tables = {t["name"]: t for t in resp.json()["tables"]}
+    assert "parts" in tables and "error" not in tables["parts"]
+    assert "chipid" in tables
+    assert "error" in tables["chipid"]
+    assert "columns" not in tables["chipid"]

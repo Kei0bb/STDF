@@ -1,0 +1,162 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>stdf SQL console</title>
+<style>
+  body { font: 14px/1.5 system-ui, sans-serif; margin: 0; display: flex; height: 100vh; }
+  #side { width: 260px; overflow: auto; border-right: 1px solid #ccc; padding: 8px; flex-shrink: 0; }
+  #side h3 { margin: 0 0 8px; }
+  .table-name { cursor: pointer; font-weight: bold; }
+  .table-name:hover { text-decoration: underline; }
+  .table-cols { margin: 0 0 8px 4px; color: #666; font-size: 12px; }
+  .table-broken { color: #999; margin: 0 0 8px; cursor: help; }
+  #main { flex: 1; display: flex; flex-direction: column; padding: 8px; min-width: 0; }
+  textarea { width: 100%; height: 130px; font: 13px monospace; box-sizing: border-box; }
+  table { border-collapse: collapse; font-size: 13px; }
+  td, th { border: 1px solid #ddd; padding: 2px 8px; white-space: nowrap; }
+  #result { overflow: auto; flex: 1; margin-top: 8px; }
+  #status { margin-left: 8px; color: #666; }
+  .err { color: #b00; white-space: pre-wrap; }
+</style>
+<div id="side"><h3>Tables</h3><div id="tables">loading…</div></div>
+<div id="main">
+  <textarea id="sql">SELECT * FROM lot_yield_summary ORDER BY start_time DESC LIMIT 100</textarea>
+  <div>
+    <button id="run">Run (Ctrl+Enter)</button>
+    <button id="csv">Download CSV</button>
+    <span id="status"></span>
+  </div>
+  <div id="result"></div>
+</div>
+<script>
+async function loadSchema() {
+  const tables = document.getElementById("tables");
+  tables.textContent = "loading…";
+  let data;
+  try {
+    const resp = await fetch("/api/schema");
+    data = await resp.json();
+    if (!resp.ok) throw new Error(data.detail || resp.status);
+  } catch (e) {
+    tables.textContent = "schema load failed: " + e;
+    return;
+  }
+  tables.innerHTML = "";
+  for (const t of data.tables) {
+    if (t.error) {
+      const div = document.createElement("div");
+      div.className = "table-broken";
+      div.title = t.error;
+      div.textContent = t.name + " (unavailable)";
+      tables.appendChild(div);
+      continue;
+    }
+    const name = document.createElement("div");
+    name.className = "table-name";
+    name.textContent = t.name;
+    name.onclick = () => {
+      document.getElementById("sql").value =
+        "SELECT * FROM " + t.name + " LIMIT 100";
+    };
+    tables.appendChild(name);
+    const cols = document.createElement("div");
+    cols.className = "table-cols";
+    cols.textContent = t.columns.map(c => c.name + " " + c.type).join(", ");
+    tables.appendChild(cols);
+  }
+}
+
+function renderRows(columns, rows) {
+  const result = document.getElementById("result");
+  result.innerHTML = "";
+  const table = document.createElement("table");
+  const headRow = document.createElement("tr");
+  for (const c of columns) {
+    const th = document.createElement("th");
+    th.textContent = c;
+    headRow.appendChild(th);
+  }
+  table.appendChild(headRow);
+  for (const row of rows) {
+    const tr = document.createElement("tr");
+    for (const v of row) {
+      const td = document.createElement("td");
+      td.textContent = v === null || v === undefined ? "" : v;
+      tr.appendChild(td);
+    }
+    table.appendChild(tr);
+  }
+  result.appendChild(table);
+}
+
+function showError(message) {
+  const result = document.getElementById("result");
+  result.innerHTML = "";
+  const err = document.createElement("div");
+  err.className = "err";
+  err.textContent = message;
+  result.appendChild(err);
+}
+
+async function run() {
+  const status = document.getElementById("status");
+  const sql = document.getElementById("sql").value;
+  status.textContent = "running…";
+  try {
+    const resp = await fetch("/api/query", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sql: sql, format: "json" }),
+    });
+    const data = await resp.json();
+    if (!resp.ok) {
+      status.textContent = "";
+      showError(data.detail || JSON.stringify(data));
+      return;
+    }
+    status.textContent = data.row_count + " row(s)" +
+      (data.truncated ? " (truncated)" : "");
+    renderRows(data.columns, data.rows);
+  } catch (e) {
+    status.textContent = "";
+    showError(String(e));
+  }
+}
+
+async function downloadCsv() {
+  const status = document.getElementById("status");
+  const sql = document.getElementById("sql").value;
+  status.textContent = "downloading…";
+  try {
+    const resp = await fetch("/api/query", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sql: sql, format: "csv" }),
+    });
+    if (!resp.ok) {
+      const data = await resp.json();
+      status.textContent = "";
+      showError(data.detail || JSON.stringify(data));
+      return;
+    }
+    const blob = await resp.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "query.csv";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+    status.textContent = "downloaded";
+  } catch (e) {
+    status.textContent = "";
+    showError(String(e));
+  }
+}
+
+document.getElementById("run").onclick = run;
+document.getElementById("csv").onclick = downloadCsv;
+document.getElementById("sql").addEventListener("keydown",
+  e => { if (e.ctrlKey && e.key === "Enter") run(); });
+loadSchema();
+</script>
