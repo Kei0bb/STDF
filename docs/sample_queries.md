@@ -1680,30 +1680,46 @@ ORDER BY 1;
 判定した結果なので、版やロットをまたぐと複数基準の混ぜ物になります。母集団は
 全ダイで、全ロットプールの σ なので厳密には Ppk 相当です。
 
-### 8-2-3. 確認用 — 8-2-2 と同じ母集団の生データ取得
+### 8-2-3. 確認用 — CSV のテスト名リストで 8-2-2 の生データを取得
 
 8-2-2 の集計値（`n` / `mean` / `sigma` / `fail_n`）を手元で検算するための、**行レベルの
-ダンプ**です。`params` / `job_filter` / `target_runs` と `base`、代表名の解決
-（`file_names` / `name_of_num`）は 8-2-2 と**同じ**なので、同じパラメータを入れれば
-必ず同じ母集団になります。
+ダンプ**です。**8-2-2 の出力 CSV（`test_name` 列）をそのまま入力に使えます**
+（8-2 に対する 8-5 と同じ形式）。`params` / `job_filter` / `target_runs` と母集団の
+条件、代表名の解決は 8-2-2 と同じなので、同じパラメータを入れれば同じ母集団に
+なります。
 
-**対象のロット / ウェーハ / テストプログラムもこれで確認できます** — 各行に
-`lot_id` / `wafer_id` / `job_name` / `job_rev` が入っています。意図した版だけが
-入っているか、ロット内で版が変わっていないか（`lots.job_mixed`）は、この 3 列を
-`DISTINCT` で見れば分かります（下の「対象ランだけ見る」）。
+各行に `lot_id` / `wafer_id` / `job_name` / `job_rev` が入るので、**対象のロット /
+ウェーハ / テストプログラムの確認**にも使えます（下記「対象ランだけ見る」）。
 
 > [!WARNING]
-> 母集団は測定 1 行 = 1 レコードです。工程まるごとだと数千万行になり得るので、
-> **`test_name_like` で対象を絞ってください**。件数が多いときは
-> `COPY (...) TO 'check.csv' (HEADER)` で CSV に落とします。
+> 母集団は測定 1 行 = 1 レコードです。CSV に挙げるテスト数が多いほど行数が増えます。
+> 件数が多いときは `COPY (...) TO 'check.csv' (HEADER)` で CSV に落としてください。
+
+**入力 CSV（`test_list.csv`）の形式**
+
+読むのは `test_name` 列だけです。他の列（8-2-2 の出力ならそのまま）があっても
+無視されます。
+
+```csv
+test_name
+ILEAK
+VDD_MIN
+#1005
+```
+
+> [!IMPORTANT]
+> - **8-2-2 の `test_name` 列の値**を入れてください。8-2-2 のキーは
+>   `UPPER(TRIM(test_name))` で正規化された**代表名**なので、生の `TEST_TXT` と
+>   表記が違うことがあります。このクエリも同じ正規化をかけるので、大文字小文字と
+>   前後の空白は吸収されますが、それ以外の表記違いは拾えません。
+> - 名前が一度も無いテストのキー（`#1234`）もそのまま書けます。
+> - 保存形式は「CSV UTF-8」、列名は小文字で完全一致。
 
 ```sql
 WITH params AS (
     SELECT 'YOUR_PRODUCT'          AS product,
            'CP'                    AS test_category,  -- 8-2-2 と同じ値にする
            'CP1'                   AS sub_process,    -- 8-2-2 と同じ値にする
-           -- 確認したいテスト。8-2-2 の test_name 列から拾う。NULL で全テスト（重い）
-           CAST('%VTH%' AS VARCHAR) AS test_name_like,
            CAST(NULL AS VARCHAR)   AS job_names,      -- 8-2-2 と同じ値にする
            CAST(NULL AS VARCHAR)   AS job_revs,       -- 8-2-2 と同じ値にする
            CAST(NULL AS VARCHAR)   AS job_pairs,      -- 8-2-2 と同じ値にする
@@ -1734,13 +1750,17 @@ target_runs AS (
            OR r.lot_id NOT LIKE pa.exclude_lot_pattern)
 ),
 
--- ③ 母集団（8-2-2 の base と同条件。ダンプに出す列を足しただけ）
-base AS (
-    SELECT tr.start_time, tr.job_name, tr.job_rev,
-           td.lot_id, td.wafer_id, td.retest_num,
-           td.x_coord, td.y_coord, td.part_txt,
-           td.test_num, td.test_name, td.units, td.rec_type, td.exec_seq,
-           td.result, td.lo_limit, td.hi_limit, td.passed
+-- ③ 対象テスト名（重複除去）。8-2-2 の test_name は UPPER(TRIM(...)) 済みなので
+--    ここでも同じ正規化をかける。パスは定数のみ
+test_list AS (
+    SELECT DISTINCT UPPER(TRIM(test_name)) AS test_key
+    FROM read_csv('test_list.csv', header = true)
+),
+
+-- ④ 代表名の解決に使う母集団。条件は 8-2-2 の base と同じで、列だけ絞ってある
+name_src AS (
+    SELECT tr.start_time, td.lot_id, td.wafer_id, td.retest_num,
+           td.test_num, td.test_name
     FROM test_data_final td CROSS JOIN params pa
     JOIN target_runs tr USING (lot_id, wafer_id, retest_num)
     WHERE td.product       = pa.product
@@ -1748,20 +1768,17 @@ base AS (
       AND td.sub_process   = pa.sub_process
       AND td.rec_type IN ('PTR', 'MPR')
       AND td.lot_id IN (SELECT lot_id FROM target_runs)
-      AND (pa.test_name_like IS NULL OR td.test_name ILIKE pa.test_name_like)
       AND td.result IS NOT NULL   AND isfinite(td.result)
       AND td.lo_limit IS NOT NULL AND isfinite(td.lo_limit)
       AND td.hi_limit IS NOT NULL AND isfinite(td.hi_limit)
       AND td.lo_limit < td.hi_limit
       AND regexp_matches(UPPER(TRIM(td.units)), '^.?[VA]$')
 ),
-
--- ④⑤ 代表名の解決（8-2-2 と同一）
 file_names AS (
     SELECT test_num, lot_id, wafer_id, retest_num,
            ANY_VALUE(UPPER(TRIM(test_name))) AS name_key,
            ANY_VALUE(start_time)             AS start_time
-    FROM base
+    FROM name_src
     GROUP BY ALL
 ),
 name_of_num AS (
@@ -1772,40 +1789,63 @@ name_of_num AS (
                 PARTITION BY test_num
                 ORDER BY start_time DESC, lot_id DESC,
                          wafer_id DESC, retest_num DESC) = 1
+),
+
+-- ⑤ CSV に挙がっているテスト → 対象の test_num。改番があると 1 つの名前に
+--    複数の番号がぶら下がる（8-2-2 が 1 行にまとめているのと同じ集合）
+wanted AS (
+    SELECT DISTINCT ns.test_num,
+           COALESCE(nn.name_key, '#' || CAST(ns.test_num AS VARCHAR)) AS test_key
+    FROM name_src ns
+    LEFT JOIN name_of_num nn USING (test_num)
+    WHERE COALESCE(nn.name_key, '#' || CAST(ns.test_num AS VARCHAR))
+          IN (SELECT test_key FROM test_list)
 )
 
 -- ⑥ 行レベルのダンプ。test_name が 8-2-2 の集約キー
 SELECT
-    COALESCE(nn.name_key, '#' || CAST(b.test_num AS VARCHAR)) AS test_name,
-    b.test_num,
-    b.test_name AS test_name_raw,   -- そのファイルが持っていた名前（空のこともある）
-    b.units,
-    b.lot_id,
-    b.wafer_id,
-    b.retest_num,
-    b.job_name,
-    b.job_rev,
-    b.start_time,
-    b.x_coord,
-    b.y_coord,
-    b.part_txt,
-    b.rec_type,
-    b.exec_seq,          -- ループ計測の識別（同一ダイ・同一 test_num で複数行）
-    b.result,
-    b.lo_limit,
-    b.hi_limit,
-    b.passed AS test_passed
-FROM base b
-LEFT JOIN name_of_num nn USING (test_num)
-ORDER BY 1, b.lot_id, b.wafer_id, b.x_coord, b.y_coord, b.exec_seq;
+    w.test_key AS test_name,
+    td.test_num,
+    td.test_name AS test_name_raw,   -- そのファイルが持っていた名前（空のこともある）
+    td.units,
+    td.lot_id,
+    td.wafer_id,
+    td.retest_num,
+    tr.job_name,
+    tr.job_rev,
+    tr.start_time,
+    td.x_coord,
+    td.y_coord,
+    td.part_txt,
+    td.rec_type,
+    td.exec_seq,          -- ループ計測の識別（同一ダイ・同一 test_num で複数行）
+    td.result,
+    td.lo_limit,
+    td.hi_limit,
+    td.passed AS test_passed
+FROM test_data_final td
+CROSS JOIN params pa
+JOIN target_runs tr USING (lot_id, wafer_id, retest_num)
+JOIN wanted w ON w.test_num = td.test_num
+WHERE td.product       = pa.product
+  AND td.test_category = pa.test_category
+  AND td.sub_process   = pa.sub_process
+  AND td.rec_type IN ('PTR', 'MPR')
+  AND td.lot_id IN (SELECT lot_id FROM target_runs)
+  AND td.result IS NOT NULL   AND isfinite(td.result)
+  AND td.lo_limit IS NOT NULL AND isfinite(td.lo_limit)
+  AND td.hi_limit IS NOT NULL AND isfinite(td.hi_limit)
+  AND td.lo_limit < td.hi_limit
+  AND regexp_matches(UPPER(TRIM(td.units)), '^.?[VA]$')
+ORDER BY 1, td.lot_id, td.wafer_id, td.x_coord, td.y_coord, td.exec_seq;
 ```
 
 **出力列**
 
 | 列 | 意味 |
 |---|---|
-| `test_name` | **8-2-2 の集約キー**（代表名）。名前が一度も無ければ `#1234` |
-| `test_num` | その行の実際のテスト番号。改番をまたぐと 1 つの `test_name` に複数出ます |
+| `test_name` | **8-2-2 の集約キー**（代表名）。CSV に書いた名前と一致します |
+| `test_num` | その行の実際のテスト番号。**改番をまたぐと 1 つの `test_name` に複数の番号が出ます** |
 | `test_name_raw` | そのファイルが持っていた名前。空のことがあります（`parser.py` は最初の PTR から 1 回だけ採るため） |
 | `lot_id` / `wafer_id` / `retest_num` | ファイルの識別子。FT は `wafer_id` が空 |
 | `job_name` / `job_rev` / `start_time` | **そのランの**テストプログラムと開始時刻 |
@@ -1813,11 +1853,22 @@ ORDER BY 1, b.lot_id, b.wafer_id, b.x_coord, b.y_coord, b.exec_seq;
 | `exec_seq` | ループ計測の識別（同一ダイ・同一 `test_num` で複数行になる場合） |
 | `result` / `lo_limit` / `hi_limit` / `test_passed` | 測定値と、そのランで適用されたリミット・テスタ判定 |
 
-**8-2-2 の集計値との突合**
+**取りこぼしの確認**
 
-上のクエリを `dump` として、次を回すと 8-2-2 の出力が再現します。値が合わなければ、
-どちらかのパラメータがずれています。**貼り付けるときは末尾の `;` を外してください**
-（サブクエリ内では構文エラーになります）。
+CSV にあるが母集団に 1 行も無かったテスト名（表記違い、単位が V/A 系以外、
+リミット未定義など）は、結果に含まれず**サイレントに消えます**。
+
+```sql
+SELECT tl.test_name
+FROM (SELECT DISTINCT UPPER(TRIM(test_name)) AS test_name
+      FROM read_csv('test_list.csv', header = true)) tl
+WHERE NOT EXISTS (
+    SELECT 1 FROM (/* ↑ 8-2-3 のクエリを貼る。末尾の ; は外す */) d
+    WHERE d.test_name = tl.test_name
+);
+```
+
+**8-2-2 の集計値との突合**
 
 ```sql
 SELECT
@@ -1829,13 +1880,13 @@ SELECT
     STDDEV_SAMP(result)                       AS sigma,
     MIN(result)                               AS min_val,
     MAX(result)                               AS max_val
-FROM (/* ↑ 8-2-3 のクエリをそのまま貼る */) dump
+FROM (/* ↑ 8-2-3 のクエリを貼る。末尾の ; は外す */) dump
 GROUP BY test_name
 ORDER BY test_name;
 ```
 
 > [!NOTE]
-> `n` / `fail_n` / `min_val` / `max_val` は完全一致します。`mean` / `sigma` は
+> `n` / `fail_n` / `min_val` / `max_val` は 8-2-2 と完全一致します。`mean` / `sigma` は
 > 集計する行の順序で最終桁が変わるため（浮動小数の加算は順序に依存します）、
 > 相対誤差 1e-16 程度のずれが出ることがあります。厳密に比べたいときは
 > `ROUND(..., 9)` で丸めて突き合わせてください。
@@ -1844,7 +1895,7 @@ ORDER BY test_name;
 
 ```sql
 SELECT DISTINCT lot_id, wafer_id, retest_num, job_name, job_rev, start_time
-FROM (/* ↑ 8-2-3 のクエリをそのまま貼る */) dump
+FROM (/* ↑ 8-2-3 のクエリを貼る。末尾の ; は外す */) dump
 ORDER BY start_time, lot_id, wafer_id;
 ```
 
@@ -1865,6 +1916,11 @@ COPY (/* ↑ 8-2-3 のクエリをそのまま貼る */) TO 'check.csv' (HEADER,
 ウェーハの外周に固まっていればプローブ接触、ロット・ウェーハに散っていれば分布の裾
 です。改番をまたいでいる場合は `test_num` 列も見てください（古い番号の測定だけが
 外れている、ということがあります）。
+
+> [!NOTE]
+> 代表名の解決（`name_src`）とダンプで `test_data` を 2 回走査します。1 回目は
+> `test_num` / `test_name` を中心にした軽い読み出しで、重いダンプ側は CSV で
+> 選ばれた `test_num` だけに絞られます。
 
 ### 8-3. 確認用 — 8-2 と同じ母集団の生データ取得
 
