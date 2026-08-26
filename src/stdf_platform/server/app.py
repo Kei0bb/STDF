@@ -98,6 +98,23 @@ def list_views(request: Request):
         session.close()
 
 
+@router.get("/api/schema")
+def schema(request: Request):
+    config = _resolve_config(request)
+    session = _open_locked_session(config)
+    try:
+        tables = []
+        for name in session.registered:
+            cols = session.conn.execute(f"DESCRIBE {name}").fetchall()
+            tables.append({
+                "name": name,
+                "columns": [{"name": c[0], "type": c[1]} for c in cols],
+            })
+        return {"tables": tables}
+    finally:
+        session.close()
+
+
 @router.post("/api/query")
 def query(req: QueryRequest, request: Request):
     config = _resolve_config(request)

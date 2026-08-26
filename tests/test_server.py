@@ -34,6 +34,15 @@ def test_views_lists_final_views(tmp_path):
     assert "wafer_yield_final" in views
 
 
+def test_schema_lists_views_and_columns(tmp_path):
+    resp = _client(tmp_path).get("/api/schema")
+    assert resp.status_code == 200
+    tables = {t["name"]: t for t in resp.json()["tables"]}
+    assert "parts" in tables
+    cols = {c["name"] for c in tables["parts"]["columns"]}
+    assert "lot_id" in cols
+
+
 def test_query_returns_rows(tmp_path):
     resp = _client(tmp_path).post(
         "/api/query",
