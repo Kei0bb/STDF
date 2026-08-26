@@ -5,9 +5,10 @@ from pathlib import Path
 
 import pytest
 
-from conftest import _write_null_flag_row
+from conftest import _cp_run, _write_null_flag_row
 from stdf_platform.build import run_build, BuildError
 from stdf_platform.config import Config, StorageConfig
+from stdf_platform.storage import ParquetStorage
 
 
 def _config_for(tmp_path, data_dir):
@@ -22,6 +23,38 @@ def test_run_build_produces_marts(tmp_path, synth_store):
     run_build(_config_for(tmp_path, synth_store))
     assert (synth_store / "marts" / "lot_yield_summary.parquet").exists()
     assert not (synth_store / ".marts_build").exists()   # 一時ディレクトリ掃除済み
+
+
+def test_run_build_succeeds_without_chipid_dir(tmp_path):
+    """CP-only products (and fresh --env dev stores) never get a chipid/
+    directory — storage.py only writes it for FT files carrying a decoded
+    ChipID (see conftest.py's synth_store comment). stg_chipid_final's
+    source glob errors out on a missing directory, and no mart references
+    it, so `stdf build` must not need it: regression test for scoping the
+    dbt run/test selector to "+marts" (marts + their upstream) instead of
+    building everything.
+    """
+    data_dir = tmp_path / "store"
+    data_dir.mkdir()
+    cfg = _config_for(tmp_path, data_dir)
+    storage = ParquetStorage(cfg.storage)
+    run = _cp_run(
+        "LOT1", "W1", "CP_JOB", "RevA", 1000, 2000,
+        parts=[
+            {"part_id": "LOT1_W1_0", "lot_id": "LOT1", "wafer_id": "W1",
+             "head_num": 1, "site_num": 1, "x_coord": 1, "y_coord": 1,
+             "hard_bin": 1, "soft_bin": 1, "passed": True, "test_count": 1, "test_time": 100},
+        ],
+        test_results=[
+            {"lot_id": "LOT1", "wafer_id": "W1", "part_id": "LOT1_W1_0",
+             "test_num": 1, "head_num": 1, "site_num": 1, "result": 1.0, "passed": True},
+        ],
+    )
+    storage.save_stdf_data(run, product="PROD", test_category="CP", sub_process="CP1", source_file="run0.stdf")
+    assert not (data_dir / "chipid").exists()
+
+    run_build(cfg)
+    assert (data_dir / "marts" / "lot_yield_summary.parquet").exists()
 
 
 def test_run_build_swaps_atomically_on_rerun(tmp_path, synth_store):

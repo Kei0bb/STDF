@@ -63,7 +63,7 @@ def _replace_dir_with_retry(src: Path, dst: Path, attempts: int = 5) -> None:
             time.sleep(0.5 * (i + 1))
 
 
-def run_build(config: Config, *, select: str | None = None) -> None:
+def run_build(config: Config) -> None:
     data_dir = config.storage.data_dir.resolve()
     build_dir = data_dir / ".marts_build"
     if build_dir.exists():
@@ -87,10 +87,19 @@ def run_build(config: Config, *, select: str | None = None) -> None:
         "STDF_BUILD_DB": build_db.as_posix(),
     }
     vars_arg = ["--vars", json.dumps({"gross_die_map": gd_vars})]
-    sel = ["--select", select] if select else []
+    # "+marts": marts and everything they depend on (staging models, tests
+    # on those sources) — NOT "everything". This excludes stg_chipid_final,
+    # which no mart references and which errors out on any store with no
+    # chipid/ directory (CP-only products, fresh --env dev stores). Applying
+    # the same selector to `dbt test` keeps tests consistent with what was
+    # built; the four dbt/tests/assert_*.sql singular tests still run under
+    # it because they depend on source('stdf','test_data'), which IS an
+    # ancestor of the marts (via stg_test_data_final) — confirmed via
+    # `dbt ls --select "+marts" --resource-type test`.
+    sel = ["--select", "+marts"]
 
     _dbt(["run", *sel, *vars_arg], env)
-    _dbt(["test", *vars_arg], env)
+    _dbt(["test", *sel, *vars_arg], env)
 
     build_db.unlink(missing_ok=True)  # ビルドDBは出荷しない
     _replace_dir_with_retry(build_dir, data_dir / "marts")

@@ -7,6 +7,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import stdf_platform.analysis.session as session_mod
 from stdf_platform.analysis import AnalysisSession
+from stdf_platform.config import Config, ProductConfig, StorageConfig
 from synth_data import _write_cp, _write_ft
 
 
@@ -49,6 +50,31 @@ def test_session_default_data_dir(monkeypatch, tmp_path):
     monkeypatch.setenv("STDF_CONFIG", str(cfg))
     with AnalysisSession() as s:    # data_dir=None → resolved from config
         assert "parts_final" in s.registered
+
+
+def test_session_config_param_reaches_gross_die_table(tmp_path, monkeypatch):
+    """A Config passed explicitly via config= (as the CLI / server now do,
+    using their already-resolved ctx.obj["config"]) must be used as-is —
+    its gross_die_map must reach the session's `gross_die` table — instead
+    of AnalysisSession silently re-resolving its own Config.load() and
+    picking up a different (often empty) gross_die_map. Regression test for
+    the mart-vs-runtime gross-die divergence finding.
+    """
+    _write_cp(tmp_path)
+    # If AnalysisSession ignored `config` and called Config.load() itself,
+    # this monkeypatch would make that call return an empty-products Config,
+    # so the assertion below would fail loudly rather than passing by luck.
+    monkeypatch.setattr(session_mod.Config, "load", classmethod(lambda cls, p=None: Config()))
+
+    cfg = Config(
+        storage=StorageConfig(data_dir=tmp_path, database=tmp_path / "db.duckdb"),
+        products={"PROD": ProductConfig(gross_die=500, gd_fail_bin=200)},
+    )
+    with AnalysisSession(tmp_path, config=cfg) as s:
+        rows = s.q("SELECT product, gross_die, gd_fail_bin FROM gross_die")
+    assert len(rows) == 1
+    assert rows.iloc[0]["product"] == "PROD"
+    assert int(rows.iloc[0]["gross_die"]) == 500
 
 
 def test_session_falls_back_to_repo_config_from_other_cwd(monkeypatch, tmp_path):

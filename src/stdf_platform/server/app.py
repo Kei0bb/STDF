@@ -51,7 +51,7 @@ def _open_locked_session(config: Config) -> AnalysisSession:
     filesystem allowlist is applied and the configuration is locked so user
     SQL cannot undo it.
     """
-    session = AnalysisSession(config.storage.data_dir)
+    session = AnalysisSession(config.storage.data_dir, config=config)
     conn = session.conn
     conn.execute(
         f"SET allowed_directories = ['{session.data_dir.as_posix()}']"

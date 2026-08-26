@@ -1,7 +1,7 @@
 """Single source of truth for DuckDB view definitions over the Parquet store.
 
-Imported by analysis/session.py (AnalysisSession) and query.py so the dedup
-key and the base/final view SQL exist in exactly one place. Paths use
+Imported by analysis/session.py (AnalysisSession) and workspace/query.py so
+the dedup key and the base/final view SQL exist in exactly one place. Paths use
 .as_posix() so the generated SQL is valid on Windows as well as POSIX hosts.
 
 test_data dedup happens at ingest time (storage.py writes retest_flag/
@@ -158,7 +158,8 @@ def setup_views(
         # per-key recency signal for them, so silently including them risks
         # mixing stale and current measurements. A store in this state must
         # be re-ingested (the user's own WIPE-and-re-ingest plan covers
-        # this); `stdf db verify-flags` detects and reports it.
+        # this); the dbt/tests/assert_*.sql singular tests (run by
+        # `stdf build`'s `dbt test`) detect and report it.
         conn.execute("""
             CREATE OR REPLACE VIEW test_data_final AS
             SELECT * FROM test_data WHERE retest_flag = 0

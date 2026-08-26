@@ -106,6 +106,26 @@ def test_db_query_usage_error_both_sql_and_file(tmp_path, synth_store):
     assert r.exit_code != 0
 
 
+def test_db_query_honors_gross_die_via_dash_c(tmp_path, synth_store):
+    """The CLI's -c config (not STDF_CONFIG/cwd) must reach AnalysisSession's
+    gross_die table. Regression test: AnalysisSession used to silently
+    re-resolve its own Config.load() instead of the CLI's already-resolved
+    ctx.obj["config"], so a -c config's gross_die_map never reached the
+    session — CLI/serve computed GD-less yields while `stdf build` built the
+    marts WITH gross die.
+    """
+    cfg_path = tmp_path / "gd_config.yaml"
+    cfg_path.write_text(
+        f"storage:\n  data_dir: {synth_store.as_posix()}\n"
+        "products:\n  PROD:\n    gross_die: 500\n    gd_fail_bin: 200\n"
+    )
+    r = CliRunner().invoke(main, [
+        "-c", str(cfg_path), "db", "query", "SELECT product, gross_die FROM gross_die"])
+    assert r.exit_code == 0, r.output
+    assert "PROD" in r.output
+    assert "500" in r.output
+
+
 def test_db_query_usage_error_neither_sql_nor_file(tmp_path, synth_store):
     r = CliRunner().invoke(main, ["db", "query"],
         env={"STDF_CONFIG": str(_write_config(tmp_path, synth_store))})

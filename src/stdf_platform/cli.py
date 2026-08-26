@@ -233,14 +233,13 @@ def serve(ctx, host: str | None, port: int | None):
 
 
 @main.command()
-@click.option("--select", help="Build only the given dbt model (dbt --select syntax)")
 @click.pass_context
-def build(ctx, select: str | None):
+def build(ctx):
     """Run dbt models + tests and atomically refresh data/marts/."""
     from .build import run_build, BuildError
     config: Config = ctx.obj["config"]
     try:
-        run_build(config, select=select)
+        run_build(config)
         console.print("[green]OK[/green] marts refreshed.")
     except BuildError as e:
         console.print(f"[red]Build failed:[/red]\n{e}")
@@ -270,7 +269,7 @@ def lots(ctx, lot: str | None):
     config: Config = ctx.obj["config"]
 
     try:
-        with AnalysisSession(config.storage.data_dir) as s:
+        with AnalysisSession(config.storage.data_dir, config=config) as s:
             df = s.lot_summary(lot)
 
             if df.empty:
@@ -320,7 +319,7 @@ def programs(ctx, lot: str | None):
     config: Config = ctx.obj["config"]
 
     try:
-        with AnalysisSession(config.storage.data_dir) as s:
+        with AnalysisSession(config.storage.data_dir, config=config) as s:
             df = s.runs(lot_id=lot)
 
             if df.empty:
@@ -367,7 +366,7 @@ def query(ctx, sql: str | None, output: Path | None, sql_file: Path | None):
     if sql_file is not None:
         sql = sql_file.read_text(encoding="utf-8")
     try:
-        with AnalysisSession(config.storage.data_dir) as s:
+        with AnalysisSession(config.storage.data_dir, config=config) as s:
             if output is not None:
                 n = s.conn.execute(
                     f"COPY ({sql.rstrip('; ')}) TO '{output.as_posix()}' (HEADER, DELIMITER ',')"
@@ -394,15 +393,38 @@ def query(ctx, sql: str | None, output: Path | None, sql_file: Path | None):
 @db.command()
 @click.pass_context
 def shell(ctx):
-    """Open DuckDB interactive shell."""
-    config: Config = ctx.obj["config"]
+    """Open a DuckDB interactive shell with the canonical views persisted.
 
+    Every other command uses a throwaway :memory: connection + setup_views();
+    nothing else ever writes config.storage.database. This command creates/
+    refreshes that file by opening a real connection to it and running
+    setup_views() against it (so the views persist in the file itself), then
+    launches the `duckdb` CLI on it.
+    """
+    config: Config = ctx.obj["config"]
+    db_path = config.storage.database
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+
+    import duckdb as duckdb_mod
+
+    from .mounts import setup_views
+
+    conn = duckdb_mod.connect(str(db_path))
+    try:
+        registered = setup_views(conn, config.storage.data_dir, config.gross_die_map)
+    except Exception as e:
+        conn.close()
+        console.print(f"[red]Error:[/red] {e}")
+        sys.exit(1)
+    conn.close()
+
+    console.print(f"[bold]Database:[/bold] {db_path}")
+    console.print(f"[dim]Registered: {', '.join(registered)}[/dim]")
     console.print(f"[bold]Opening DuckDB shell...[/bold]")
-    console.print(f"Database: {config.storage.database}")
     console.print()
 
     import subprocess
-    subprocess.run(["duckdb", str(config.storage.database)])
+    subprocess.run(["duckdb", str(db_path)])
 
 
 def _run_ingest_batch(
@@ -795,7 +817,7 @@ def export_lot(ctx, lot_ids: tuple, output: Path, pivot: bool):
     params = list(lot_ids)
 
     try:
-        with AnalysisSession(config.storage.data_dir) as s:
+        with AnalysisSession(config.storage.data_dir, config=config) as s:
             if pivot:
                 # DuckDB PIVOT with dynamic values cannot use bound parameters.
                 # Fetch long-format first, then pivot via pandas (matches web API).

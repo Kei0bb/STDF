@@ -19,23 +19,33 @@ from ..mounts import setup_views
 
 
 class AnalysisSession:
-    def __init__(self, data_dir: Path | None = None) -> None:
-        config = Config.load()
-        # workspace/ (VSCode Jupytext cell scripts, dbt/analyses/ SQL runs,
-        # etc.) is not the repo root, so a bare Config.load() above resolves
-        # against the wrong cwd and silently defaults to ./data. Fall back to
-        # the repo-root config.yaml only when the caller passed no data_dir,
-        # AND no STDF_CONFIG env var is set (Config.load()'s own resolution
-        # order is explicit arg -> STDF_CONFIG -> cwd config.yaml; this
-        # fallback must not override an STDF_CONFIG resolution — see
-        # config.py:142), AND cwd has no config.yaml of its own. Any of
-        # data_dir passed explicitly, STDF_CONFIG set, or a cwd config.yaml
-        # existing keeps the behavior above unchanged.
-        if (data_dir is None and not os.environ.get("STDF_CONFIG")
-                and not Path("config.yaml").exists()):
-            repo_cfg = Path(__file__).resolve().parents[3] / "config.yaml"
-            if repo_cfg.exists():
-                config = Config.load(repo_cfg)
+    def __init__(self, data_dir: Path | None = None, config: Config | None = None) -> None:
+        # `config`, when given, is the caller's already-resolved Config (e.g.
+        # the CLI's ctx.obj["config"], built from -c/--env) and is used as-is
+        # — none of the Config.load()/fallback resolution below runs. This is
+        # what lets a store's gross_die_map reach this session's `gross_die`
+        # table consistently with whatever built the dbt marts (build.py also
+        # takes a Config), instead of this session silently re-resolving its
+        # own Config.load() and picking up a different (often empty)
+        # gross_die_map than the caller intended.
+        if config is None:
+            config = Config.load()
+            # workspace/ (VSCode Jupytext cell scripts, dbt/analyses/ SQL
+            # runs, etc.) is not the repo root, so a bare Config.load() above
+            # resolves against the wrong cwd and silently defaults to
+            # ./data. Fall back to the repo-root config.yaml only when the
+            # caller passed no data_dir, AND no STDF_CONFIG env var is set
+            # (Config.load()'s own resolution order is explicit arg ->
+            # STDF_CONFIG -> cwd config.yaml; this fallback must not override
+            # an STDF_CONFIG resolution — see config.py:142), AND cwd has no
+            # config.yaml of its own. Any of data_dir passed explicitly,
+            # STDF_CONFIG set, or a cwd config.yaml existing keeps the
+            # behavior above unchanged.
+            if (data_dir is None and not os.environ.get("STDF_CONFIG")
+                    and not Path("config.yaml").exists()):
+                repo_cfg = Path(__file__).resolve().parents[3] / "config.yaml"
+                if repo_cfg.exists():
+                    config = Config.load(repo_cfg)
         if data_dir is None:
             data_dir = config.storage.data_dir
         self.data_dir = Path(data_dir)

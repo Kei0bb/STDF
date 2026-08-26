@@ -4,7 +4,6 @@ import subprocess
 from pathlib import Path
 
 import duckdb
-import pytest
 
 from stdf_platform.mounts import setup_views
 

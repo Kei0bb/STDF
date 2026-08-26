@@ -1,10 +1,10 @@
 version: 2
 models:
   - name: lot_yield_summary
-    description: "ロット別歩留まりサマリ(gross-die 対応)。1行=1ロット。"
+    description: "ロット別歩留まりサマリ(gross-die 対応)。1行=(product, test_category, sub_process, lot_id) — lot_id 単体はグローバルに一意ではない(同じ lot_id が CP/FT 両方で ingest され得る)。"
     columns:
       - name: lot_id
-        tests: [not_null, unique]
+        tests: [not_null]
   - name: fail_ranking
     description: "ロット×テスト別 Fail 数/率。fails>0 のみ。WHERE lot_id で絞って使う。"
     columns:

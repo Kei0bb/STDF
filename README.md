@@ -85,7 +85,7 @@ DuckDB glob ビュー（クエリごとに fs スキャン、mounts.py）
 |---|---|
 | `storage.py` | Parquet Hive パーティション書き込み（5テーブル） |
 | `mounts.py`（旧 `views.py`） | `_DEDUP_UNIT` 定数と `setup_views(conn, data_dir, gross_die_map)` の単一ソース。コアビュー登録に加え、`data/marts/*.parquet`（dbt が構築）をファイル名でビューとして自動マウント（コアビュー / `gross_die` と名前が衝突するマートはスキップ） |
-| `build.py` | `stdf build [--select MODEL]` の実装 — `dbt run`（`--select` でモデルを絞れる）→ `dbt test`（**常に全件、`--select` の対象外**）を実行し、`data/.marts_build/` へ出力後、`data/marts/` へアトミックに差し替え（失敗時は旧 marts へロールバック） |
+| `build.py` | `stdf build` の実装 — `dbt run` → `dbt test`（両方とも `--select +marts` = マート＋その依存元 staging のみに限定。プロジェクト全体は対象外なので、`chipid/` ディレクトリが無いストア（CP 専用製品・新規 `--env dev` 等）でも `stg_chipid_final` のソース glob で落ちない）を実行し、`data/.marts_build/` へ出力後、`data/marts/` へアトミックに差し替え（失敗時は旧 marts へロールバック） |
 | `config.py` | `config.yaml` 読み込み（FTP / Storage / Server 設定、`${ENV_VAR}` 展開対応） |
 
 #### 解析 SQL 層（`dbt/`）
@@ -96,7 +96,7 @@ DuckDB glob ビュー（クエリごとに fs スキャン、mounts.py）
 | `dbt/models/marts/` | `lot_yield_summary` / `fail_ranking` / `cpk_stats` / `bin_pareto` / `bin_fail_tests` — 外部実体化で `data/marts/*.parquet` に書き出し。`schema.yml` にテスト定義 |
 | `dbt/macros/dedup_key.sql` | `_DEDUP_UNIT` 相当の重複排除キーマクロ |
 | `dbt/tests/assert_*.sql` | 旧 `stdf db verify-flags` の4不変条件。`stdf build` の `dbt test` で毎回検証 |
-| `dbt/analyses/` | 名前は付くが実体化しない SQL 階層（`stdf db query -f dbt/analyses/<name>.sql` で実行） |
+| `dbt/analyses/` | 名前は付くが実体化しない SQL 階層。`stdf db query -f` はファイルを生 SQL として読むだけで Jinja を解決しないため、`{{ ref(...) }}` は使えない — マウント済みのビュー/マート名を直接書いたプレーンな SQL にする（`stdf db query -f dbt/analyses/<name>.sql` で実行） |
 
 #### 個人解析層（`workspace/`）
 
@@ -180,8 +180,9 @@ q("SELECT * FROM test_data_final WHERE lot_id = 'E6A773.00'")
 to_csv("SELECT * FROM test_data_final WHERE lot_id = 'E6A773.00'")
 ```
 
-> 同じ SQL を2回使ったら `dbt/analyses/` へ昇格（`{{ ref(...) }}` でモデル参照、
-> スキーマ変更はコンパイルエラーで検知）、定着したら `dbt/models/marts/` へモデル化して
+> 同じ SQL を2回使ったら `dbt/analyses/` へ昇格（マウント済みのビュー/マート名を直接書く
+> プレーンな SQL — `stdf db query -f` は Jinja を解決しないため `{{ ref(...) }}` は使えない）、
+> 定着したら `dbt/models/marts/` へモデル化して
 > `stdf build` で毎晩実体化する。詳細は `workspace/README.md` の熟成ラダーを参照。
 > 旧実装にあった `use_lot()` / `use_all()`（ロット単位 materialize）はマート化により
 > 不要になったため廃止された。
@@ -227,8 +228,7 @@ stdf db shell                                # DuckDB シェル
 ### dbt マート構築
 
 ```bash
-stdf build                    # dbt run + dbt test → data/marts/ をアトミックに更新
-stdf build --select cpk_stats # 特定モデルだけ dbt run で再構築（dbt test は常に全件実行）
+stdf build                    # dbt run + dbt test（+marts 選択）→ data/marts/ をアトミックに更新
 ```
 
 構築されるマート: `lot_yield_summary`（ロット別歩留まりサマリ）/ `fail_ranking`
