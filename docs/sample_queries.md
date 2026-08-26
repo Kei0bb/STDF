@@ -3,8 +3,29 @@
 `schema.md` で定義された 5 テーブル（`lots` / `wafers` / `parts` / `test_data` /
 `chipid`）を DuckDB ビュー経由で検索する際のリファレンスです。
 
+> [!TIP]
+> **まず dbt マートを見てください。** 定番の集計（ロット別歩留まり、Fail ランキング、
+> Cp/Cpk、bin パレート、bin×Fail テストの紐付け）は `stdf build` で
+> `data/marts/*.parquet` に実体化済みで、`mounts.py` が同名ビューとして自動マウント
+> します。以下の生ビュー向けクエリの多くは、対応するマートへの単純な `SELECT` に
+> 置き換えられます:
+>
+> | マート | 相当する生ビュークエリ |
+> |---|---|
+> | `lot_yield_summary` | 本ドキュメントの 2-3（ロット歩留りサマリ） |
+> | `fail_ranking` | 5-3（テスト項目ごとの Fail 率ワーストランキング） |
+> | `cpk_stats` | 8-1（ロット単位の Cp / Cpk） |
+> | `bin_pareto` | 4-3（ソフトビン・パレート） |
+> | `bin_fail_tests` | 7-3（Fail ビンとテスト項目の紐付け、簡易版） |
+>
+> `SELECT * FROM lot_yield_summary WHERE lot_id = 'YOUR_LOT_ID'` のように使えます。
+> マートに無い切り口（ゾーン分析、外れ値検出、TP混在検出、Cpk スペック検討 等）は
+> 引き続き以下の生ビュークエリを使ってください。2回使った SQL は `dbt/analyses/` へ、
+> 定着したら `dbt/models/marts/` へモデル化するのが推奨ワークフローです
+> （`workspace/README.md` の熟成ラダーを参照）。
+
 > [!IMPORTANT]
-> **歩留り・解析は原則 `*_final` ビューを使ってください。**
+> **マートに無い解析は原則 `*_final` ビューを使ってください。**
 > 生テーブル（`parts` / `test_data`）はリテストの**全試行**を含むため、そのまま
 > 集計すると二重計上になります。`parts_final` / `test_data_final` /
 > `chipid_final` は「ダイ/パッケージごとに最新リテストのみ」へ重複排除済みです。
@@ -23,31 +44,32 @@
 
 ### VS Code で対話的に実行（推奨）
 
-プロジェクトルートの **`query.py`** を VS Code で開き、各セル (`# %%`) を Shift+Enter で実行します。
+**`workspace/query.py`** を VS Code で開き、各セル (`# %%`) を Shift+Enter で実行します。
 [Python 拡張](https://marketplace.visualstudio.com/items?itemName=ms-python.python) + Jupyter サポートが必要です。
-`query.py` は gitignore された個人スクラッチです — 初回やリポジトリ更新後は
-`cp query.py.example query.py` でテンプレートから最新化してください。
+`workspace/query.py` は gitignore された個人スクラッチです — 初回やリポジトリ更新後は
+`cp workspace/query.py.example workspace/query.py` でテンプレートから最新化してください。
 
 ```
 # セットアップセルを実行後、LOT_ID を書き換えて各セルを実行
 LOT_ID = "E6A773.00"
 ```
 
+`q(sql, params=None)` は DuckDB へ SQL をそのまま流して DataFrame を返す薄いラッパーです
+（`AnalysisSession.q()`、プレースホルダ `?` に `params` をバインド可能）。ファイル出力は
+`to_csv(sql, output="output.csv")`（DuckDB `COPY`、メモリに載せない）。
+
 > [!TIP]
-> **`test_data_final` はもう遅くありません**：ingest 時に付与される `retest_flag`
+> **`test_data_final` は遅くありません**：ingest 時に付与される `retest_flag`
 > による単純フィルタなので、`test_name LIKE` などロット絞り込みクエリも通常の
 > Parquet スキャンと同じ速さです（`test_data_final` を毎クエリ `ROW_NUMBER()` で
 > 再計算していた旧実装では、ロット単位の `test_name` 検索が実データで 12 分以上
 > かかっていました）。
 >
 > **`parts_final` / `chipid_final` は引き続き `ROW_NUMBER()` ウィンドウ**です
-> （小テーブルなのでコストは無視できる範囲）。同じロットへ繰り返しクエリする
-> 場合は `use_lot('LOT_ID')` を呼ぶと、そのロットの `parts_final` /
-> `test_data_final` / `chipid_final` をメモリ上の表に materialize し、クエリ
-> ごとの Parquet 再スキャン（特にネットワーク共有上のストアで重い）を回避
-> できます。全ロットに戻すには `use_all()`。
-> 全件を Python に取り込む場合は `q(sql, limit=0, as_arrow=True)`（pandas 変換を
-> 省いて約 3.5 倍）か、ファイル出力なら `to_csv(sql)` を使ってください。
+> （小テーブルなのでコストは無視できる範囲）。旧実装にあった、同じロットへの
+> 繰り返しクエリ向けの `use_lot()` / `use_all()`（materialize / 復元）は、定番の
+> 集計がマートに実体化されたことで不要になり廃止されました。同じ生ビュークエリを
+> 繰り返し重く使うなら `dbt/analyses/` や `dbt/models/marts/` への昇格を検討してください。
 
 ### CLI から直接実行
 
@@ -61,14 +83,29 @@ stdf db query "SELECT lot_id, product FROM lots ORDER BY start_time DESC LIMIT 1
 
 ### Python スクリプトから（`*_final` ビューの定義込み）
 
-`stdf db` / `query.py` は `*_final` を自動定義しますが、素の DuckDB から使う場合は
-以下のように生ビューと派生ビューを作成します。
+`stdf db` / `workspace/query.py` / `AnalysisSession` は `mounts.py` の
+`setup_views(conn, data_dir, gross_die_map)` を呼んで `*_final` ビューと dbt マートを
+自動登録します。素の DuckDB から使う場合はそれを直接呼ぶのが最も確実です
+（`lots` は `data/lots/` という Parquet ではなく `runs` から集約した VIEW なので、
+下記のように手で再現するより本体の関数を使うほうが定義のズレが起きません）:
+
+```python
+import duckdb
+from pathlib import Path
+from stdf_platform.mounts import setup_views
+
+con = duckdb.connect(":memory:")
+setup_views(con, Path("data"))   # gross_die_map は config.yaml 由来（省略可）
+```
+
+手動で再現する場合は、Parquet 実体を持つ5テーブル（`lots` は含まない）を glob 登録し、
+`lots` は `runs` から集約した VIEW として作ります:
 
 ```python
 import duckdb
 con = duckdb.connect(":memory:")
 
-for t in ["lots", "wafers", "parts", "test_data", "chipid"]:
+for t in ["runs", "wafers", "parts", "test_data", "chipid"]:
     # test_data alone can mix pre-flag files (no exec_seq/retest_flag columns)
     # with new ones; union_by_name fills the missing columns with NULL instead
     # of erroring on schema mismatch.
@@ -77,6 +114,24 @@ for t in ["lots", "wafers", "parts", "test_data", "chipid"]:
         CREATE OR REPLACE VIEW {t} AS
         SELECT * FROM read_parquet('data/{t}/**/*.parquet', hive_partitioning=true{extra})
     """)
+
+# lots is NOT its own Parquet table — it's a VIEW aggregated from runs (one
+# row per STDF file x wafer identity) to one row per lot. See mounts.py.
+con.execute("""
+    CREATE OR REPLACE VIEW lots AS
+    SELECT lot_id, product, test_category, sub_process,
+           arg_max(part_type,   start_time) AS part_type,
+           arg_max(job_name,    start_time) AS job_name,
+           arg_max(job_rev,     start_time) AS job_rev,
+           MIN(start_time)  AS start_time,
+           MAX(finish_time) AS finish_time,
+           arg_max(tester_type, start_time) AS tester_type,
+           arg_max(operator,    start_time) AS operator,
+           COUNT(DISTINCT (job_name, job_rev))     AS job_variant_count,
+           COUNT(DISTINCT (job_name, job_rev)) > 1 AS job_mixed
+    FROM runs
+    GROUP BY lot_id, product, test_category, sub_process
+""")
 
 # dedup identity: CP=ダイ座標 / FT=パッケージ 2D バーコード
 DEDUP = ("CASE WHEN test_category = 'FT' THEN part_txt "
@@ -92,7 +147,8 @@ con.execute(f"""
 # test_data_final is NOT a window: dedup happens at ingest time (storage.py
 # writes retest_flag per row), so this is a plain predicate filter — cheap,
 # and pushed into the Parquet scan. Rows with retest_flag IS NULL (pre-flag
-# files) are excluded; that store needs a re-ingest (see stdf db verify-flags).
+# files) are excluded; that store needs a re-ingest (checked by the dbt tests
+# `stdf build` runs, dbt/tests/assert_no_null_retest_flag.sql).
 con.execute("""
     CREATE OR REPLACE VIEW test_data_final AS
     SELECT * FROM test_data WHERE retest_flag = 0
@@ -654,7 +710,7 @@ ORDER BY yield_pct;
 ```sql
 WITH fail AS (
     SELECT p.wafer_id, p.hard_bin, p.soft_bin, td.test_num, td.test_name,
-           -- ダイ識別は views.py の _DEDUP_UNIT と同じ（CP=ウェーハ+座標 / FT=part_txt）。
+           -- ダイ識別は mounts.py の _DEDUP_UNIT と同じ（CP=ウェーハ+座標 / FT=part_txt）。
            -- part_id はリテストファイルで振り直される可能性があるため使わない
            CONCAT_WS('|', p.wafer_id, p.x_coord, p.y_coord,
                      CASE WHEN p.x_coord = -32768 AND p.y_coord = -32768
@@ -2036,4 +2092,5 @@ ORDER BY origin_lot, origin_wafer, origin_y, origin_x;
   （`parts_final` / `chipid_final` は従来どおり `ROW_NUMBER()` ウィンドウ）、
   (die, test, pin) につき複数行が残り得ます（ループ計測）。区別には `exec_seq`
   を使ってください。`retest_flag IS NULL` の行（旧スキーマ）は
-  `test_data_final` から除外されます — 要再取り込み（`stdf db verify-flags`）。
+  `test_data_final` から除外されます — 要再取り込み（`stdf build` が実行する dbt テスト
+  `dbt/tests/assert_no_null_retest_flag.sql` で検出可）。

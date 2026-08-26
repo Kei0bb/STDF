@@ -5,7 +5,7 @@ from pathlib import Path
 
 import duckdb
 
-# make_ft_stdf lives alongside this test in src/tests/
+# make_ft_stdf lives alongside this test in tests/
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from make_test_stdf import make_ft_stdf  # noqa: E402
 
