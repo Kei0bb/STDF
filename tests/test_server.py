@@ -129,6 +129,21 @@ def test_console_asset_ships_in_wheel():
     assert (files("stdf_platform.server") / "console.html").is_file()
 
 
+def test_console_sidebar_columns_start_collapsed(tmp_path):
+    """Column lists are hidden until their disclosure toggle is clicked.
+
+    With ~20 views registered, always-open column lists pushed the marts far
+    below the fold. `.table-cols` is display:none until `.open` is added, and
+    the toggle carries aria-expanded so it is operable without a mouse.
+    """
+    html = _client(tmp_path).get("/").text
+    assert ".table-cols { display: none;" in html
+    assert ".table-cols.open { display: block; }" in html
+    assert 'disc.setAttribute("aria-expanded"' in html
+    # The name still inserts SQL — that stayed the primary click target.
+    assert '"SELECT * FROM " + t.name + " LIMIT 100"' in html
+
+
 def test_api_index_serves_plaintext(tmp_path):
     resp = _client(tmp_path).get("/api")
     assert resp.status_code == 200

@@ -5,10 +5,21 @@
   body { font: 14px/1.5 system-ui, sans-serif; margin: 0; display: flex; height: 100vh; }
   #side { width: 260px; overflow: auto; border-right: 1px solid #ccc; padding: 8px; flex-shrink: 0; }
   #side h3 { margin: 0 0 8px; }
-  .table-name { cursor: pointer; font-weight: bold; }
+  .table-row { display: flex; align-items: baseline; gap: 4px; }
+  .disc {
+    border: 0; background: none; padding: 0 2px; cursor: pointer;
+    color: #666; font: 11px monospace; line-height: 1.4;
+  }
+  .disc:hover { color: #000; }
+  .table-name {
+    border: 0; background: none; padding: 0; cursor: pointer;
+    font: bold 13px inherit; color: inherit; text-align: left;
+  }
   .table-name:hover { text-decoration: underline; }
-  .table-cols { margin: 0 0 8px 4px; color: #666; font-size: 12px; }
+  .table-cols { display: none; margin: 0 0 6px 18px; color: #666; font-size: 12px; }
+  .table-cols.open { display: block; }
   .table-broken { color: #999; margin: 0 0 8px; cursor: help; }
+  .disc:focus-visible, .table-name:focus-visible { outline: 2px solid #06c; outline-offset: 1px; }
   #main { flex: 1; display: flex; flex-direction: column; padding: 8px; min-width: 0; }
   textarea { width: 100%; height: 130px; font: 13px monospace; box-sizing: border-box; }
   table { border-collapse: collapse; font-size: 13px; }
@@ -50,17 +61,39 @@ async function loadSchema() {
       tables.appendChild(div);
       continue;
     }
-    const name = document.createElement("div");
+    // Columns start collapsed: with ~20 views registered, always-open column
+    // lists push the marts far below the fold. The name still inserts SQL
+    // (the common action); the triangle is a separate target for the columns.
+    const row = document.createElement("div");
+    row.className = "table-row";
+
+    const cols = document.createElement("div");
+    cols.className = "table-cols";
+    cols.textContent = t.columns.map(c => c.name + " " + c.type).join(", ");
+
+    const disc = document.createElement("button");
+    disc.className = "disc";
+    disc.textContent = "▸";
+    disc.setAttribute("aria-expanded", "false");
+    disc.title = t.name + " のカラムを表示";
+    disc.onclick = () => {
+      const open = cols.classList.toggle("open");
+      disc.textContent = open ? "▾" : "▸";
+      disc.setAttribute("aria-expanded", open ? "true" : "false");
+    };
+    row.appendChild(disc);
+
+    const name = document.createElement("button");
     name.className = "table-name";
     name.textContent = t.name;
+    name.title = "SELECT 文を入力欄に挿入";
     name.onclick = () => {
       document.getElementById("sql").value =
         "SELECT * FROM " + t.name + " LIMIT 100";
     };
-    tables.appendChild(name);
-    const cols = document.createElement("div");
-    cols.className = "table-cols";
-    cols.textContent = t.columns.map(c => c.name + " " + c.type).join(", ");
+    row.appendChild(name);
+
+    tables.appendChild(row);
     tables.appendChild(cols);
   }
 }
