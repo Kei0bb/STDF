@@ -10,6 +10,16 @@ Query/
 # tool caches and marts build scratch all live under var/.
 var/
 
+# Same directories at the project root, for checkouts that predate the var/
+# layout (or a config.yaml still pointing at ./data). Without these a machine
+# that has pulled but not yet migrated sees its whole Parquet store as
+# untracked — one `git add -A` away from committing the data store.
+data/
+data-*/
+downloads/
+logs/
+test_data/
+
 *.csv
 *.png
 *.jpg
