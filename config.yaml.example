@@ -32,9 +32,9 @@ exclude:
   # - "*_qual_*"
 
 storage:
-  data_dir: "./data"
-  database: "./data/stdf.duckdb"
-  download_dir: "./downloads"
+  data_dir: "./var/data"
+  database: "./var/data/stdf.duckdb"
+  download_dir: "./var/downloads"
 
 processing:
   batch_size: 1000

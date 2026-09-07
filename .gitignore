@@ -6,10 +6,9 @@ __pycache__/
 .tmp/
 
 Query/
-logs/
-data/
-data-*/
-downloads/
+# Single runtime root: data/, data-*/, downloads/, logs/, test_data/,
+# tool caches and marts build scratch all live under var/.
+var/
 
 *.csv
 *.png
@@ -31,8 +30,4 @@ workspace/*
 dbt/target/
 dbt/logs/
 dbt/.user.yml
-data*/.marts_build/
 *.duckdb
-
-# Synthetic STDF output of the test generator (regenerable)
-test_data/

@@ -39,3 +39,9 @@ dev = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# Keep tool caches out of the project root; var/ is the single runtime
+# directory (data, downloads, logs, test_data) and is gitignored whole.
+cache_dir = "var/.pytest_cache"
+
+[tool.ruff]
+cache-dir = "var/.ruff_cache"

@@ -81,7 +81,7 @@ def test_session_falls_back_to_repo_config_from_other_cwd(monkeypatch, tmp_path)
     """AnalysisSession() run with no explicit data_dir, no STDF_CONFIG, and no
     config.yaml in cwd (e.g. launched from workspace/ in VSCode) falls back to
     the repo-root config.yaml (session.py Step 2) instead of silently
-    defaulting to ./data relative to the wrong cwd.
+    defaulting to ./var/data relative to the wrong cwd.
 
     Never touches the real repo config.yaml: instead of writing to the real
     file, this fakes the module's own __file__ so `parents[3] / "config.yaml"`

@@ -31,9 +31,9 @@ class FTPConfig:
 @dataclass
 class StorageConfig:
     """Storage configuration."""
-    data_dir: Path = field(default_factory=lambda: Path("./data"))
-    database: Path = field(default_factory=lambda: Path("./data/stdf.duckdb"))
-    download_dir: Path = field(default_factory=lambda: Path("./downloads"))
+    data_dir: Path = field(default_factory=lambda: Path("./var/data"))
+    database: Path = field(default_factory=lambda: Path("./var/data/stdf.duckdb"))
+    download_dir: Path = field(default_factory=lambda: Path("./var/downloads"))
 
     def __post_init__(self):
         if isinstance(self.data_dir, str):
@@ -46,14 +46,19 @@ class StorageConfig:
     def with_env(self, env: str | None) -> "StorageConfig":
         """Return a new config with paths adjusted for the given environment.
 
-        e.g. env="dev" → data-dev/, data-dev/stdf.duckdb
+        The env store is a sibling of the configured data_dir, not a fixed
+        top-level directory: data_dir=./var/data + env="dev" → ./var/data-dev.
+        Deriving it (rather than hardcoding "./data-{env}") is what keeps an
+        env run inside whatever runtime root data_dir points at — a hardcoded
+        path would recreate ./data-dev at the project root and defeat it.
         Default (env=None) returns self unchanged.
         """
         if not env:
             return self
+        env_dir = self.data_dir.parent / f"{self.data_dir.name}-{env}"
         return StorageConfig(
-            data_dir=Path(f"./data-{env}"),
-            database=Path(f"./data-{env}/stdf.duckdb"),
+            data_dir=env_dir,
+            database=env_dir / self.database.name,
             download_dir=self.download_dir,
         )
 

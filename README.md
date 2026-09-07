@@ -17,7 +17,7 @@ uv sync
 cp config.yaml.example config.yaml
 
 # 3. データ取り込み
-stdf ingest-all ./downloads -p YOUR_PRODUCT
+stdf ingest-all ./var/downloads -p YOUR_PRODUCT
 
 # 4. dbt マート構築(歩留まりサマリ・Fail ランキング・Cpk 等を Parquet に実体化)
 stdf build
@@ -38,11 +38,11 @@ stdf serve    # → docs/multi-user-server.md
 ```
 FTP サーバー
      ↓ ftp_client.py + sync_manager.py
-downloads/
+var/downloads/
      ↓ worker.py (ThreadPoolExecutor)
      ↓   ├── Thread 1 → subprocess(_ingest_worker) ─┐
      ↓   ├── Thread 2 → subprocess(_ingest_worker) ─┤→ Parquet (Hive パーティション)
-     ↓   └── Thread N → subprocess(_ingest_worker) ─┘     data/{table}/product={P}/
+     ↓   └── Thread N → subprocess(_ingest_worker) ─┘     var/data/{table}/product={P}/
      ↓                    ↑                                 test_category={CP|FT}/
      ↓               parser.py                              sub_process={CP11|FT2}/
      ↓               storage.py                             lot_id={L}/
@@ -61,6 +61,33 @@ DuckDB glob ビュー（クエリごとに fs スキャン、mounts.py）
 ```
 
 ---
+
+### リポジトリ構成
+
+追跡されるのはソースとドキュメントだけで、**動かすと増えるものはすべて `var/` の下**に集約する。
+
+```
+src/stdf_platform/   コアライブラリ
+dbt/                 SQL の唯一の家（staging / marts / tests / analyses）
+tests/               pytest
+docs/                スキーマ・サンプルクエリ・serve 運用
+scripts/             Windows タスクスケジューラ用 .ps1/.bat、診断スクリプト
+client/              stdf serve 用シンクライアント（同僚がコピーして使う）
+workspace/           個人用スクラッチ（README と .example 以外は git 管理外）
+config.yaml.example  → config.yaml にコピーして使う
+
+var/                 ランタイム生成物（.gitignore で丸ごと除外）
+├── data/            Parquet ストア = storage.data_dir
+├── data-dev/        --env dev の隔離ストア（data_dir の兄弟として自動導出）
+├── downloads/       FTP 取得先 = storage.download_dir
+├── logs/            daily_fetch.ps1 の実行ログ（30日で自動削除）
+├── test_data/       tests/make_test_stdf.py が生成する合成 STDF（再生成可）
+└── .pytest_cache/ .ruff_cache/
+```
+
+`var/` 配下の場所は `config.yaml` の `storage.*` で変更できる。`--env dev` は
+`data_dir` の兄弟ディレクトリを作るので（`./var/data` → `./var/data-dev`）、
+`data_dir` を移すと dev ストアも一緒についてくる。
 
 ### モジュール構成
 
@@ -124,7 +151,7 @@ ThreadPoolExecutor (max_workers=N)
 ```
 
 - 各 subprocess はメモリ分離（クラッシュしても他のワーカーに影響しない）
-- 成功済みファイルを `data/ingest_history.json` に記録 → 中断後の再実行で自動スキップ
+- 成功済みファイルを `var/data/ingest_history.json` に記録 → 中断後の再実行で自動スキップ
 - タイムアウト超過時は SIGKILL → 次ファイルへ継続
 
 ---
@@ -146,12 +173,12 @@ uv sync
 stdf ingest sample.stdf --product SCT101A
 
 # パスから product 自動推定（.../SCT101A/CP/... 構造）
-stdf ingest ./downloads/SCT101A/CP/lot001.stdf --from-path
+stdf ingest ./var/downloads/SCT101A/CP/lot001.stdf --from-path
 
 # ディレクトリ一括（推奨）— 中断後の再実行は自動で続きから
-stdf ingest-all ./downloads -p SCT101A
-stdf ingest-all ./downloads -p SCT101A --workers 8 --timeout 600
-stdf ingest-all ./downloads -p SCT101A --force   # 全ファイル強制再取り込み
+stdf ingest-all ./var/downloads -p SCT101A
+stdf ingest-all ./var/downloads -p SCT101A --workers 8 --timeout 600
+stdf ingest-all ./var/downloads -p SCT101A --force   # 全ファイル強制再取り込み
 ```
 
 ### SQL クエリ（VS Code）
@@ -299,7 +326,7 @@ scripts\unregister_task.bat
 
 | ファイル | 役割 |
 |---------|------|
-| `scripts/daily_fetch.ps1` | メインスクリプト — `uv run stdf fetch --verbose` 実行、`logs/fetch_YYYYMMDD_HHMMSS.log` に記録、30日超のログを自動削除 |
+| `scripts/daily_fetch.ps1` | メインスクリプト — `uv run stdf fetch --verbose` 実行、`var/logs/fetch_YYYYMMDD_HHMMSS.log` に記録、30日超のログを自動削除 |
 | `scripts/register_task.bat` | Task Scheduler にタスク登録（毎日 06:00 トリガー） |
 | `scripts/unregister_task.bat` | タスク登録解除 |
 
@@ -324,7 +351,7 @@ scripts\unregister_task.bat
 ### Parquet パーティション構造
 
 ```
-data/
+var/data/          ← storage.data_dir（config.yaml で変更可）
 └── {table}/
     └── product={product}/
         └── test_category={CP|FT}/
@@ -334,7 +361,7 @@ data/
                         └── data.parquet
 ```
 
-> `lots` は Parquet を持たない（`runs` 由来のビュー）。旧ストアの `data/lots/` が
+> `lots` は Parquet を持たない（`runs` 由来のビュー）。旧ストアの `data/lots/`（= data_dir 直下の `lots/`）が
 > 残っていると `setup_views()` がエラーで停止するので、wipe して再 ingest する。
 
 ---
@@ -354,9 +381,9 @@ data/
 ## 開発環境分離 (`--env`)
 
 ```bash
-stdf --env dev ingest-all ./test_data -p SCT101A  # data-dev/ に保存
+stdf --env dev ingest-all ./var/test_data -p SCT101A  # var/data-dev/ に保存
 stdf --env dev db lots
-rm -rf data-dev/   # リセット
+rm -rf var/data-dev/   # リセット
 ```
 
 ---

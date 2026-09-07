@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-from stdf_platform.config import Config
+from stdf_platform.config import Config, StorageConfig
 
 
 def _write_cfg(path: Path, data_dir: str):
@@ -40,7 +40,7 @@ def test_missing_everything_returns_defaults(tmp_path, monkeypatch):
     monkeypatch.delenv("STDF_CONFIG", raising=False)
     monkeypatch.chdir(tmp_path)  # no config.yaml here
     cfg = Config.load()
-    assert cfg.storage.data_dir == Path("./data")
+    assert cfg.storage.data_dir == Path("./var/data")
 
 
 def test_load_tolerates_legacy_batch_size(tmp_path, monkeypatch):
@@ -52,3 +52,27 @@ def test_load_tolerates_legacy_batch_size(tmp_path, monkeypatch):
     cfg = Config.load(cfg_file)
     assert cfg.processing.compression == "gzip"
     assert not hasattr(cfg.processing, "batch_size")
+
+
+def test_with_env_derives_from_data_dir():
+    """--env dev must stay inside whatever runtime root data_dir points at.
+
+    A hardcoded "./data-{env}" would recreate a store at the project root
+    even when data_dir was moved under var/, which is exactly what the
+    single-runtime-root layout exists to prevent.
+    """
+    cfg = StorageConfig(
+        data_dir=Path("./var/data"),
+        database=Path("./var/data/stdf.duckdb"),
+        download_dir=Path("./var/downloads"),
+    )
+    dev = cfg.with_env("dev")
+    assert dev.data_dir == Path("var/data-dev")
+    assert dev.database == Path("var/data-dev/stdf.duckdb")
+    # download_dir is shared across envs (dev reuses the same source files).
+    assert dev.download_dir == Path("./var/downloads")
+
+
+def test_with_env_none_returns_self():
+    cfg = StorageConfig()
+    assert cfg.with_env(None) is cfg

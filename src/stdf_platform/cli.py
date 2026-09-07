@@ -49,7 +49,7 @@ def _cell(v, default: str = "", fmt=str) -> str:
 @click.group()
 @click.version_option(version=__version__, prog_name="stdf")
 @click.option("--config", "-c", type=click.Path(path_type=Path), help="Config file path")
-@click.option("--env", "-e", default=None, help="Environment name (e.g. dev). Isolates data to data-{env}/")
+@click.option("--env", "-e", default=None, help="Environment name (e.g. dev). Isolates data to <data_dir>-{env}/ (e.g. var/data-dev/)")
 @click.pass_context
 def main(ctx, config: Path | None, env: str | None):
     """stdf - STDF to Parquet converter and analysis DB."""
@@ -150,7 +150,7 @@ def ingest_all(ctx, directory: Path, product: str, glob: str, workers: int, time
 
     DIRECTORY: Path to directory containing STDF files.
 
-    Example: stdf ingest-all ./downloads -p SCT101A --workers 8
+    Example: stdf ingest-all ./var/downloads -p SCT101A --workers 8
     """
     from .ingest_history import IngestHistory
 

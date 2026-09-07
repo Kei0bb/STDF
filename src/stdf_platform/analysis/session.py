@@ -33,7 +33,7 @@ class AnalysisSession:
             # workspace/ (VSCode Jupytext cell scripts, dbt/analyses/ SQL
             # runs, etc.) is not the repo root, so a bare Config.load() above
             # resolves against the wrong cwd and silently defaults to
-            # ./data. Fall back to the repo-root config.yaml only when the
+            # ./var/data. Fall back to the repo-root config.yaml only when the
             # caller passed no data_dir, AND no STDF_CONFIG env var is set
             # (Config.load()'s own resolution order is explicit arg ->
             # STDF_CONFIG -> cwd config.yaml; this fallback must not override

@@ -28,7 +28,7 @@ $env:PYTHONIOENCODING = "utf-8"
 
 # Resolve project root from this script's location (scripts/../)
 $ProjectRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
-$LogDir      = Join-Path $ProjectRoot "logs"
+$LogDir      = Join-Path $ProjectRoot "var\logs"
 $Timestamp   = Get-Date -Format "yyyyMMdd_HHmmss"
 $LogFile     = Join-Path $LogDir "fetch_$Timestamp.log"
 

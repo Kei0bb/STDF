@@ -225,8 +225,8 @@ def make_stdf(path: Path, lot_id: str, num_wafers: int = 3, parts_per_wafer: int
 
 
 if __name__ == "__main__":
-    out = Path("test_data")
-    out.mkdir(exist_ok=True)
+    out = Path("var/test_data")
+    out.mkdir(parents=True, exist_ok=True)
 
     # Small file
     make_stdf(out / "LOT001.stdf", "LOT001", num_wafers=3, parts_per_wafer=50)
