@@ -14,7 +14,11 @@ dependencies = [
     "plotly>=5.20.0",
     "fastapi>=0.139.0",
     "uvicorn>=0.50.0",
-    "dbt-core>=1.8",
+    # 1.12 は dbt-core-experimental-parser (sdist のみ、ビルド時に GitHub から
+    # wheel を取得する shim) を要求する。社内 TLS 傍受環境ではその取得が
+    # CERTIFICATE_VERIFY_FAILED で落ち、dbt を使わない stdf fetch まで道連れに
+    # なるため 1.11 系に固定する。1.11 系は全依存が wheel で入る。
+    "dbt-core>=1.8,<1.12",
     "dbt-duckdb>=1.8",
 ]
 
