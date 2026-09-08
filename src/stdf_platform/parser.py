@@ -27,6 +27,21 @@ class STDFData:
     tester_type: str = ""
     operator: str = ""
     test_code: str = ""  # CP1, FT2 等（MIR.TEST_CODから取得）
+    node_name: str = ""  # MIR.NODE_NAM — テスター号機名（tester_type は機種）
+
+    # Equipment identity from SDR (1/80). A file may carry several SDRs (one
+    # per head x site group); each field below is the sorted, de-duplicated,
+    # comma-joined set of the non-empty values seen across all of them, so a
+    # single-value field stays a plain string and a genuinely mixed setup
+    # reads as "SKT-A,SKT-B" instead of silently keeping one.
+    handler_type: str = ""     # SDR.HAND_TYP
+    handler_id: str = ""       # SDR.HAND_ID
+    probe_card_type: str = ""  # SDR.CARD_TYP
+    probe_card_id: str = ""    # SDR.CARD_ID
+    loadboard_type: str = ""   # SDR.LOAD_TYP
+    loadboard_id: str = ""     # SDR.LOAD_ID
+    socket_type: str = ""      # SDR.CONT_TYP
+    socket_id: str = ""        # SDR.CONT_ID
 
     # Records by type
     wafers: list[dict] = field(default_factory=list)
@@ -64,6 +79,14 @@ REC_FTR = (15, 20)
 REC_SDR = (1, 80)
 REC_GDR = (50, 10)
 
+# STDFData attribute names filled from SDR, in the order the record stores them.
+SDR_FIELDS = (
+    "handler_type", "handler_id",
+    "probe_card_type", "probe_card_id",
+    "loadboard_type", "loadboard_id",
+    "socket_type", "socket_id",
+)
+
 
 class STDFParser:
     """Binary STDF V4 parser with pre-compiled struct objects for performance."""
@@ -73,6 +96,7 @@ class STDFParser:
         self._part_counter = 0
         self._cached_part_id = ""  # reused across all test results for current part
         self._current_chip_efuses = []  # EN-SO-CHIPID_R values for the current DUT
+        self._sdr_values = {name: set() for name in SDR_FIELDS}
         self._set_endian("<")  # Little endian by default
 
     def _set_endian(self, endian: str):
@@ -199,8 +223,52 @@ class STDFParser:
         self.data.tester_type = tstr_typ
         self.data.operator = oper_nam
         self.data.test_code = test_cod
+        self.data.node_name = node_nam
 
         # Skip remaining optional fields
+        remaining = rec_len - (f.tell() - start_pos)
+        if remaining > 0:
+            f.read(remaining)
+
+    def _parse_sdr(self, f: BinaryIO, rec_len: int):
+        """Parse Site Description Record — handler / probe card / loadboard / socket.
+
+        Field order is fixed: HEAD_NUM, SITE_GRP, SITE_CNT, SITE_NUM[SITE_CNT],
+        then Cn pairs HAND_TYP/HAND_ID, CARD_TYP/CARD_ID, LOAD_TYP/LOAD_ID,
+        DIB_TYP/DIB_ID, CABL_TYP/CABL_ID, CONT_TYP/CONT_ID, LASR_*, EXTR_*.
+        Every Cn is optional-by-truncation — real testers stop writing partway
+        through — so each read is bounded by rec_len and yields "" past the end.
+        The DIB / CABL / LASR / EXTR pairs are read only to reach CONT_*.
+
+        Values accumulate across every SDR in the file; `parse()` collapses
+        them (see SDR_FIELDS).
+        """
+        start_pos = f.tell()
+
+        self._read_u1(f)  # HEAD_NUM
+        if f.tell() - start_pos < rec_len:
+            self._read_u1(f)  # SITE_GRP
+        site_cnt = self._read_u1(f) if f.tell() - start_pos < rec_len else 0
+        if site_cnt:
+            f.read(min(site_cnt, rec_len - (f.tell() - start_pos)))  # SITE_NUM[]
+
+        def next_cn() -> str:
+            return self._read_cn(f) if f.tell() - start_pos < rec_len else ""
+
+        values = {
+            "handler_type": next_cn(), "handler_id": next_cn(),
+            "probe_card_type": next_cn(), "probe_card_id": next_cn(),
+            "loadboard_type": next_cn(), "loadboard_id": next_cn(),
+        }
+        for _ in range(4):  # DIB_TYP/DIB_ID, CABL_TYP/CABL_ID — read past only
+            next_cn()
+        values["socket_type"] = next_cn()
+        values["socket_id"] = next_cn()
+
+        for name, value in values.items():
+            if value:
+                self._sdr_values[name].add(value)
+
         remaining = rec_len - (f.tell() - start_pos)
         if remaining > 0:
             f.read(remaining)
@@ -635,6 +703,7 @@ class STDFParser:
         self.data = STDFData()
         self._part_counter = 0
         self._current_chip_efuses = []
+        self._sdr_values = {name: set() for name in SDR_FIELDS}
 
         with open(file_path, "rb") as f:
             while True:
@@ -654,6 +723,8 @@ class STDFParser:
                         self._parse_pmr(f, rec_len)
                     elif rec_key == REC_MIR:
                         self._parse_mir(f, rec_len)
+                    elif rec_key == REC_SDR:
+                        self._parse_sdr(f, rec_len)
                     elif rec_key == REC_MRR:
                         self._parse_mrr(f, rec_len)
                     elif rec_key == REC_WIR:
@@ -690,6 +761,10 @@ class STDFParser:
                 except Exception as e:
                     logger.debug("Skipping record (typ=%s, sub=%s): %s", rec_typ, rec_sub, e)
                     continue
+
+        # Collapse every SDR's values into one string per field (see SDR_FIELDS).
+        for name in SDR_FIELDS:
+            setattr(self.data, name, ",".join(sorted(self._sdr_values[name])))
 
         return self.data
 

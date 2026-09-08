@@ -71,6 +71,15 @@ wafer ごとに 1 行（1 ファイルに複数 wafer が入っていれば同�
 | finish_time | TIMESTAMP(ms, UTC) | MRR.FINISH_T | テスト終了時刻 |
 | tester_type | STRING | MIR.TSTR_TYP | テスター種別 |
 | operator | STRING | MIR.OPER_NAM | オペレータ名 |
+| node_name | STRING | MIR.NODE_NAM | テスター号機名（`tester_type` は機種） |
+| handler_type | STRING | SDR.HAND_TYP | ハンドラ／プローバ機種 |
+| handler_id | STRING | SDR.HAND_ID | ハンドラ／プローバ号機 |
+| probe_card_type | STRING | SDR.CARD_TYP | プローブカード機種 |
+| probe_card_id | STRING | SDR.CARD_ID | プローブカード ID |
+| loadboard_type | STRING | SDR.LOAD_TYP | ロードボード機種 |
+| loadboard_id | STRING | SDR.LOAD_ID | ロードボード ID |
+| socket_type | STRING | SDR.CONT_TYP | ソケット（コンタクタ）機種 |
+| socket_id | STRING | SDR.CONT_ID | ソケット（コンタクタ）ID |
 | test_rev | STRING | ファイル名 (Rev04等) | テストプログラムリビジョン（ファイル名由来。TP 判定には使わない） |
 | source_file | STRING | CLI | 元STDFファイル名 |
 
@@ -78,6 +87,14 @@ wafer ごとに 1 行（1 ファイルに複数 wafer が入っていれば同�
 > `test_rev` はファイル名から抽出した参考情報で判定には使わない。
 > per-wafer の TP 一覧は `SELECT lot_id, wafer_id, retest_num, job_name, job_rev FROM runs`
 > で直接引ける（`stdf db programs` も参照）。
+
+> **設備情報（SDR 由来）の畳み込みルール**: SDR (1/80) は「ヘッド × サイトグループ」ごとに
+> 1 レコードで、1 ファイルに複数入ることがある。`runs` は 1 ファイル × wafer identity = 1 行
+> なので、各列は **ファイル内の全 SDR の非空値を重複除去・ソートしてカンマ連結**した値になる。
+> 全 SDR が同値なら単一値（`SKT-01`）、本当に混在した場合だけ `SKT-A,SKT-B` と見える。
+> SDR が無いファイルや途中で切れた SDR では、取れなかった列は空文字 `''`。
+> CP ではハンドラ欄にプローバ、カード欄にプローブカードが入り、
+> `loadboard_*` / `socket_*` は空になるのが一般的（設備側の出力次第）。
 
 ---
 

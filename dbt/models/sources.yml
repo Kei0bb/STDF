@@ -6,6 +6,8 @@ sources:
       external_location: "read_parquet('{{ env_var('STDF_DATA_DIR') }}/{name}/**/*.parquet', hive_partitioning=true)"
     tables:
       - name: runs
+        meta:
+          external_location: "read_parquet('{{ env_var('STDF_DATA_DIR') }}/runs/**/*.parquet', hive_partitioning=true, union_by_name=true)"
       - name: wafers
       - name: parts
       - name: chipid

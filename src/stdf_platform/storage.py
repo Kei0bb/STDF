@@ -52,6 +52,19 @@ RUNS_SCHEMA = pa.schema([
     ("finish_time", pa.timestamp("ms", tz="UTC")),
     ("tester_type", pa.string()),
     ("operator", pa.string()),
+    # Equipment identity. node_name is MIR.NODE_NAM (the tester unit, vs
+    # tester_type = its model); the rest come from SDR (1/80), collapsed to a
+    # sorted comma-joined set when a file carries several SDRs — see
+    # parser.SDR_FIELDS and docs/schema.md (runs).
+    ("node_name", pa.string()),        # MIR.NODE_NAM
+    ("handler_type", pa.string()),     # SDR.HAND_TYP
+    ("handler_id", pa.string()),       # SDR.HAND_ID
+    ("probe_card_type", pa.string()),  # SDR.CARD_TYP
+    ("probe_card_id", pa.string()),    # SDR.CARD_ID
+    ("loadboard_type", pa.string()),   # SDR.LOAD_TYP
+    ("loadboard_id", pa.string()),     # SDR.LOAD_ID
+    ("socket_type", pa.string()),      # SDR.CONT_TYP
+    ("socket_id", pa.string()),        # SDR.CONT_ID
     ("test_rev", pa.string()),       # Rev04 等（ファイル名から）
     ("source_file", pa.string()),    # 元ファイル名
 ])
@@ -443,6 +456,15 @@ class ParquetStorage:
                 "finish_time": [_unix_to_datetime(data.finish_time)],
                 "tester_type": [data.tester_type],
                 "operator": [data.operator],
+                "node_name": [data.node_name],
+                "handler_type": [data.handler_type],
+                "handler_id": [data.handler_id],
+                "probe_card_type": [data.probe_card_type],
+                "probe_card_id": [data.probe_card_id],
+                "loadboard_type": [data.loadboard_type],
+                "loadboard_id": [data.loadboard_id],
+                "socket_type": [data.socket_type],
+                "socket_id": [data.socket_id],
                 "test_rev": [test_rev],
                 "source_file": [source_file],
             }, schema=RUNS_SCHEMA)

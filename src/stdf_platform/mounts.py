@@ -70,10 +70,13 @@ def setup_views(
     for table in ["runs", "wafers", "parts", "test_data", "chipid"]:
         path = data_dir / table
         if path.exists():
-            # test_data alone can mix pre-migration files (no exec_seq/
-            # retest_flag columns) with new ones; union_by_name fills the
-            # missing columns with NULL instead of erroring on schema mismatch.
-            extra_opt = ", union_by_name=true" if table == "test_data" else ""
+            # test_data and runs can mix pre-migration files with new ones
+            # (test_data: no exec_seq/retest_flag; runs: no SDR equipment
+            # columns); union_by_name fills the missing columns with NULL
+            # instead of erroring on schema mismatch.
+            extra_opt = (
+                ", union_by_name=true" if table in ("test_data", "runs") else ""
+            )
             conn.execute(f"""
                 CREATE OR REPLACE VIEW {table} AS
                 SELECT * FROM read_parquet(

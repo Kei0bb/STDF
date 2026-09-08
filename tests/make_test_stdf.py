@@ -18,6 +18,44 @@ def record(rec_typ: int, rec_sub: int, data: bytes) -> bytes:
     return struct.pack("<HBB", len(data), rec_typ, rec_sub) + data
 
 
+def sdr(
+    head_num: int = 1,
+    site_grp: int = 0,
+    site_nums: tuple[int, ...] = (1,),
+    hand_typ: str = "HND-MODEL",
+    hand_id: str = "HND-01",
+    card_typ: str = "CARD-MODEL",
+    card_id: str = "CARD-01",
+    load_typ: str = "LB-MODEL",
+    load_id: str = "LB-01",
+    cont_typ: str = "SKT-MODEL",
+    cont_id: str = "SKT-01",
+    truncate_after_hand_id: bool = False,
+) -> bytes:
+    """Build a Site Description Record (1/80) — equipment identity.
+
+    Field order per STDF V4: HEAD_NUM, SITE_GRP, SITE_CNT, SITE_NUM[SITE_CNT],
+    HAND_TYP, HAND_ID, CARD_TYP, CARD_ID, LOAD_TYP, LOAD_ID, DIB_TYP, DIB_ID,
+    CABL_TYP, CABL_ID, CONT_TYP, CONT_ID, LASR_TYP, LASR_ID, EXTR_TYP, EXTR_ID.
+
+    `truncate_after_hand_id` ends the record early, the way real testers stop
+    writing partway through the optional tail.
+    """
+    body = struct.pack("BBB", head_num, site_grp, len(site_nums))
+    body += bytes(site_nums)
+    body += cn(hand_typ) + cn(hand_id)
+    if truncate_after_hand_id:
+        return record(1, 80, body)
+    body += cn(card_typ) + cn(card_id)
+    body += cn(load_typ) + cn(load_id)
+    body += cn("DIB-MODEL") + cn("DIB-01")     # DIB_TYP / DIB_ID (skipped)
+    body += cn("CABL-MODEL") + cn("CABL-01")   # CABL_TYP / CABL_ID (skipped)
+    body += cn(cont_typ) + cn(cont_id)
+    body += cn("LASR-MODEL") + cn("LASR-01")   # LASR_TYP / LASR_ID (skipped)
+    body += cn("EXTR-MODEL") + cn("EXTR-01")   # EXTR_TYP / EXTR_ID (skipped)
+    return record(1, 80, body)
+
+
 # Share the SAME (offset) tables as the decoder so encode/decode round-trips.
 from stdf_platform.chipid import LOTNO_CHAR1, LOTNO_CHAR2
 
@@ -71,6 +109,17 @@ def make_ft_stdf(path: Path, lot_id: str, parts: int = 8, fail_part_ids=None):
         + cn("FT1")  # TEST_COD -> sub_process FT1
     )
     buf += record(1, 10, mir_data)
+
+    # Two site groups sharing one handler/loadboard but wired to different
+    # sockets — exercises the multi-SDR collapse (see parser.SDR_FIELDS).
+    buf += sdr(site_grp=0, site_nums=(1, 2), hand_typ="HND-FT-MODEL",
+               hand_id="HND-FT-01", card_typ="", card_id="",
+               load_typ="LB-FT-MODEL", load_id="LB-FT-01",
+               cont_typ="SKT-FT-MODEL", cont_id="SKT-B")
+    buf += sdr(site_grp=1, site_nums=(3, 4), hand_typ="HND-FT-MODEL",
+               hand_id="HND-FT-01", card_typ="", card_id="",
+               load_typ="LB-FT-MODEL", load_id="LB-FT-01",
+               cont_typ="SKT-FT-MODEL", cont_id="SKT-A")
 
     expected = []
     for i in range(parts):
@@ -136,6 +185,12 @@ def make_stdf(path: Path, lot_id: str, num_wafers: int = 3, parts_per_wafer: int
         + cn("CP11")          # TEST_COD  ← sub_process
     )
     buf += record(1, 10, mir_data)
+
+    # CP: the "handler" is the prober and the card is the probe card; there is
+    # no loadboard/socket, so those Cn fields are written empty.
+    buf += sdr(site_grp=0, site_nums=(1,), hand_typ="PROBER-MODEL",
+               hand_id="PRB-01", card_typ="PC-MODEL", card_id="PC-01",
+               load_typ="", load_id="", cont_typ="", cont_id="")
 
     test_defs = [
         (1001, "Vth_N",  0.3,  0.8,  "V"),

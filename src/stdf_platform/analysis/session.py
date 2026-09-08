@@ -108,6 +108,10 @@ class AnalysisSession:
             SELECT lot_id, wafer_id, product, test_category, sub_process,
                    retest_num, part_type, job_name, job_rev,
                    start_time, finish_time, tester_type, operator,
+                   node_name, handler_type, handler_id,
+                   probe_card_type, probe_card_id,
+                   loadboard_type, loadboard_id,
+                   socket_type, socket_id,
                    test_rev, source_file
             FROM runs{clause}
             ORDER BY start_time, lot_id, wafer_id, retest_num
