@@ -3,7 +3,14 @@ name = "stdf2pq"
 version = "0.2.0"
 description = "stdf - STDF to Parquet converter and analysis DB"
 readme = "README.md"
-requires-python = ">=3.10"
+# 上限 <3.14 は dbt-core 1.11 系の制約から来る。1.11 は mashumaro[msgpack]<3.15
+# を要求するが、mashumaro が Python 3.14 (PEP 649 の遅延アノテーション) に
+# 対応したのは 3.17 から。よって py3.14 では dbt の import 時点で
+# UnserializableField で落ち、依存の調整では回避できない (1.12 に上げれば
+# mashumaro<3.18 で通るが、下の dbt-core ピンのコメント通り 1.12 は社内 TLS
+# 環境で入らない)。上限が無いと uv sync がその環境の最新 Python を掴み、
+# ingest は動くのに stdf build だけが後から壊れる。
+requires-python = ">=3.10,<3.14"
 dependencies = [
     "pyarrow>=14.0.0",
     "duckdb>=0.9.0",
