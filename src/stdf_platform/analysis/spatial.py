@@ -67,14 +67,20 @@ def radial_profile(s, product, lot_id, test_num):
                    (MIN(y_coord)+MAX(y_coord))/2.0 AS cy
             FROM parts_final WHERE lot_id = ?
         ),
+        -- rmax はロットの全ダイ座標から取る。測定のあった行だけから取ると
+        -- test_num ごとに正規化の基準が変わり、同一ロットの2テストの
+        -- radius_bin が比較できなくなる。
+        rmax AS (
+            SELECT MAX(sqrt(pow(p.x_coord-ext.cx,2)+pow(p.y_coord-ext.cy,2))) AS rm
+            FROM parts_final p, ext WHERE p.lot_id = ?
+        ),
         vals AS (
             SELECT t.result,
                    sqrt(pow(t.x_coord-ext.cx,2)+pow(t.y_coord-ext.cy,2)) AS rad
             FROM test_data_final t, ext
             WHERE t.lot_id = ? AND t.test_num = ?
               AND t.result IS NOT NULL AND t.rec_type IN ('PTR','MPR')
-        ),
-        rmax AS (SELECT MAX(rad) AS rm FROM vals)
+        )
         SELECT LEAST(9, CAST(floor(
                    CASE WHEN rmax.rm = 0 THEN 0 ELSE rad / rmax.rm END * 10
                ) AS INTEGER)) AS radius_bin,
@@ -84,7 +90,7 @@ def radial_profile(s, product, lot_id, test_num):
         FROM vals, rmax
         GROUP BY radius_bin ORDER BY radius_bin
         """,
-        [lot_id, lot_id, test_num],
+        [lot_id, lot_id, lot_id, test_num],
     ).fetchdf()
 
 
