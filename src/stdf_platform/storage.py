@@ -364,6 +364,24 @@ class ParquetStorage:
             con = duckdb.connect()
             try:
                 con.register("new_keys", new_keys_table)
+                # Skip the rewrite entirely when no key matches this file:
+                # without this, every new retest rewrote every older retest
+                # file (O(K^2) I/O) even when nothing was re-measured there.
+                matched = con.execute(f"""
+                    SELECT COUNT(*)
+                    FROM (SELECT * FROM read_parquet('{old_path.as_posix()}')) old
+                    JOIN (SELECT DISTINCT * FROM new_keys) nk
+                      ON old.wafer_id = nk.wafer_id
+                     AND old.x_coord = nk.x_coord
+                     AND old.y_coord = nk.y_coord
+                     AND (CASE WHEN old.x_coord = -32768 AND old.y_coord = -32768
+                               THEN {old_ft} ELSE '' END) = nk.ft_txt
+                     AND old.test_num = nk.test_num
+                     AND old.pin_num IS NOT DISTINCT FROM nk.pin_num
+                """).fetchone()[0]
+                if matched == 0:
+                    continue
+
                 updated = con.execute(f"""
                     WITH nk AS (SELECT DISTINCT * FROM new_keys)
                     SELECT old.* EXCLUDE (file_row_number) REPLACE (

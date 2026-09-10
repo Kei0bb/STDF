@@ -531,8 +531,11 @@ def _run_ingest_batch(
         compression=config.processing.compression,
         max_workers=max_workers,
         timeout=timeout,
-        on_success=lambda r: sync_manager.mark_ingested(r.remote_path),
+        # save=False: the callback runs once per file; rewriting the whole
+        # sync_history.json per file is O(N^2). One save after the pool.
+        on_success=lambda r: sync_manager.mark_ingested(r.remote_path, save=False),
     )
+    sync_manager.save()
 
     # Structured failure record for automation (always written, even if empty).
     atomic_write_json(
@@ -634,12 +637,13 @@ def _download_files(
                     console.print(f"  [red]![/red] {filename}: {type(e).__name__}: {e}")
                 continue
 
-            # Track in sync history
+            # Track in sync history (persisted once after the batch below).
             sync_manager.mark_downloaded(
                 remote_path=remote_path,
                 local_path=local_file,
                 product=prod,
                 test_type=ttype,
+                save=False,
             )
             # A --retry-corrupt run that succeeds clears the quarantine record.
             if sync_manager.is_corrupt(remote_path):
@@ -648,6 +652,7 @@ def _download_files(
             downloaded.append((remote_path, local_file, prod, ttype))
             progress.update(dl_task, advance=1, description=f"Downloaded {filename}")
 
+    sync_manager.save()  # batched save=False marks above
     return downloaded, corrupt, failed
 
 

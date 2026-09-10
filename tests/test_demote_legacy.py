@@ -65,3 +65,26 @@ def test_empty_barcode_ft_demotes_only_same_serial(tmp_path):
     flags = dict(zip(updated["part_serial"].to_pylist(),
                      updated["retest_flag"].to_pylist()))
     assert flags == {"SER0": 0, "SER1": 1}
+
+
+def test_demote_does_not_rewrite_when_no_key_matches(tmp_path):
+    """一致キーが無い旧ファイルを毎回書き直さない（O(n^2) I/O の削減）。"""
+    storage = _storage(tmp_path)
+    wafer_dir = (tmp_path / "test_data" / "product=P" / "test_category=CP"
+                 / "sub_process=CP1" / "lot_id=LOT" / "wafer_id=W1")
+    old = wafer_dir / "retest=0" / "data.parquet"
+    old.parent.mkdir(parents=True, exist_ok=True)
+    row = {f.name: None for f in TEST_DATA_SCHEMA}
+    row.update({"lot_id": "LOT", "wafer_id": "W1", "part_id": "LOT_W1_0",
+                "part_txt": "", "part_serial": "", "x_coord": 0, "y_coord": 0,
+                "test_num": 1, "test_name": "T", "rec_type": "PTR",
+                "result": 1.0, "passed": "P", "retest_num": 0,
+                "exec_seq": 0, "retest_flag": 0})
+    pq.write_table(pa.table({k: [v] for k, v in row.items()},
+                            schema=TEST_DATA_SCHEMA), old)
+    before = old.stat().st_mtime_ns
+
+    storage._demote_superseded(
+        wafer_dir, new_keys={("W1", 999, 999, "", 1, None)}, up_to_retest=1)
+
+    assert old.stat().st_mtime_ns == before
