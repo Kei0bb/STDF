@@ -907,6 +907,7 @@ def export_lot(ctx, lot_ids: tuple, output: Path, pivot: bool):
                     td.lot_id,
                     td.wafer_id,
                     td.part_id,
+                    td.die_key,
                     p.x_coord,
                     p.y_coord,
                     p.hard_bin,
@@ -918,7 +919,7 @@ def export_lot(ctx, lot_ids: tuple, output: Path, pivot: bool):
                 JOIN parts_final p
                     ON  td.lot_id   = p.lot_id
                     AND td.wafer_id = p.wafer_id
-                    AND td.part_id  = p.part_id
+                    AND td.die_key  = p.die_key
                 WHERE td.lot_id IN ({placeholders})
                 ORDER BY td.lot_id, td.wafer_id, td.part_id, td.test_name
                 """
@@ -926,8 +927,9 @@ def export_lot(ctx, lot_ids: tuple, output: Path, pivot: bool):
                 if long_df.empty:
                     df = long_df
                 else:
-                    index_cols = ["lot_id", "wafer_id", "part_id", "x_coord",
-                                  "y_coord", "hard_bin", "soft_bin", "part_passed"]
+                    index_cols = ["lot_id", "wafer_id", "die_key", "part_id",
+                                  "x_coord", "y_coord", "hard_bin", "soft_bin",
+                                  "part_passed"]
                     df = long_df.pivot_table(
                         index=index_cols, columns="test_name",
                         values="result", aggfunc="first",
@@ -955,7 +957,7 @@ def export_lot(ctx, lot_ids: tuple, output: Path, pivot: bool):
                 JOIN parts_final p
                     ON  td.lot_id   = p.lot_id
                     AND td.wafer_id = p.wafer_id
-                    AND td.part_id  = p.part_id
+                    AND td.die_key  = p.die_key
                 WHERE td.lot_id IN ({placeholders})
                 ORDER BY td.lot_id, td.wafer_id, td.part_id, td.test_num
                 """
