@@ -15,11 +15,13 @@ def _write_parts(data_dir: Path):
     )
     path.parent.mkdir(parents=True, exist_ok=True)
     schema = pa.schema([
+        ("part_id", pa.string()),
         ("lot_id", pa.string()), ("wafer_id", pa.string()), ("part_txt", pa.string()),
         ("x_coord", pa.int64()), ("y_coord", pa.int64()),
         ("soft_bin", pa.int64()), ("passed", pa.bool_()), ("retest_num", pa.int64()),
     ])
     table = pa.table({
+        "part_id": ["P0", "P1"],
         "lot_id": ["LOT1", "LOT1"], "wafer_id": ["W1", "W1"], "part_txt": ["", ""],
         "x_coord": [1, 2], "y_coord": [1, 2], "soft_bin": [1, 0],
         "passed": [True, False], "retest_num": [0, 0],
@@ -31,6 +33,7 @@ def _write_two_retests_same_die(data_dir: Path):
     """Same physical CP die (W1, x=1, y=1) probed twice with DIFFERENT part_txt
     serials — must collapse to one row in parts_final."""
     schema = pa.schema([
+        ("part_id", pa.string()),
         ("lot_id", pa.string()), ("wafer_id", pa.string()), ("part_txt", pa.string()),
         ("x_coord", pa.int64()), ("y_coord", pa.int64()),
         ("soft_bin", pa.int64()), ("passed", pa.bool_()), ("retest_num", pa.int64()),
@@ -43,6 +46,7 @@ def _write_two_retests_same_die(data_dir: Path):
         )
         path.parent.mkdir(parents=True, exist_ok=True)
         pq.write_table(pa.table({
+            "part_id": [f"P{retest}"],
             "lot_id": ["LOT1"], "wafer_id": ["W1"], "part_txt": [sn],
             "x_coord": [1], "y_coord": [1], "soft_bin": [1],
             "passed": [passed], "retest_num": [retest],

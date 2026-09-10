@@ -18,6 +18,36 @@ from pathlib import Path
 import duckdb
 
 
+# FT identity = 2D barcode (part_txt) → PRR.PART_ID (part_serial) → 合成 part_id。
+# 空 part_txt で全パッケージが 1 キーに潰れると、parts_final がロット全体を
+# 1 ダイに畳み、_demote_superseded が他パッケージの測定値まで demote する。
+# CP (座標あり) では CASE が '' を返す。
+_FT_IDENTITY = (
+    "COALESCE(NULLIF({p}part_txt, ''), NULLIF({p}part_serial, ''), {p}part_id)"
+)
+
+
+def ft_identity(prefix: str = "") -> str:
+    """FT パッケージ identity の SQL 式（`prefix` でテーブル修飾）。"""
+    p = f"{prefix}." if prefix else ""
+    return (f"CASE WHEN {p}x_coord = -32768 AND {p}y_coord = -32768 "
+            f"THEN {_FT_IDENTITY.format(p=p)} ELSE '' END")
+
+
+def die_key_expr(prefix: str = "") -> str:
+    """物理ダイ/パッケージを 1 文字列で表す SQL 式。
+
+    joins は `part_id` ではなくこれを使う。part_id はファイル内連番
+    (parser.py:336) で、部分リテストでは別ダイに振り直されるため。
+    CP と FT をプレフィックスで分離し、負座標でも衝突しない。
+    """
+    p = f"{prefix}." if prefix else ""
+    return (f"CASE WHEN {p}x_coord = -32768 AND {p}y_coord = -32768 "
+            f"THEN 'FT|' || {_FT_IDENTITY.format(p=p)} "
+            f"ELSE 'CP|' || CAST({p}x_coord AS VARCHAR) || '|' "
+            f"|| CAST({p}y_coord AS VARCHAR) END")
+
+
 # Dedup identity within a (lot, retest) group, expressed as native partition
 # columns.
 #
@@ -27,23 +57,16 @@ import duckdb
 #   carry a different part_txt across retests and fail to dedup, inflating
 #   counts by summing every retest.
 #
-#   FT has no wafer/probe coordinates (wafer_id='', x=y=-32768); its die
-#   identity is the package barcode in part_txt.
-#
-# The CASE selects part_txt ONLY for coordinate-less rows (FT), and a constant
-# otherwise so CP probed dies group purely by wafer_id + x/y.
-_DEDUP_UNIT = (
-    "wafer_id, x_coord, y_coord, "
-    "CASE WHEN x_coord = -32768 AND y_coord = -32768 THEN part_txt ELSE '' END"
-)
+#   FT has no wafer/probe coordinates (wafer_id='', x=y=-32768); its identity
+#   is the package barcode, falling back to PRR.PART_ID then the synthetic
+#   per-file part_id (see ft_identity / die_key_expr above).
+_DEDUP_UNIT = f"wafer_id, x_coord, y_coord, {ft_identity()}"
 
 
 # test_data の retest_flag 整合性キー。_DEDUP_UNIT(ダイ識別)に test_num/pin_num を
 # 足したもの — flag はこの粒度で付く(storage.py が ingest 時に確定させる)。
 _FLAG_KEY = (
-    "lot_id, wafer_id, x_coord, y_coord, "
-    "CASE WHEN x_coord = -32768 AND y_coord = -32768 THEN part_txt ELSE '' END, "
-    "test_num, pin_num"
+    f"lot_id, wafer_id, x_coord, y_coord, {ft_identity()}, test_num, pin_num"
 )
 
 # storage.py が ingest 時に確定させる retest_flag の不変条件。壊れていれば
@@ -154,19 +177,28 @@ def setup_views(
     for table in _CORE:
         path = data_dir / table
         if path.exists():
-            # test_data and runs can mix pre-migration files with new ones
-            # (test_data: no exec_seq/retest_flag; runs: no SDR equipment
-            # columns); union_by_name fills the missing columns with NULL
-            # instead of erroring on schema mismatch.
-            extra_opt = (
-                ", union_by_name=true" if table in ("test_data", "runs") else ""
+            # parts/test_data/runs can mix pre-migration files with new ones
+            # (parts/test_data: no part_serial; test_data: no exec_seq/retest_flag;
+            # runs: no SDR equipment columns); union_by_name fills the missing
+            # columns with NULL instead of erroring on schema mismatch.
+            union = (
+                ", union_by_name=true" if table in ("parts", "test_data", "runs") else ""
             )
-            conn.execute(f"""
-                CREATE OR REPLACE VIEW {table} AS
-                SELECT * FROM read_parquet(
-                    '{path.as_posix()}/**/*.parquet', hive_partitioning=true{extra_opt}
+            rel = (
+                f"read_parquet('{path.as_posix()}/**/*.parquet', "
+                f"hive_partitioning=true{union})"
+            )
+            if table in ("parts", "test_data"):
+                # part_serial は後から追加した列。旧ファイルしかないストアでは
+                # union_by_name でも列が現れないため、型付きゼロ行アームで常に
+                # 存在させる。DuckDB は空アームを planning 時に除去する
+                # (EXPLAIN 確認済み) ので predicate pushdown も損なわない。
+                rel = (
+                    f"(SELECT * FROM {rel}\n"
+                    f"UNION ALL BY NAME\n"
+                    f"SELECT CAST(NULL AS VARCHAR) AS part_serial WHERE FALSE)"
                 )
-            """)
+            conn.execute(f"CREATE OR REPLACE VIEW {table} AS SELECT * FROM {rel}")
             registered.append(table)
 
     if "runs" in registered:
@@ -207,7 +239,7 @@ def setup_views(
         conn.execute(f"""
             CREATE OR REPLACE VIEW parts_final AS
             SELECT * EXCLUDE (rn) FROM (
-                SELECT *, ROW_NUMBER() OVER (
+                SELECT *, {die_key_expr()} AS die_key, ROW_NUMBER() OVER (
                     PARTITION BY lot_id, {_DEDUP_UNIT}
                     ORDER BY retest_num DESC
                 ) AS rn FROM parts
@@ -247,9 +279,10 @@ def setup_views(
         # be re-ingested (the user's own WIPE-and-re-ingest plan covers
         # this); `stdf db verify` (FLAG_INVARIANTS above) detects and
         # reports it.
-        conn.execute("""
+        conn.execute(f"""
             CREATE OR REPLACE VIEW test_data_final AS
-            SELECT * FROM test_data WHERE retest_flag = 0
+            SELECT *, {die_key_expr()} AS die_key
+            FROM test_data WHERE retest_flag = 0
         """)
         registered.append("test_data_final")
 
@@ -299,7 +332,12 @@ def setup_views(
         else:
             # No lots table (rare; some unit tests write only parts) → product
             # unknown → GD cannot be resolved → fall back to probed counts.
-            lot_product = "SELECT NULL AS lot_id, NULL AS product WHERE FALSE"
+            # CAST 必須: NULL 単体は INT32 になり、VARCHAR の lot_id 比較が
+            # ConversionException になる。
+            lot_product = (
+                "SELECT CAST(NULL AS VARCHAR) AS lot_id, "
+                "CAST(NULL AS VARCHAR) AS product WHERE FALSE"
+            )
         conn.execute(f"""
             CREATE OR REPLACE VIEW wafer_yield_final AS
             WITH probed AS (
