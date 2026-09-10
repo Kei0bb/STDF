@@ -96,7 +96,7 @@ var/                 ランタイム生成物（.gitignore で丸ごと除外）
 
 | モジュール | 役割 |
 |---|---|
-| `cli.py` | Click CLI — `ingest` / `ingest-all` / `fetch` / `build` / `db` / `export` / `serve` コマンド |
+| `cli.py` | Click CLI — `ingest` / `ingest-all` / `fetch` / `db` / `export` / `serve` コマンド |
 | `worker.py` | `ThreadPoolExecutor` でファイルごとに subprocess を起動・タイムアウト管理 |
 | `_ingest_worker.py` | 独立 subprocess — 1ファイルを parse → Parquet 書き込みして JSON を stdout に出力 |
 | `parser.py` | Pure Python STDF V4 パーサー（`struct.Struct` 最適化、FAR/MIR/WIR/PIR/PRR/PTR/MPR/FTR/PMR対応） |
@@ -325,7 +325,7 @@ REM 動作テスト（即時実行）
 schtasks /Run /TN STDF_DailyFetch
 
 REM ログ確認
-type logs\fetch_*.log
+type var\logs\fetch_*.log
 
 REM 登録解除
 scripts\unregister_task.bat
