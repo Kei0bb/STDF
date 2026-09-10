@@ -194,3 +194,27 @@ def test_schema_survives_broken_view(tmp_path, monkeypatch):
     assert "chipid" in tables
     assert "error" in tables["chipid"]
     assert "columns" not in tables["chipid"]
+
+
+def test_session_applies_server_limits(tmp_path):
+    from stdf_platform.server.app import _open_locked_session
+
+    _write_cp(tmp_path)
+    cfg = Config(storage=StorageConfig(data_dir=tmp_path),
+                 server=ServerConfig(memory_limit="1GB", threads=1))
+    session = _open_locked_session(cfg)
+    try:
+        assert session.conn.execute(
+            "SELECT current_setting('threads')"
+        ).fetchone()[0] == 1
+    finally:
+        session.close()
+
+
+def test_query_timeout_returns_504(tmp_path):
+    client = _client(tmp_path, query_timeout_seconds=1)
+    resp = client.post("/api/query", json={
+        "sql": "SELECT COUNT(*) FROM range(100000000) a, range(100000000) b",
+    })
+    assert resp.status_code == 504
+    assert "timed out" in resp.json()["detail"]

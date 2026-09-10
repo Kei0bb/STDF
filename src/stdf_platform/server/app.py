@@ -16,6 +16,8 @@ SELECT statement is accepted. Result size is capped at server.max_rows.
 """
 
 import math
+import re
+import threading
 from datetime import date, datetime
 from decimal import Decimal
 from importlib.resources import files
@@ -53,6 +55,16 @@ def _open_locked_session(config: Config) -> AnalysisSession:
     """
     session = AnalysisSession(config.storage.data_dir, config=config)
     conn = session.conn
+    # Resource caps must be set before lock_configuration; the DuckDB defaults
+    # (80% of RAM, all threads) let one request's operators consume the host.
+    # DuckDB has no statement_timeout, so a runaway query is cancelled by
+    # Connection.interrupt() from the timer in query() below.
+    limit = config.server.memory_limit
+    if not re.fullmatch(r"\d+(\.\d+)?\s*(KB|MB|GB|TB|%)?", limit, re.IGNORECASE):
+        session.close()
+        raise RuntimeError(f"invalid server.memory_limit: {limit!r}")
+    conn.execute(f"SET memory_limit = '{limit}'")
+    conn.execute(f"SET threads = {int(config.server.threads)}")
     conn.execute(
         f"SET allowed_directories = ['{session.data_dir.as_posix()}']"
     )
@@ -135,18 +147,31 @@ def query(req: QueryRequest, request: Request):
     if req.limit is not None:
         cap = max(0, min(req.limit, cap))
 
+    timeout = config.server.query_timeout_seconds
     session = _open_locked_session(config)
+    timer = None
     try:
         try:
+            if timeout and timeout > 0:
+                timer = threading.Timer(timeout, session.conn.interrupt)
+                timer.daemon = True
+                timer.start()
             cursor = session.conn.execute(req.sql)
+            columns = [d[0] for d in cursor.description]
+            rows = cursor.fetchmany(cap + 1)
+        except duckdb.InterruptException:
+            raise HTTPException(
+                status_code=504,
+                detail=f"query timed out after {timeout}s (server limit)",
+            )
         except duckdb.Error as exc:
             # Full DuckDB message: it is the user's debugging feedback.
             raise HTTPException(status_code=400, detail=str(exc))
-        columns = [d[0] for d in cursor.description]
-        rows = cursor.fetchmany(cap + 1)
         truncated = len(rows) > cap
         rows = rows[:cap]
     finally:
+        if timer is not None:
+            timer.cancel()
         session.close()
 
     if req.format == "csv":
