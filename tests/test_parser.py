@@ -31,8 +31,8 @@ def test_overlong_cn_does_not_desync_next_record(tmp_path):
 
 def test_big_endian_far_switches_endianness(tmp_path):
     def be_record(rec_typ: int, rec_sub: int, data: bytes) -> bytes:
-        # FAR で byte order が決まった後は、レコードヘッダの REC_LEN も
-        # その byte order で読まれる (parser._read_header は _s_u2 を使う)。
+        # 実ファイルでは FAR のヘッダ(REC_LEN)自身もファイルのバイトオーダー
+        # で書かれる。FAR も含めて全レコードを big-endian で書く。
         return struct.pack(">HBB", len(data), rec_typ, rec_sub) + data
 
     mir = (
@@ -41,10 +41,17 @@ def test_big_endian_far_switches_endianness(tmp_path):
         + cn("BE_LOT") + cn("PT") + cn("NODE") + cn("J750")
         + cn("JOB") + cn("Rev01") + cn("") + cn("OP") + cn("") + cn("")
     )
-    far = record(0, 10, struct.pack("BB", 1, 4))   # cpu_type=1 = big endian
+    far = be_record(0, 10, struct.pack("BB", 1, 4))  # cpu_type=1 = big endian
     p = tmp_path / "be.stdf"
     p.write_bytes(far + be_record(1, 10, mir))
     assert STDFParser().parse(p).lot_id == "BE_LOT"
+
+
+def test_little_endian_still_default_without_far(tmp_path):
+    """FAR が無いファイルは従来どおり little-endian 既定で読む。"""
+    p = tmp_path / "no_far.stdf"
+    p.write_bytes(_mir("LE_LOT"))
+    assert STDFParser().parse(p).lot_id == "LE_LOT"
 
 
 def test_mpr_expands_per_pin_and_resolves_pin_name(tmp_path):

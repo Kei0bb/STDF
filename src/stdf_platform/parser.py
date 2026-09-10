@@ -168,6 +168,26 @@ class STDFParser:
         except Exception:
             return ""
 
+    def _sniff_endian(self, f: BinaryIO) -> None:
+        """Decide the byte order of the FAR header itself from the first 4 bytes.
+
+        `_parse_far` sets the byte order for everything *after* the FAR from its
+        CPU_TYPE byte — but the FAR's own REC_LEN (2 bytes) is already written in
+        the file's byte order. Read little-endian, a big-endian file yields
+        rec_len = 0x0200 and the parse loop skips 512 bytes past the FAR, losing
+        the MIR (and with it lot_id). The FAR is always the first record, always
+        rec_len=2, always (typ, sub) = (0, 10), so the length bytes identify the
+        order unambiguously. A file that does not start with a FAR keeps the
+        little-endian default, exactly as before.
+        """
+        head = f.read(4)
+        f.seek(0)
+        if len(head) == 4 and head[2] == 0 and head[3] == 10:
+            if head[0] == 0 and head[1] == 2:
+                self._set_endian(">")
+            elif head[0] == 2 and head[1] == 0:
+                self._set_endian("<")
+
     def _read_header(self, f: BinaryIO) -> tuple[int, int, int]:
         """Read 4-byte record header. Returns (rec_len, rec_typ, rec_sub)."""
         data = f.read(4)
@@ -716,9 +736,15 @@ class STDFParser:
         self._current_chip_efuses = []
         self._sdr_values = {name: set() for name in SDR_FIELDS}
         self._rec_end = None
+        self._set_endian("<")  # 前ファイルの FAR を持ち越さない
 
         with open(file_path, "rb") as f:
+            self._sniff_endian(f)
             while True:
+                # 例外ハンドラが直前レコードの末尾に巻き戻して同じヘッダを
+                # 読み直す(無限ループ)のを防ぐため、毎周回クリアする。
+                rec_end: int | None = None
+                rec_typ = rec_sub = None
                 try:
                     rec_len, rec_typ, rec_sub = self._read_header(f)
 
@@ -776,6 +802,8 @@ class STDFParser:
                     break
                 except Exception as e:
                     logger.debug("Skipping record (typ=%s, sub=%s): %s", rec_typ, rec_sub, e)
+                    if rec_end is None:
+                        break  # ヘッダすら読めていない — 位置が不明なので打ち切る
                     f.seek(rec_end)
                     continue
 
