@@ -29,6 +29,7 @@ from pydantic import BaseModel
 
 from .. import __version__
 from ..analysis import AnalysisSession
+from ..analysis.library import sql_literal
 from ..config import Config
 
 router = APIRouter()
@@ -66,7 +67,7 @@ def _open_locked_session(config: Config) -> AnalysisSession:
     conn.execute(f"SET memory_limit = '{limit}'")
     conn.execute(f"SET threads = {int(config.server.threads)}")
     conn.execute(
-        f"SET allowed_directories = ['{session.data_dir.as_posix()}']"
+        f"SET allowed_directories = ['{sql_literal(session.data_dir.as_posix())}']"
     )
     conn.execute("SET enable_external_access = false")
     conn.execute("SET lock_configuration = true")

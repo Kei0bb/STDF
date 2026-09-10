@@ -104,9 +104,18 @@ def run_query(
         return conn.execute(final).fetchdf()
     out = Path(out)
     rows = conn.execute(
-        f"COPY ({final}) TO '{out.as_posix()}' (HEADER, DELIMITER ',')"
+        f"COPY ({final}) TO '{sql_literal(out.as_posix())}' (HEADER, DELIMITER ',')"
     ).fetchone()[0]
     return rows
+
+
+def sql_literal(value: str) -> str:
+    """SQL シングルクォート文字列リテラルに埋め込めるよう ' を '' にする。
+
+    パス等を f-string で SQL に埋め込む箇所専用(値のバインドが可能な場所では
+    バインドを使うこと)。
+    """
+    return value.replace("'", "''")
 
 
 def _identifier(name: str) -> str:

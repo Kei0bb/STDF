@@ -354,8 +354,10 @@ def query(ctx, sql: str | None, output: Path | None, sql_file: Path | None):
     try:
         with AnalysisSession(config.storage.data_dir, config=config) as s:
             if output is not None:
+                from .analysis.library import sql_literal
                 n = s.conn.execute(
-                    f"COPY ({sql.rstrip('; ')}) TO '{output.as_posix()}' (HEADER, DELIMITER ',')"
+                    f"COPY ({sql.rstrip('; ')}) TO '{sql_literal(output.as_posix())}'"
+                    f" (HEADER, DELIMITER ',')"
                 ).fetchone()[0]
                 console.print(f"Exported {n:,} rows → {output}")
             else:
@@ -374,6 +376,27 @@ def query(ctx, sql: str | None, output: Path | None, sql_file: Path | None):
     except Exception as e:
         console.print(f"[red]Error:[/red] {e}")
         sys.exit(1)
+
+
+def _stale_views(conn, registered: list[str],
+                 previous: list[str] | None) -> list[str]:
+    """カタログから落とすべきビュー。
+
+    previous (前回 _stdf_mount_state に記録した registered) が分かる時は
+    我々が作った分の差分だけを対象にし、ユーザーが shell で作ったビューを
+    巻き込まない。前回状態が無い旧 DB は区別できないため、従来通り
+    非登録ビューを全部落とす。
+    """
+    current = set(registered)
+    if previous is None:
+        return [
+            r[0]
+            for r in conn.execute(
+                "SELECT view_name FROM duckdb_views() WHERE NOT internal"
+            ).fetchall()
+            if r[0] not in current
+        ]
+    return [v for v in previous if v not in current]
 
 
 @db.command()
@@ -421,17 +444,31 @@ def shell(ctx, refresh):
         console.print(f"[dim]  rm {db_path}   /   Remove-Item {db_path}[/dim]")
         sys.exit(1)
     registered: list[str] | None = None
+    previous: list[str] | None = None
     if not refresh:
         try:
             row = conn.execute(
                 "SELECT fingerprint, registered FROM _stdf_mount_state"
             ).fetchone()
-            if row and row[0] == fingerprint:
-                registered = row[1].split(",")
+            if row:
+                previous = row[1].split(",")
+                if row[0] == fingerprint:
+                    registered = previous
         except duckdb_mod.Error:
             pass  # 初回、または旧バージョンが作った DB — 下で登録する
 
     if registered is None:
+        # --refresh / fingerprint 変化でも前回一覧は残っているので読む
+        # (refresh 分岐では上の try が走らない)。
+        if previous is None:
+            try:
+                row = conn.execute(
+                    "SELECT registered FROM _stdf_mount_state"
+                ).fetchone()
+                if row:
+                    previous = row[0].split(",")
+            except duckdb_mod.Error:
+                pass
         t0 = time.time()
         try:
             registered = setup_views(conn, config.storage.data_dir, config.gross_die_map)
@@ -442,15 +479,9 @@ def shell(ctx, refresh):
         # 過去の登録の残骸を落とす。setup_views() は CREATE OR REPLACE しかしない
         # ので、一度でも作られたビューはこの永続ファイルに残り続ける — 消えた
         # 定義(dbt 時代のマートビューが典型)は、参照先の Parquet ごと消えると
-        # IOException を投げるし、残っていれば古いデータを黙って返す。カタログを
-        # 「いまコードが定義しているもの」と一致させる。
-        stale = [
-            row[0]
-            for row in conn.execute(
-                "SELECT view_name FROM duckdb_views() WHERE NOT internal"
-            ).fetchall()
-            if row[0] not in registered
-        ]
+        # IOException を投げるし、残っていれば古いデータを黙って返す。前回一覧が
+        # あれば差分だけを落とし、ユーザーが shell で作ったビューは残す。
+        stale = _stale_views(conn, registered, previous)
         for view in stale:
             conn.execute(f'DROP VIEW IF EXISTS "{view}"')
 
