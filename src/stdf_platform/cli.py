@@ -409,7 +409,17 @@ def shell(ctx, refresh):
     from .mounts import setup_views, store_fingerprint
 
     fingerprint = store_fingerprint(config.storage.data_dir, config.gross_die_map)
-    conn = duckdb_mod.connect(str(db_path))
+    try:
+        conn = duckdb_mod.connect(str(db_path))
+    except duckdb_mod.Error as e:
+        # このファイルはビューのカタログを持つだけのキャッシュで、中身は
+        # data_dir から再生成できる。開けない(壊れた・別バージョンが書いた・
+        # 別プロセスが掴んでいる)ときは、消して作り直すのが正しい復旧手順。
+        console.print(f"[red]Error:[/red] {db_path} を開けません — {e}")
+        console.print("[dim]このファイルは再生成可能なキャッシュです。"
+                      "削除してもう一度実行してください:[/dim]")
+        console.print(f"[dim]  rm {db_path}   /   Remove-Item {db_path}[/dim]")
+        sys.exit(1)
     registered: list[str] | None = None
     if not refresh:
         try:

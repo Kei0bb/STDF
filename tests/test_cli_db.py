@@ -223,3 +223,21 @@ def test_db_shell_drops_stale_views(tmp_path, synth_store, monkeypatch):
     con.close()
     assert "leftover_mart" not in names
     assert "parts_final" in names        # 現行のビューは残っている
+
+
+def test_db_shell_explains_how_to_recover_from_a_broken_db_file(tmp_path, synth_store):
+    """開けない永続DBは、トレースバックではなく復旧手順を出す。
+
+    このファイルはビューのカタログを持つだけのキャッシュ(中身は data_dir から
+    再生成できる)なので、正しい復旧は「消して再実行」。
+    """
+    db_path = tmp_path / "broken.duckdb"
+    db_path.write_bytes(b"not a duckdb file" * 100)
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(f"storage:\n  data_dir: {synth_store.as_posix()}\n"
+                   f"  database: {db_path.as_posix()}\n")
+
+    r = CliRunner().invoke(main, ["db", "shell"], env={"STDF_CONFIG": str(cfg)})
+    assert r.exit_code == 1
+    assert "再生成可能なキャッシュ" in r.output
+    assert str(db_path) in r.output
