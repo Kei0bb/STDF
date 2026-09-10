@@ -9,6 +9,10 @@ Pure Python パーサー × ThreadPoolExecutor による並列処理で、1000 �
 
 ## クイックスタート
 
+> **Python は 3.10〜3.13**（`.python-version` は 3.13）。3.14 は使えない — dbt-core 1.11 が
+> `mashumaro<3.15` を要求し、mashumaro が Python 3.14 に対応したのは 3.17 からのため。
+> `uv sync` が `.python-version` を見て適切な処理系を用意する。
+
 ```bash
 # 1. 依存インストール
 uv sync
@@ -19,11 +23,12 @@ cp config.yaml.example config.yaml
 # 3. データ取り込み
 stdf ingest-all ./var/downloads -p YOUR_PRODUCT
 
-# 4. dbt マート構築(歩留まりサマリ・Fail ランキング・Cpk 等を Parquet に実体化)
-stdf build
+# 4. 解析（VS Code）— 定番クエリは sql/ に名前付きで置いてある
+cp workspace/query.py.example workspace/query.py
+#    query.py を開いて  s.queries()  /  s.run("fail_ranking", lot="LOT001")
 
-# 5. クエリ / 解析
-stdf db query "SELECT * FROM lot_yield_summary ORDER BY start_time DESC LIMIT 10"
+# 5. アドホックな SQL
+stdf db query "SELECT * FROM lots ORDER BY start_time DESC LIMIT 10"
 
 # 6. マルチユーザー: 読み取り専用クエリサーバ(ブラウザ SQL コンソール、または各メンバーの VSCode+薄クライアント)
 stdf serve    # → docs/multi-user-server.md
@@ -54,7 +59,7 @@ DuckDB glob ビュー（クエリごとに fs スキャン、mounts.py）
      ↓                                                          │ mounts.py が自動マウント
      ↓◀─────────────────────────────────────────────────────────┘
      ├── stdf db query / lots / programs  (CLI)
-     ├── workspace/query.py  (VS Code インタラクティブ)
+     ├── workspace/query.py + sql/  (VS Code インタラクティブ / 名前付きクエリ)
      └── stdf serve (読み取り専用 HTTP API)
           ├── ブラウザ SQL コンソール（GET /、追加インストール不要）
           └── 各メンバーの PC → client/stdf_client.py (VS Code) / 将来: ダッシュボード
@@ -68,7 +73,8 @@ DuckDB glob ビュー（クエリごとに fs スキャン、mounts.py）
 
 ```
 src/stdf_platform/   コアライブラリ
-dbt/                 SQL の唯一の家（staging / marts / tests / analyses）
+sql/                 名前付きクエリライブラリ（1ファイル1クエリ / 日常の解析はここ）
+dbt/                 事前計算（マート）と不変条件テスト — 日常の解析には不要
 tests/               pytest
 docs/                スキーマ・サンプルクエリ・serve 運用
 scripts/             Windows タスクスケジューラ用 .ps1/.bat、診断スクリプト
@@ -122,13 +128,31 @@ var/                 ランタイム生成物（.gitignore で丸ごと除外）
 | `dbt/models/staging/` | `stg_parts_final` / `stg_test_data_final` / `stg_chipid_final` / `stg_lots` / `stg_wafer_yield` — 実行時ビューと同じセマンティクス（`tests/test_dbt_staging_parity.py` で機械検証） |
 | `dbt/models/marts/` | `lot_yield_summary` / `fail_ranking` / `cpk_stats` / `bin_pareto` / `bin_fail_tests` — 外部実体化で `data/marts/*.parquet` に書き出し。`schema.yml` にテスト定義 |
 | `dbt/macros/dedup_key.sql` | `_DEDUP_UNIT` 相当の重複排除キーマクロ |
-| `dbt/tests/assert_*.sql` | 旧 `stdf db verify-flags` の4不変条件。`stdf build` の `dbt test` で毎回検証 |
-| `dbt/analyses/` | 名前は付くが実体化しない SQL 階層。`stdf db query -f` はファイルを生 SQL として読むだけで Jinja を解決しないため、`{{ ref(...) }}` は使えない — マウント済みのビュー/マート名を直接書いたプレーンな SQL にする（`stdf db query -f dbt/analyses/<name>.sql` で実行） |
+| `dbt/tests/assert_*.sql` | 旧 `stdf db verify-flags` の4不変条件。`stdf build` の `dbt test` で検証（`--skip-tests` で省略可） |
+| `dbt/analyses/` | 空。名前付き SQL の置き場は `sql/`（下記）に移った |
+
+#### 名前付きクエリ層（`sql/`）
+
+1ファイル1クエリ。フォルダを開けばそれが一覧で、番号順に読めば一通り分かる。
+ビルドも dbt も不要で、`data/marts/` が無くても動く。
+
+| ディレクトリ | 内容 |
+|---|---|
+| `sql/01_lots/` | ロット一覧 / ロット別歩留まりサマリ |
+| `sql/02_wafer/` | ウェーハ別歩留まり |
+| `sql/03_test/` | テスト項目一覧 / Fail ランキング / Cp・Cpk |
+| `sql/04_bin/` | ビン分布 / ビン×Fail テスト |
+| `sql/05_export/` | ダイ×テスト明細（CSV 書き出し前提） |
+
+各ファイルは自己完結している — 冒頭の `SET VARIABLE lot = '...';` が既定値なので、
+エディタで開いてそのまま流しても動く。`AnalysisSession.run()` から呼ぶと引数が
+その既定値を上書きする。値はバインド変数として渡すので、SQL への文字列連結は不要。
+書き方と追加手順は `sql/README.md`。
 
 #### 個人解析層（`workspace/`）
 
 `README.md` と `query.py.example` のみ git 追跡。SQL の熟成ラダー（書き捨て →
-`dbt/analyses/` → `dbt/models/marts/`）は `workspace/README.md` を参照。
+`sql/` → 必要なら事前計算）は `workspace/README.md` を参照。
 
 #### マルチユーザー層
 
@@ -192,27 +216,27 @@ cp workspace/query.py.example workspace/query.py
 ```
 
 VS Code で `workspace/query.py` を開き、各セル (`# %%`) を Shift+Enter で実行（DuckDB）。
-クエリ集は `docs/sample_queries.md` を参照。定番の集計（歩留まりサマリ・Fail ランキング・
-Cpk・ビン分布）は dbt マートに済んでいるので、まずそこから引く:
+定番の集計は `sql/` に名前付きで置いてあるので、まずそこから引く（`stdf build` は不要）:
 
 ```python
-q("SELECT * FROM lot_yield_summary ORDER BY start_time DESC")   # ロット一覧（歩留まり付き）
-q("SELECT * FROM fail_ranking WHERE lot_id = ? ORDER BY fail_pct DESC", ["LOT001"])
-q("SELECT * FROM cpk_stats WHERE lot_id = ? ORDER BY cpk ASC LIMIT 20", ["LOT001"])
+s.queries()                                   # クエリ一覧（name / 説明）
+s.run("fail_ranking", lot="LOT001")           # → DataFrame
+s.run("cpk", lot="LOT001", test_name="Vth%")  # 追加パラメータ
+print(s.show("cpk"))                          # SQL 本文を見る（改造の出発点）
 
-# マートに無い集計は生ビュー（*_final）を直接叩く
+# CSV 書き出し（DuckDB COPY、メモリに載せない）。返り値は書き出した行数
+s.run("die_test_export", lot="LOT001", out="LOT001.csv")
+
+# 書き捨ての探索は生ビュー（*_final）を直接
 q("SELECT * FROM test_data_final WHERE lot_id = 'E6A773.00'")
-
-# ファイル出力（DuckDB COPY、メモリに載せない）
-to_csv("SELECT * FROM test_data_final WHERE lot_id = 'E6A773.00'")
 ```
 
-> 同じ SQL を2回使ったら `dbt/analyses/` へ昇格（マウント済みのビュー/マート名を直接書く
-> プレーンな SQL — `stdf db query -f` は Jinja を解決しないため `{{ ref(...) }}` は使えない）、
-> 定着したら `dbt/models/marts/` へモデル化して
-> `stdf build` で毎晩実体化する。詳細は `workspace/README.md` の熟成ラダーを参照。
-> 旧実装にあった `use_lot()` / `use_all()`（ロット単位 materialize）はマート化により
-> 不要になったため廃止された。
+同じロットへ繰り返しクエリするなら `use_lot("LOT001")` で `*_final` を
+メモリ上に materialize できる（`use_all()` で全ロットに復元）。
+
+> 同じ SQL を2回使ったら `sql/` の該当フォルダへ昇格させる（1行目を `-- 説明` に、
+> 絞り込みは `getvariable('lot')`）。詳細は `sql/README.md` と
+> `workspace/README.md` の熟成ラダーを参照。
 
 ### 分析 API（`stdf_platform.analysis`）
 
@@ -247,16 +271,27 @@ Shift+Enter で逐次実行可能。
 stdf db lots                                 # ロット一覧（TP 混在ロットは Job 列に ⚠×N）
 stdf db programs --lot LOT001                # wafer / retest ごとのテストプログラム履歴
 stdf db query "SELECT * FROM lot_yield_summary"  # SQL 直接実行（マート／生ビュー両方引ける）
-stdf db query -f dbt/analyses/some_query.sql     # ファイルから SQL を読む
+stdf db query -f path/to/query.sql               # ファイルから SQL を読む（単一 SELECT）
 stdf db query "SELECT * FROM wafers" -o out.csv  # 結果を CSV に書き出す
-stdf db shell                                # DuckDB シェル
+stdf db shell                                # DuckDB シェル（2回目以降はカタログ再利用で即起動 / --refresh で再登録）
 ```
 
-### dbt マート構築
+### dbt マート構築（任意）
+
+日常の解析には不要（`sql/` のクエリは生ビューを直接読む）。同じ集計を何度も引いて
+実測で遅いと分かったときの事前計算層。
 
 ```bash
-stdf build                    # dbt run + dbt test（+marts 選択）→ data/marts/ をアトミックに更新
+stdf build                              # dbt run + dbt test（+marts 選択）→ data/marts/ をアトミックに更新
+stdf build --skip-tests --threads 1     # 大きなストア向け
 ```
+
+`--skip-tests` は `dbt test` を省く。4本の不変条件テストは `test_data` 全体を走査し、
+うち3本は `retest_flag` フィルタ無し（全 retest 世代を読む）ため、大きなストアでは
+ビルド時間の大半を占める。これらは ingest 時に確定したフラグの検算なので、通常の
+マート更新では省き、ストアが変わったときに全体を回せばよい。`--threads` は
+`profiles.yml` の 4 を上書きする（DuckDB は単一クエリで全コアを使うので、
+大きなストアでは 1 のほうが速いことが多い）。
 
 構築されるマート: `lot_yield_summary`（ロット別歩留まりサマリ）/ `fail_ranking`
 （ロット×テスト別 Fail 率）/ `cpk_stats`（ロット×テスト別 Cp/Cpk）/ `bin_pareto`
