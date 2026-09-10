@@ -57,6 +57,9 @@ def zone_yield(s, product, lot_id, n_zones=3):
 
 
 def radial_profile(s, product, lot_id, test_num):
+    # 半径は test_data_final 自身の座標から直接計算する。以前は parts_final を
+    # part_id で結合していたが、部分リテストでは part_id が別ダイに振り直され
+    # 行が重複する（結合自体が不要）。
     return s.conn.execute(
         """
         WITH ext AS (
@@ -64,29 +67,24 @@ def radial_profile(s, product, lot_id, test_num):
                    (MIN(y_coord)+MAX(y_coord))/2.0 AS cy
             FROM parts_final WHERE lot_id = ?
         ),
-        coords AS (
-            SELECT part_id,
-                   sqrt(pow(x_coord-ext.cx,2)+pow(y_coord-ext.cy,2)) AS rad
-            FROM parts_final p, ext WHERE p.lot_id = ?
-        ),
-        rmax AS (SELECT MAX(rad) AS rm FROM coords),
         vals AS (
-            SELECT c.rad, t.result,
-                   CASE WHEN rmax.rm = 0 THEN 0
-                        ELSE c.rad / rmax.rm END AS rnorm
-            FROM test_data_final t
-            JOIN coords c ON t.part_id = c.part_id
-            CROSS JOIN rmax
+            SELECT t.result,
+                   sqrt(pow(t.x_coord-ext.cx,2)+pow(t.y_coord-ext.cy,2)) AS rad
+            FROM test_data_final t, ext
             WHERE t.lot_id = ? AND t.test_num = ?
               AND t.result IS NOT NULL AND t.rec_type IN ('PTR','MPR')
-        )
-        SELECT LEAST(9, CAST(floor(rnorm*10) AS INTEGER)) AS radius_bin,
-               COUNT(*)               AS n,
-               ROUND(AVG(result),6)   AS mean,
+        ),
+        rmax AS (SELECT MAX(rad) AS rm FROM vals)
+        SELECT LEAST(9, CAST(floor(
+                   CASE WHEN rmax.rm = 0 THEN 0 ELSE rad / rmax.rm END * 10
+               ) AS INTEGER)) AS radius_bin,
+               COUNT(*)                    AS n,
+               ROUND(AVG(result),6)        AS mean,
                ROUND(stddev_pop(result),6) AS std
-        FROM vals GROUP BY radius_bin ORDER BY radius_bin
+        FROM vals, rmax
+        GROUP BY radius_bin ORDER BY radius_bin
         """,
-        [lot_id, lot_id, lot_id, test_num],
+        [lot_id, lot_id, test_num],
     ).fetchdf()
 
 
