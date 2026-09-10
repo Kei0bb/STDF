@@ -76,3 +76,37 @@ def test_with_env_derives_from_data_dir():
 def test_with_env_none_returns_self():
     cfg = StorageConfig()
     assert cfg.with_env(None) is cfg
+
+
+def test_relative_data_dir_anchors_to_config_dir(tmp_path, monkeypatch):
+    """A relative data_dir must mean the same store from any cwd.
+
+    Before this, data_dir resolved against the process cwd, so one
+    config.yaml pointed at different directories depending on where the
+    interpreter started — the CLI (always run from the repo root) found the
+    store, while a VSCode Interactive Window with cwd=workspace/ resolved
+    ./var/data to workspace/var/data and silently came up with no views.
+    """
+    (tmp_path / "config.yaml").write_text(
+        "storage:\n"
+        "  data_dir: ./var/data\n"
+        "  database: ./var/data/stdf.duckdb\n"
+        "  download_dir: ./var/downloads\n",
+        encoding="utf-8",
+    )
+    elsewhere = tmp_path / "sub" / "dir"
+    elsewhere.mkdir(parents=True)
+    monkeypatch.chdir(elsewhere)          # cwd deliberately not the config's dir
+
+    cfg = Config.load(tmp_path / "config.yaml")
+    assert cfg.storage.data_dir == tmp_path.resolve() / "var" / "data"
+    assert cfg.storage.database == tmp_path.resolve() / "var" / "data" / "stdf.duckdb"
+    assert cfg.storage.download_dir == tmp_path.resolve() / "var" / "downloads"
+
+
+def test_absolute_data_dir_is_left_alone(tmp_path):
+    abs_store = (tmp_path / "elsewhere" / "store").resolve()
+    (tmp_path / "config.yaml").write_text(
+        f"storage:\n  data_dir: {abs_store.as_posix()}\n", encoding="utf-8")
+    cfg = Config.load(tmp_path / "config.yaml")
+    assert cfg.storage.data_dir == abs_store

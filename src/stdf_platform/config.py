@@ -43,6 +43,28 @@ class StorageConfig:
         if isinstance(self.download_dir, str):
             self.download_dir = Path(self.download_dir)
 
+    def resolve_against(self, base: Path) -> "StorageConfig":
+        """Return a copy with relative paths made absolute against `base`.
+
+        `base` is the directory holding the config.yaml these values came
+        from. Without this, a relative data_dir ("./var/data") resolves
+        against the *process cwd*, so the same config.yaml points at a
+        different store depending on where the interpreter was started:
+        the CLI (always run from the repo root) saw the real store, while a
+        VSCode Interactive Window whose cwd is workspace/ silently resolved
+        to workspace/var/data — a directory that does not exist. That failed
+        soundlessly, because setup_views() skips tables whose directory is
+        missing, so the session came up with zero views instead of an error.
+        Anchoring to the config file's own directory makes one config.yaml
+        mean one store, from any cwd.
+        """
+        return StorageConfig(
+            data_dir=self.data_dir if self.data_dir.is_absolute() else base / self.data_dir,
+            database=self.database if self.database.is_absolute() else base / self.database,
+            download_dir=(self.download_dir if self.download_dir.is_absolute()
+                          else base / self.download_dir),
+        )
+
     def with_env(self, env: str | None) -> "StorageConfig":
         """Return a new config with paths adjusted for the given environment.
 
@@ -192,7 +214,10 @@ class Config:
 
         return cls(
             ftp=FTPConfig(**ftp_data) if ftp_data else FTPConfig(),
-            storage=StorageConfig(**storage_data) if storage_data else StorageConfig(),
+            # Relative paths are anchored to the config file's directory, not
+            # the cwd — see StorageConfig.resolve_against.
+            storage=(StorageConfig(**storage_data) if storage_data
+                     else StorageConfig()).resolve_against(config_path.parent.resolve()),
             processing=ProcessingConfig(
                 **{k: v for k, v in processing_data.items() if k == "compression"}
             ) if processing_data else ProcessingConfig(),

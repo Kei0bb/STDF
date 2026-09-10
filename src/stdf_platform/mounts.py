@@ -38,6 +38,34 @@ _DEDUP_UNIT = (
 )
 
 
+def store_fingerprint(data_dir: Path,
+                      gross_die_map: dict[str, tuple[int, int]] | None = None) -> str:
+    """A cheap signature of everything setup_views() would register.
+
+    Registering the views is linear in the number of Parquet files: each
+    CREATE VIEW re-resolves its glob, and the derived views (*_final, lots,
+    wafer_yield_final) re-bind their base view's glob a second time, so a
+    session pays the walk roughly twice. That is fine for a one-shot command
+    but wasteful for `stdf db shell`, which persists its catalog in a real
+    database file and can simply reuse the views it registered last time.
+
+    The views are glob expressions, so data ingested after registration is
+    picked up with no re-registration — only a change in WHICH views should
+    exist matters. That is what this fingerprint captures: the set of core
+    table directories present, the set of mart files, and the gross-die map
+    (which changes the gross_die table and wafer_yield_final). It is a
+    handful of stat calls, not a tree walk.
+    """
+    parts = [t for t in ["runs", "wafers", "parts", "test_data", "chipid"]
+             if (data_dir / t).exists()]
+    marts_dir = data_dir / "marts"
+    if marts_dir.exists():
+        parts += ["mart:" + f.name for f in sorted(marts_dir.glob("*.parquet"))]
+    for prod, (gd, fb) in sorted((gross_die_map or {}).items()):
+        parts.append(f"gd:{prod}={gd}/{fb}")
+    return "|".join(parts)
+
+
 def setup_views(
     conn: duckdb.DuckDBPyConnection,
     data_dir: Path,
@@ -66,8 +94,25 @@ def setup_views(
             "re-ingest — there is no migration path."
         )
 
+    # Fail loudly on a data_dir that holds no store. Every table below is
+    # registered only `if path.exists()`, so a data_dir pointing at the wrong
+    # place (or at nothing) used to return an empty view list and let the
+    # session come up "successfully" — the first symptom was a Catalog Error
+    # on some view name, many steps removed from the actual mistake. The
+    # resolved path is in the message because that path is exactly what the
+    # caller got wrong.
+    _CORE = ["runs", "wafers", "parts", "test_data", "chipid"]
+    if not any((data_dir / t).exists() for t in [*_CORE, "marts"]):
+        raise RuntimeError(
+            f"No STDF store found at {data_dir.resolve()} — none of "
+            f"{'/'.join(_CORE)} exist there. Check config.yaml's "
+            f"storage.data_dir (relative paths resolve against the config "
+            f"file's directory), or pass an explicit data_dir. "
+            f"An empty store is expected only before the first ingest."
+        )
+
     registered: list[str] = []
-    for table in ["runs", "wafers", "parts", "test_data", "chipid"]:
+    for table in _CORE:
         path = data_dir / table
         if path.exists():
             # test_data and runs can mix pre-migration files with new ones

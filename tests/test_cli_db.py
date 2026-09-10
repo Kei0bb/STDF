@@ -130,3 +130,60 @@ def test_db_query_usage_error_neither_sql_nor_file(tmp_path, synth_store):
     r = CliRunner().invoke(main, ["db", "query"],
         env={"STDF_CONFIG": str(_write_config(tmp_path, synth_store))})
     assert r.exit_code != 0
+
+
+# ── db shell: 永続カタログの再利用 ────────────────────────────────────
+
+def test_db_shell_reuses_registered_views(tmp_path, synth_store, monkeypatch):
+    """2回目以降の `stdf db shell` はビューを再登録しない。
+
+    登録はストアの Parquet ファイル数に比例し、*_final / lots /
+    wafer_yield_final がベースビューの glob を再バインドするため実質2周ぶん
+    かかる。ビュー自体が glob なので、登録後に ingest したデータも再登録なし
+    で見える — 再登録が要るのは「あるべきビューの集合」が変わったときだけ。
+    """
+    launched = []
+    monkeypatch.setattr("subprocess.run", lambda *a, **k: launched.append(a))
+    env = {"STDF_CONFIG": str(_write_config(tmp_path, synth_store))}
+
+    r1 = CliRunner().invoke(main, ["db", "shell"], env=env)
+    assert r1.exit_code == 0, r1.output
+    assert "Registered" in r1.output
+
+    r2 = CliRunner().invoke(main, ["db", "shell"], env=env)
+    assert r2.exit_code == 0, r2.output
+    assert "Reusing" in r2.output
+    assert len(launched) == 2                      # どちらも duckdb CLI を起動している
+
+
+def test_db_shell_refresh_forces_reregistration(tmp_path, synth_store, monkeypatch):
+    monkeypatch.setattr("subprocess.run", lambda *a, **k: None)
+    env = {"STDF_CONFIG": str(_write_config(tmp_path, synth_store))}
+    CliRunner().invoke(main, ["db", "shell"], env=env)
+    r = CliRunner().invoke(main, ["db", "shell", "--refresh"], env=env)
+    assert r.exit_code == 0, r.output
+    assert "Registered" in r.output and "Reusing" not in r.output
+
+
+def test_db_shell_reregisters_when_a_mart_appears(tmp_path, synth_store, monkeypatch):
+    """新しいマートが増えたら、キャッシュを使わず登録し直す。"""
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+    monkeypatch.setattr("subprocess.run", lambda *a, **k: None)
+    env = {"STDF_CONFIG": str(_write_config(tmp_path, synth_store))}
+    CliRunner().invoke(main, ["db", "shell"], env=env)
+
+    marts = synth_store / "marts"
+    marts.mkdir(exist_ok=True)
+    pq.write_table(pa.table({"lot_id": ["L1"]}), marts / "brand_new_mart.parquet")
+
+    r = CliRunner().invoke(main, ["db", "shell"], env=env)
+    assert "Registered" in r.output, r.output
+    assert "brand_new_mart" in r.output
+
+
+def test_store_fingerprint_tracks_tables_marts_and_gross_die(tmp_path, synth_store):
+    from stdf_platform.mounts import store_fingerprint
+    base = store_fingerprint(synth_store, {})
+    assert base == store_fingerprint(synth_store, {})            # 安定
+    assert base != store_fingerprint(synth_store, {"P": (100, 200)})   # GD 変化を検出

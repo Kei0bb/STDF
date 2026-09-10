@@ -233,14 +233,21 @@ def serve(ctx, host: str | None, port: int | None):
 
 
 @main.command()
+@click.option("--skip-tests", is_flag=True,
+              help="dbt test をスキップ(不変条件の全ストア再検証を省く。大きなストアでは"
+                   "ここが build 時間の大半)")
+@click.option("--threads", type=int, default=None,
+              help="dbt の並列度(既定 4)。DuckDB は単一クエリで全コアを使うため、"
+                   "大きなストアでは 1 のほうが速いことが多い")
 @click.pass_context
-def build(ctx):
+def build(ctx, skip_tests, threads):
     """Run dbt models + tests and atomically refresh data/marts/."""
     from .build import run_build, BuildError
     config: Config = ctx.obj["config"]
     try:
-        run_build(config)
-        console.print("[green]OK[/green] marts refreshed.")
+        run_build(config, skip_tests=skip_tests, threads=threads)
+        console.print("[green]OK[/green] marts refreshed."
+                      + (" (tests skipped)" if skip_tests else ""))
     except BuildError as e:
         console.print(f"[red]Build failed:[/red]\n{e}")
         sys.exit(1)
@@ -356,7 +363,7 @@ def programs(ctx, lot: str | None):
 @db.command()
 @click.argument("sql", required=False)
 @click.option("--output", "-o", type=click.Path(path_type=Path), help="Write result to CSV instead of printing")
-@click.option("--file", "-f", "sql_file", type=click.Path(exists=True, path_type=Path), help="Read SQL from file (e.g. dbt/analyses/*.sql)")
+@click.option("--file", "-f", "sql_file", type=click.Path(exists=True, path_type=Path), help="Read SQL from file (single SELECT). 名前付きクエリは sql/ + AnalysisSession.run()")
 @click.pass_context
 def query(ctx, sql: str | None, output: Path | None, sql_file: Path | None):
     """Execute SQL (inline or from -f FILE) against the store."""
@@ -391,8 +398,10 @@ def query(ctx, sql: str | None, output: Path | None, sql_file: Path | None):
 
 
 @db.command()
+@click.option("--refresh", is_flag=True,
+              help="ビューを強制的に再登録する(通常は不要 — 変化が必要なときは自動検出される)")
 @click.pass_context
-def shell(ctx):
+def shell(ctx, refresh):
     """Open a DuckDB interactive shell with the canonical views persisted.
 
     Every other command uses a throwaway :memory: connection + setup_views();
@@ -400,22 +409,56 @@ def shell(ctx):
     refreshes that file by opening a real connection to it and running
     setup_views() against it (so the views persist in the file itself), then
     launches the `duckdb` CLI on it.
+
+    Registration is linear in the store's Parquet file count and is paid
+    roughly twice (the *_final / lots / wafer_yield_final views re-bind their
+    base view's glob), which is what made startup slow as the store grew.
+    Because the views ARE globs, they keep seeing newly ingested data with no
+    re-registration — so the catalog in the database file is reused as long as
+    the SET of views that should exist is unchanged (store_fingerprint:
+    which table directories and marts exist, plus the gross-die map). Pass
+    --refresh to rebuild the catalog by hand.
     """
     config: Config = ctx.obj["config"]
     db_path = config.storage.database
     db_path.parent.mkdir(parents=True, exist_ok=True)
 
+    import time
+
     import duckdb as duckdb_mod
 
-    from .mounts import setup_views
+    from .mounts import setup_views, store_fingerprint
 
+    fingerprint = store_fingerprint(config.storage.data_dir, config.gross_die_map)
     conn = duckdb_mod.connect(str(db_path))
-    try:
-        registered = setup_views(conn, config.storage.data_dir, config.gross_die_map)
-    except Exception as e:
-        conn.close()
-        console.print(f"[red]Error:[/red] {e}")
-        sys.exit(1)
+    registered: list[str] | None = None
+    if not refresh:
+        try:
+            row = conn.execute(
+                "SELECT fingerprint, registered FROM _stdf_mount_state"
+            ).fetchone()
+            if row and row[0] == fingerprint:
+                registered = row[1].split(",")
+        except duckdb_mod.Error:
+            pass  # 初回、または旧バージョンが作った DB — 下で登録する
+
+    if registered is None:
+        t0 = time.time()
+        try:
+            registered = setup_views(conn, config.storage.data_dir, config.gross_die_map)
+        except Exception as e:
+            conn.close()
+            console.print(f"[red]Error:[/red] {e}")
+            sys.exit(1)
+        conn.execute(
+            "CREATE OR REPLACE TABLE _stdf_mount_state AS "
+            "SELECT ? AS fingerprint, ? AS registered, now() AS registered_at",
+            [fingerprint, ",".join(registered)],
+        )
+        console.print(f"[dim]Registered {len(registered)} views in {time.time() - t0:.1f}s[/dim]")
+    else:
+        console.print(f"[dim]Reusing {len(registered)} views from {db_path.name} "
+                      f"(--refresh で再登録)[/dim]")
     conn.close()
 
     console.print(f"[bold]Database:[/bold] {db_path}")

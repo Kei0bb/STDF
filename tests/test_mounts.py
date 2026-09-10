@@ -73,9 +73,14 @@ def test_setup_views_registers_base_and_final(tmp_path):
     assert n == 2
 
 
-def test_setup_views_empty_dir_returns_empty(tmp_path):
+def test_setup_views_raises_on_empty_dir(tmp_path):
+    """Was: an empty data_dir returned []. That silence is exactly how a
+    mistyped/cwd-relative data_dir went unnoticed until a later Catalog
+    Error, so it now raises instead."""
+    import pytest
     conn = duckdb.connect(":memory:")
-    assert setup_views(conn, tmp_path) == []
+    with pytest.raises(RuntimeError, match="No STDF store found"):
+        setup_views(conn, tmp_path)
 
 
 def test_marts_are_mounted(tmp_path):
@@ -116,3 +121,19 @@ def test_mart_name_colliding_with_core_table_or_gross_die_is_skipped(tmp_path):
     assert registered.count("gross_die") == 0  # gross_die table is never
     # added to `registered` in the first place (see setup_views); the mart
     # of the same name must not add it either.
+
+
+def test_setup_views_error_names_the_resolved_path(tmp_path):
+    import pytest
+    conn = duckdb.connect(":memory:")
+    with pytest.raises(RuntimeError, match=str(tmp_path.resolve())):
+        setup_views(conn, tmp_path)
+
+
+def test_setup_views_still_works_with_only_one_table(tmp_path):
+    """The guard must not reject a partially-populated store (a CP-only
+    product has no chipid/, a fresh store may have only parts/)."""
+    _write_parts(tmp_path)
+    conn = duckdb.connect(":memory:")
+    registered = setup_views(conn, tmp_path)
+    assert "parts" in registered

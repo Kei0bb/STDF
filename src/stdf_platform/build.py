@@ -20,17 +20,32 @@ class BuildError(RuntimeError):
     pass
 
 
-def _dbt(cmd: list[str], env_extra: dict[str, str]) -> None:
+def _dbt(cmd: list[str], env_extra: dict[str, str], echo: bool = True) -> None:
+    """Run dbt, streaming its output as it arrives.
+
+    Output used to be swallowed by capture_output=True and shown only on
+    failure. On a real store a full-refresh build runs for a long time, so
+    that gave no way to tell a slow model from a hung one — and if the run
+    was interrupted, nothing had been printed at all. Lines are echoed live
+    AND kept, so BuildError still carries the full log.
+    """
     import os
     env = os.environ.copy()
     env.update(env_extra)
-    r = subprocess.run(
+    proc = subprocess.Popen(
         ["uv", "run", "dbt", *cmd,
          "--project-dir", str(DBT_DIR), "--profiles-dir", str(DBT_DIR)],
-        env=env, capture_output=True, text=True, cwd=REPO_ROOT,
+        env=env, cwd=REPO_ROOT, text=True,
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, bufsize=1,
     )
-    if r.returncode != 0:
-        raise BuildError(f"dbt {cmd[0]} failed:\n{r.stdout}\n{r.stderr}")
+    lines: list[str] = []
+    assert proc.stdout is not None
+    for line in proc.stdout:
+        lines.append(line)
+        if echo:
+            print(line, end="", flush=True)
+    if proc.wait() != 0:
+        raise BuildError(f"dbt {cmd[0]} failed:\n{''.join(lines)}")
 
 
 def _replace_dir_with_retry(src: Path, dst: Path, attempts: int = 5) -> None:
@@ -63,7 +78,24 @@ def _replace_dir_with_retry(src: Path, dst: Path, attempts: int = 5) -> None:
             time.sleep(0.5 * (i + 1))
 
 
-def run_build(config: Config) -> None:
+def run_build(config: Config, skip_tests: bool = False,
+              threads: int | None = None, echo: bool = True) -> None:
+    """Build the dbt marts and swap them into data/marts/.
+
+    skip_tests drops the `dbt test` phase. Those four invariant tests
+    (dbt/tests/assert_*.sql) each scan the whole test_data store — three of
+    them without the retest_flag filter, so they read every retest
+    generation — and group by the die-identity key. On a large store they
+    dominate the build. They re-verify flags that storage.py already
+    established at ingest time, so running them on every build is a choice,
+    not a requirement: skip them for a routine mart refresh and run a full
+    `stdf build` when the store has changed in ways worth re-validating.
+
+    threads overrides the dbt thread count (profiles.yml sets 4). DuckDB
+    already parallelizes within a single query, so concurrent models mostly
+    compete for memory and can push large aggregations into spilling to
+    disk; --threads 1 is often faster on a big store.
+    """
     data_dir = config.storage.data_dir.resolve()
     build_dir = data_dir / ".marts_build"
     if build_dir.exists():
@@ -97,9 +129,12 @@ def run_build(config: Config) -> None:
     # ancestor of the marts (via stg_test_data_final) — confirmed via
     # `dbt ls --select "+marts" --resource-type test`.
     sel = ["--select", "+marts"]
+    if threads is not None:
+        sel += ["--threads", str(threads)]
 
-    _dbt(["run", *sel, *vars_arg], env)
-    _dbt(["test", *sel, *vars_arg], env)
+    _dbt(["run", *sel, *vars_arg], env, echo=echo)
+    if not skip_tests:
+        _dbt(["test", *sel, *vars_arg], env, echo=echo)
 
     build_db.unlink(missing_ok=True)  # ビルドDBは出荷しない
     _replace_dir_with_retry(build_dir, data_dir / "marts")
