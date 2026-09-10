@@ -218,3 +218,34 @@ def test_query_timeout_returns_504(tmp_path):
     })
     assert resp.status_code == 504
     assert "timed out" in resp.json()["detail"]
+
+
+def test_nested_nan_is_serialized_as_null(tmp_path):
+    resp = _client(tmp_path).post(
+        "/api/query", json={"sql": "SELECT [double 'nan', 1.0] AS v"}
+    )
+    assert resp.status_code == 200
+    assert resp.json()["rows"] == [[[None, 1.0]]]
+
+
+def test_nested_blob_is_hex_encoded(tmp_path):
+    resp = _client(tmp_path).post(
+        "/api/query", json={"sql": r"SELECT {'b': '\xFF'::BLOB} AS v"}
+    )
+    assert resp.status_code == 200
+    assert resp.json()["rows"] == [[{"b": "ff"}]]
+
+
+def test_csv_formula_injection_is_neutralized(tmp_path):
+    resp = _client(tmp_path).post(
+        "/api/query", json={"sql": "SELECT '=1+1' AS v", "format": "csv"}
+    )
+    assert resp.status_code == 200
+    assert resp.text.strip().splitlines()[1] == "'=1+1"
+
+
+def test_invalid_format_rejected(tmp_path):
+    resp = _client(tmp_path).post(
+        "/api/query", json={"sql": "SELECT 1", "format": "xml"}
+    )
+    assert resp.status_code == 400

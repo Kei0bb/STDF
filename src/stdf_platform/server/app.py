@@ -85,14 +85,24 @@ def _check_select_only(sql: str) -> None:
 
 
 def _jsonable(value):
-    if isinstance(value, float) and (math.isnan(value) or math.isinf(value)):
-        return None
+    """JSON 化可能な値へ再帰的に正規化する。
+
+    DuckDB の LIST/STRUCT はネストした値をそのまま返す。トップレベルだけを
+    見るとネストした NaN が Starlette の allow_nan=False で 500、非 UTF8 の
+    ネスト BLOB が jsonable_encoder の decode で 500 になる（検証済み）。
+    """
+    if isinstance(value, float):
+        return None if (math.isnan(value) or math.isinf(value)) else value
     if isinstance(value, (datetime, date)):
         return value.isoformat()
     if isinstance(value, Decimal):
         return float(value)
     if isinstance(value, bytes):
         return value.hex()
+    if isinstance(value, dict):
+        return {k: _jsonable(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_jsonable(v) for v in value]
     return value
 
 
@@ -142,6 +152,9 @@ def schema(request: Request):
 def query(req: QueryRequest, request: Request):
     config = _resolve_config(request)
     _check_select_only(req.sql)
+    if req.format not in ("json", "csv"):
+        raise HTTPException(status_code=400,
+                            detail="format must be 'json' or 'csv'")
 
     cap = config.server.max_rows
     if req.limit is not None:
@@ -178,10 +191,16 @@ def query(req: QueryRequest, request: Request):
         import csv
         import io
 
+        def _csv_cell(v):
+            s = _jsonable(v)
+            if isinstance(s, str) and s[:1] in ("=", "+", "-", "@", "\t", "\r"):
+                return "'" + s   # 表計算ソフトの数式として解釈させない
+            return s
+
         buf = io.StringIO()
         writer = csv.writer(buf)
-        writer.writerow(columns)
-        writer.writerows(rows)
+        writer.writerow([_csv_cell(v) for v in columns])
+        writer.writerows([_csv_cell(v) for v in row] for row in rows)
         return Response(
             content=buf.getvalue(),
             media_type="text/csv",
