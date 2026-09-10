@@ -5,7 +5,7 @@
 メンバー側は VSCode + 薄クライアント、またはブラウザだけの2通りで接続できる。
 
 ```
-[共有マシン]  ingest/fetch(従来どおり)─▶ data/ (Parquet, marts 含む)
+[共有マシン]  ingest/fetch(従来どおり)─▶ data/ (Parquet)
               stdf serve  ─▶ http://<共有マシン>:8555
 [各PC]        ブラウザ(SQLコンソール、追加インストール不要)
               または VSCode + client/stdf_client.py(依存: requests, pandas のみ)
@@ -43,7 +43,7 @@
 ## メンバー側のセットアップ
 
 インストール不要のブラウザコンソールと、pandas 連携が欲しい人向けの VSCode 薄クライアント、
-2通りの入口がある。どちらも同じ `/api/query` を叩くので、見えるビュー・マートは同一。
+2通りの入口がある。どちらも同じ `/api/query` を叩くので、見えるビューは同一。
 
 ### ブラウザ SQL コンソール(追加インストール不要)
 
@@ -74,10 +74,10 @@
    to_csv("SELECT * FROM test_data_final WHERE lot_id = 'ABC123'", "abc123.csv")
    ```
 
-利用できるビュー・マートは共有マシン上の解析と完全に同一(`runs` / `lots` / `parts_final` /
-`test_data_final` / `wafer_yield_final` などの実行時ビューは `mounts.py` に一本化。加えて
-`stdf build` で作られた `lot_yield_summary` 等の dbt マートも `data/marts/*.parquet` から
-自動マウントされ、同じセッションから引ける)。クエリ例は docs/sample_queries.md を参照。
+利用できるビューは共有マシン上の解析と完全に同一(`runs` / `lots` / `parts_final` /
+`test_data_final` / `wafer_yield_final` などの実行時ビューは `mounts.py` に一本化)。
+定番の集計は `sql/` に名前付きで置いてある — クエリ例は docs/sample_queries.md と
+`sql/README.md` を参照。
 
 ## パワーユーザー向けの代替: 共有フォルダ直読み
 

@@ -3,14 +3,11 @@ name = "stdf2pq"
 version = "0.2.0"
 description = "stdf - STDF to Parquet converter and analysis DB"
 readme = "README.md"
-# 上限 <3.14 は dbt-core 1.11 系の制約から来る。1.11 は mashumaro[msgpack]<3.15
-# を要求するが、mashumaro が Python 3.14 (PEP 649 の遅延アノテーション) に
-# 対応したのは 3.17 から。よって py3.14 では dbt の import 時点で
-# UnserializableField で落ち、依存の調整では回避できない (1.12 に上げれば
-# mashumaro<3.18 で通るが、下の dbt-core ピンのコメント通り 1.12 は社内 TLS
-# 環境で入らない)。上限が無いと uv sync がその環境の最新 Python を掴み、
-# ingest は動くのに stdf build だけが後から壊れる。
-requires-python = ">=3.10,<3.14"
+# 上限 <3.14 は dbt-core 1.11 の mashumaro ピンが理由だった。dbt を外したので
+# 制約は消えたが、.python-version は 3.13 のまま固定しておく — 検証済みの
+# 処理系を全マシンで揃えるため。3.14 に上げたくなったら .python-version を
+# 変えて uv sync し、テストを通してから。
+requires-python = ">=3.10"
 dependencies = [
     "pyarrow>=14.0.0",
     "duckdb>=0.9.0",
@@ -21,12 +18,6 @@ dependencies = [
     "plotly>=5.20.0",
     "fastapi>=0.139.0",
     "uvicorn>=0.50.0",
-    # 1.12 は dbt-core-experimental-parser (sdist のみ、ビルド時に GitHub から
-    # wheel を取得する shim) を要求する。社内 TLS 傍受環境ではその取得が
-    # CERTIFICATE_VERIFY_FAILED で落ち、dbt を使わない stdf fetch まで道連れに
-    # なるため 1.11 系に固定する。1.11 系は全依存が wheel で入る。
-    "dbt-core>=1.8,<1.12",
-    "dbt-duckdb>=1.8",
 ]
 
 [project.scripts]

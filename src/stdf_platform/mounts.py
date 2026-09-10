@@ -38,6 +38,48 @@ _DEDUP_UNIT = (
 )
 
 
+# test_data の retest_flag 整合性キー。_DEDUP_UNIT(ダイ識別)に test_num/pin_num を
+# 足したもの — flag はこの粒度で付く(storage.py が ingest 時に確定させる)。
+_FLAG_KEY = (
+    "lot_id, wafer_id, x_coord, y_coord, "
+    "CASE WHEN x_coord = -32768 AND y_coord = -32768 THEN part_txt ELSE '' END, "
+    "test_num, pin_num"
+)
+
+# storage.py が ingest 時に確定させる retest_flag の不変条件。壊れていれば
+# test_data_final(= retest_flag = 0)が黙って誤った行集合を返すので、
+# 測定値そのものより先にここが疑わしい。`stdf db verify` が実行する。
+#
+# 元は `stdf db verify-flags`(7813cb3 で廃止)→ dbt/tests/assert_*.sql(dbt 撤去で
+# 再び CLI へ)。SQL は素の DuckDB なので、どの経路からでも同じものが走る。
+FLAG_INVARIANTS: list[tuple[str, str, str]] = [
+    (
+        "null_flags",
+        "retest_flag が NULL の行(フラグ導入前に ingest されたファイル)",
+        "SELECT lot_id, COUNT(*) AS n FROM test_data "
+        "WHERE retest_flag IS NULL GROUP BY lot_id",
+    ),
+    (
+        "dup_current",
+        "同じキーの flag=0 が複数の run に跨っている",
+        f"SELECT {_FLAG_KEY} FROM test_data WHERE retest_flag = 0 "
+        f"GROUP BY {_FLAG_KEY} HAVING COUNT(DISTINCT retest_num) > 1",
+    ),
+    (
+        "inconsistent_runs",
+        "同一 run 内で同じキーのフラグが割れている",
+        f"SELECT {_FLAG_KEY}, retest_num FROM test_data "
+        f"GROUP BY {_FLAG_KEY}, retest_num HAVING MIN(retest_flag) != MAX(retest_flag)",
+    ),
+    (
+        "orphaned_keys",
+        "最新 run が flag=0 になっていないキー",
+        f"SELECT {_FLAG_KEY} FROM test_data "
+        f"GROUP BY {_FLAG_KEY} HAVING MIN(retest_flag) != 0",
+    ),
+]
+
+
 def store_fingerprint(data_dir: Path,
                       gross_die_map: dict[str, tuple[int, int]] | None = None) -> str:
     """A cheap signature of everything setup_views() would register.
@@ -52,15 +94,12 @@ def store_fingerprint(data_dir: Path,
     The views are glob expressions, so data ingested after registration is
     picked up with no re-registration — only a change in WHICH views should
     exist matters. That is what this fingerprint captures: the set of core
-    table directories present, the set of mart files, and the gross-die map
-    (which changes the gross_die table and wafer_yield_final). It is a
-    handful of stat calls, not a tree walk.
+    table directories present, and the gross-die map (which changes the
+    gross_die table and wafer_yield_final). It is a handful of stat calls,
+    not a tree walk.
     """
     parts = [t for t in ["runs", "wafers", "parts", "test_data", "chipid"]
              if (data_dir / t).exists()]
-    marts_dir = data_dir / "marts"
-    if marts_dir.exists():
-        parts += ["mart:" + f.name for f in sorted(marts_dir.glob("*.parquet"))]
     for prod, (gd, fb) in sorted((gross_die_map or {}).items()):
         parts.append(f"gd:{prod}={gd}/{fb}")
     return "|".join(parts)
@@ -102,7 +141,7 @@ def setup_views(
     # resolved path is in the message because that path is exactly what the
     # caller got wrong.
     _CORE = ["runs", "wafers", "parts", "test_data", "chipid"]
-    if not any((data_dir / t).exists() for t in [*_CORE, "marts"]):
+    if not any((data_dir / t).exists() for t in _CORE):
         raise RuntimeError(
             f"No STDF store found at {data_dir.resolve()} — none of "
             f"{'/'.join(_CORE)} exist there. Check config.yaml's "
@@ -206,8 +245,8 @@ def setup_views(
         # per-key recency signal for them, so silently including them risks
         # mixing stale and current measurements. A store in this state must
         # be re-ingested (the user's own WIPE-and-re-ingest plan covers
-        # this); the dbt/tests/assert_*.sql singular tests (run by
-        # `stdf build`'s `dbt test`) detect and report it.
+        # this); `stdf db verify` (FLAG_INVARIANTS above) detects and
+        # reports it.
         conn.execute("""
             CREATE OR REPLACE VIEW test_data_final AS
             SELECT * FROM test_data WHERE retest_flag = 0
@@ -289,28 +328,5 @@ def setup_views(
         """)
         registered.append("wafer_yield_final")
 
-    # 分析マート(dbt が data/marts/ に external materialization した Parquet)
-    # をファイル名 = ビュー名でマウントする。定義の中身は dbt/models/marts/ が
-    # 唯一の持ち主 — ここは名前を貼るだけ。
-    marts_dir = data_dir / "marts"
-    if marts_dir.exists():
-        # "gross_die" is a TABLE (not a VIEW), created above regardless of
-        # whether any mart exists — CREATE OR REPLACE VIEW over it would
-        # raise duckdb.CatalogException (table vs view) and abort
-        # setup_views() entirely. A mart named after any already-registered
-        # canonical view (e.g. "parts", "lots") would otherwise silently
-        # CREATE OR REPLACE it, last-registration-wins, and mask the real
-        # table. Reserve both: the names already in `registered` plus
-        # "gross_die".
-        reserved = set(registered) | {"gross_die"}
-        for f in sorted(marts_dir.glob("*.parquet")):
-            name = f.stem
-            if not name.isidentifier() or name in reserved:
-                continue  # 想定外のファイル名・予約名は黙って飛ばさず登録もしない
-            conn.execute(
-                f"CREATE OR REPLACE VIEW {name} AS "
-                f"SELECT * FROM read_parquet('{f.as_posix()}')"
-            )
-            registered.append(name)
 
     return registered

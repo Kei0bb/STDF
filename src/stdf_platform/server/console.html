@@ -30,7 +30,7 @@
 </style>
 <div id="side"><h3>Tables</h3><div id="tables">loading…</div></div>
 <div id="main">
-  <textarea id="sql">SELECT * FROM lot_yield_summary ORDER BY start_time DESC LIMIT 100</textarea>
+  <textarea id="sql">SELECT * FROM lots ORDER BY start_time DESC LIMIT 100</textarea>
   <div>
     <button id="run">Run (Ctrl+Enter)</button>
     <button id="csv">Download CSV</button>
@@ -61,8 +61,8 @@ async function loadSchema() {
       tables.appendChild(div);
       continue;
     }
-    // Columns start collapsed: with ~20 views registered, always-open column
-    // lists push the marts far below the fold. The name still inserts SQL
+    // Columns start collapsed: with every view registered, always-open column
+    // lists push the later ones far below the fold. The name still inserts SQL
     // (the common action); the triangle is a separate target for the columns.
     const row = document.createElement("div");
     row.className = "table-row";

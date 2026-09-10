@@ -9,9 +9,8 @@ Pure Python パーサー × ThreadPoolExecutor による並列処理で、1000 �
 
 ## クイックスタート
 
-> **Python は 3.10〜3.13**（`.python-version` は 3.13）。3.14 は使えない — dbt-core 1.11 が
-> `mashumaro<3.15` を要求し、mashumaro が Python 3.14 に対応したのは 3.17 からのため。
-> `uv sync` が `.python-version` を見て適切な処理系を用意する。
+> **Python は `.python-version` の 3.13 に固定**（`uv sync` が自動で用意する）。
+> 全マシンで検証済みの処理系を揃えるための固定で、`requires-python` は 3.10 以上。
 
 ```bash
 # 1. 依存インストール
@@ -55,9 +54,6 @@ var/downloads/
      ↓
 DuckDB glob ビュー（クエリごとに fs スキャン、mounts.py）
      ↓
-     ↓ stdf build (dbt run + dbt test) ─▶ data/marts/*.parquet ─┐
-     ↓                                                          │ mounts.py が自動マウント
-     ↓◀─────────────────────────────────────────────────────────┘
      ├── stdf db query / lots / programs  (CLI)
      ├── workspace/query.py + sql/  (VS Code インタラクティブ / 名前付きクエリ)
      └── stdf serve (読み取り専用 HTTP API)
@@ -74,7 +70,6 @@ DuckDB glob ビュー（クエリごとに fs スキャン、mounts.py）
 ```
 src/stdf_platform/   コアライブラリ
 sql/                 名前付きクエリライブラリ（1ファイル1クエリ / 日常の解析はここ）
-dbt/                 事前計算（マート）と不変条件テスト — 日常の解析には不要
 tests/               pytest
 docs/                スキーマ・サンプルクエリ・serve 運用
 scripts/             Windows タスクスケジューラ用 .ps1/.bat、診断スクリプト
@@ -117,24 +112,13 @@ var/                 ランタイム生成物（.gitignore で丸ごと除外）
 | モジュール | 役割 |
 |---|---|
 | `storage.py` | Parquet Hive パーティション書き込み（5テーブル） |
-| `mounts.py`（旧 `views.py`） | `_DEDUP_UNIT` 定数と `setup_views(conn, data_dir, gross_die_map)` の単一ソース。コアビュー登録に加え、`data/marts/*.parquet`（dbt が構築）をファイル名でビューとして自動マウント（コアビュー / `gross_die` と名前が衝突するマートはスキップ） |
-| `build.py` | `stdf build` の実装 — `dbt run` → `dbt test`（両方とも `--select +marts` = マート＋その依存元 staging のみに限定。プロジェクト全体は対象外なので、`chipid/` ディレクトリが無いストア（CP 専用製品・新規 `--env dev` 等）でも `stg_chipid_final` のソース glob で落ちない）を実行し、`data/.marts_build/` へ出力後、`data/marts/` へアトミックに差し替え（失敗時は旧 marts へロールバック） |
+| `mounts.py`（旧 `views.py`） | `_DEDUP_UNIT` / `FLAG_INVARIANTS` / `store_fingerprint()` / `setup_views(conn, data_dir, gross_die_map)` の単一ソース。ビューは glob なので、登録後に ingest したデータも再登録なしで見える |
 | `config.py` | `config.yaml` 読み込み（FTP / Storage / Server 設定、`${ENV_VAR}` 展開対応） |
-
-#### 解析 SQL 層（`dbt/`）
-
-| ディレクトリ | 役割 |
-|---|---|
-| `dbt/models/staging/` | `stg_parts_final` / `stg_test_data_final` / `stg_chipid_final` / `stg_lots` / `stg_wafer_yield` — 実行時ビューと同じセマンティクス（`tests/test_dbt_staging_parity.py` で機械検証） |
-| `dbt/models/marts/` | `lot_yield_summary` / `fail_ranking` / `cpk_stats` / `bin_pareto` / `bin_fail_tests` — 外部実体化で `data/marts/*.parquet` に書き出し。`schema.yml` にテスト定義 |
-| `dbt/macros/dedup_key.sql` | `_DEDUP_UNIT` 相当の重複排除キーマクロ |
-| `dbt/tests/assert_*.sql` | 旧 `stdf db verify-flags` の4不変条件。`stdf build` の `dbt test` で検証（`--skip-tests` で省略可） |
-| `dbt/analyses/` | 空。名前付き SQL の置き場は `sql/`（下記）に移った |
 
 #### 名前付きクエリ層（`sql/`）
 
 1ファイル1クエリ。フォルダを開けばそれが一覧で、番号順に読めば一通り分かる。
-ビルドも dbt も不要で、`data/marts/` が無くても動く。
+ビルドも中間生成物も無く、生ビューを直接読む。
 
 | ディレクトリ | 内容 |
 |---|---|
@@ -216,7 +200,7 @@ cp workspace/query.py.example workspace/query.py
 ```
 
 VS Code で `workspace/query.py` を開き、各セル (`# %%`) を Shift+Enter で実行（DuckDB）。
-定番の集計は `sql/` に名前付きで置いてあるので、まずそこから引く（`stdf build` は不要）:
+定番の集計は `sql/` に名前付きで置いてあるので、まずそこから引く:
 
 ```python
 s.queries()                                   # クエリ一覧（name / 説明）
@@ -260,9 +244,8 @@ df = cp_ft_yield(s, product="SCT101A")
 df = zone_yield(s, product="SCT101A", lot_id="L001")
 ```
 
-すべての関数は `*_final` ビューを使用するため、歩留まり・Cpk の定義が dbt マート
-（`lot_yield_summary` / `cpk_stats` 等）や CLI（`stdf db lots` / `stdf db query`）と
-完全に一致します。`workspace/query.py` は `# %%` セル形式（VS Code / Jupytext）で、
+すべての関数は `*_final` ビューを使用するため、歩留まり・Cpk の定義が `sql/` の
+クエリや CLI（`stdf db lots` / `stdf db query`）と完全に一致します。`workspace/query.py` は `# %%` セル形式（VS Code / Jupytext）で、
 Shift+Enter で逐次実行可能。
 
 ### CLI クエリ
@@ -270,35 +253,24 @@ Shift+Enter で逐次実行可能。
 ```bash
 stdf db lots                                 # ロット一覧（TP 混在ロットは Job 列に ⚠×N）
 stdf db programs --lot LOT001                # wafer / retest ごとのテストプログラム履歴
-stdf db query "SELECT * FROM lot_yield_summary"  # SQL 直接実行（マート／生ビュー両方引ける）
+stdf db query "SELECT * FROM lots"               # SQL 直接実行
 stdf db query -f path/to/query.sql               # ファイルから SQL を読む（単一 SELECT）
 stdf db query "SELECT * FROM wafers" -o out.csv  # 結果を CSV に書き出す
 stdf db shell                                # DuckDB シェル（2回目以降はカタログ再利用で即起動 / --refresh で再登録）
 ```
 
-### dbt マート構築（任意）
-
-日常の解析には不要（`sql/` のクエリは生ビューを直接読む）。同じ集計を何度も引いて
-実測で遅いと分かったときの事前計算層。
+### 整合性チェック（`stdf db verify`）
 
 ```bash
-stdf build                              # dbt run + dbt test（+marts 選択）→ data/marts/ をアトミックに更新
-stdf build --skip-tests --threads 1     # 大きなストア向け
+stdf db verify        # test_data の retest_flag 不変条件を検証（ストア全体を走査）
 ```
 
-`--skip-tests` は `dbt test` を省く。4本の不変条件テストは `test_data` 全体を走査し、
-うち3本は `retest_flag` フィルタ無し（全 retest 世代を読む）ため、大きなストアでは
-ビルド時間の大半を占める。これらは ingest 時に確定したフラグの検算なので、通常の
-マート更新では省き、ストアが変わったときに全体を回せばよい。`--threads` は
-`profiles.yml` の 4 を上書きする（DuckDB は単一クエリで全コアを使うので、
-大きなストアでは 1 のほうが速いことが多い）。
-
-構築されるマート: `lot_yield_summary`（ロット別歩留まりサマリ）/ `fail_ranking`
-（ロット×テスト別 Fail 率）/ `cpk_stats`（ロット×テスト別 Cp/Cpk）/ `bin_pareto`
-（ロット別 bin 分布）/ `bin_fail_tests`（Fail ダイのビン×Failテスト紐付け）。
-`data/marts/*.parquet` は `mounts.py` が同名のビューとして自動マウントするので、
-`stdf db query` / `workspace/query.py` / `stdf serve` から即座に `SELECT * FROM <マート名>`
-で使える。
+`storage.py` が ingest 時に確定させる `retest_flag` が壊れていると、
+`test_data_final`（= `retest_flag = 0`）が黙って誤った行集合を返します。
+測定値を疑う前にここを見てください。4条件（NULL フラグ／`flag=0` の run 跨ぎ／
+同一 run 内のフラグ割れ／最新 run が `flag=0` でないキー）は
+`mounts.FLAG_INVARIANTS` が単一の定義を持ちます。ストア全体を走査するので、
+日常的にではなく大量 ingest のあとや結果が疑わしいときに回します。
 
 ### マルチユーザー解析（`stdf serve`）
 
@@ -320,7 +292,7 @@ stdf serve        # config.yaml の server: 節（host / port / max_rows）に�
 # メンバー側 B（VS Code セル、STDF_SERVER=http://<共有マシン>:8555 を設定）
 from stdf_client import q, to_csv, views
 
-views()                                                    # 使えるビュー・マート一覧
+views()                                                    # 使えるビュー一覧
 df = q("SELECT * FROM wafer_yield_final WHERE lot_id = 'ABC123'")
 to_csv("SELECT * FROM test_data_final WHERE lot_id = 'ABC123'", "abc123.csv")
 ```
@@ -408,7 +380,7 @@ var/data/          ← storage.data_dir（config.yaml で変更可）
 | `sub_process` | STDF MIR.TEST_COD / CLI `-s` |
 | `test_rev` | ファイル名（Rev04等） |
 | `retest_num` | 既存データから自動計算（0=初回, 1,2…=リテスト） |
-| `test_data.retest_flag` | ingest 時に自動算出（0=そのキーの最新 run）。`test_data_final` は `retest_flag = 0` の単純フィルタ（整合性は `stdf build` が実行する dbt テスト `dbt/tests/assert_*.sql` でチェック） |
+| `test_data.retest_flag` | ingest 時に自動算出（0=そのキーの最新 run）。`test_data_final` は `retest_flag = 0` の単純フィルタ（整合性は `stdf db verify` でチェック） |
 | `test_data.exec_seq` | ingest 時に自動算出（run 内 0 始まり出現順）。ループ計測（OTP ダンプ等）の各回を区別 |
 
 ---

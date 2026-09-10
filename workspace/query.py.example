@@ -5,6 +5,7 @@
 # - 定番クエリは `sql/` にファイルとして置いてある。`s.run("名前", lot=...)` で
 #   DataFrame、`out=` を付ければ CSV。中身は `sql/` を開けば読めるし、
 #   そのファイル単体でも実行できる(冒頭の SET VARIABLE が既定値)。
+#   ビルドは要らない — 生ビューを直接読む。
 # - ここは**書き捨て**の場所。使い回すクエリは `sql/` にファイルとして足すこと。
 
 # %% Setup
@@ -18,15 +19,8 @@ _session = s = AnalysisSession()   # s.run() / s.queries() / s.show() で sql/ �
 con = _session.conn
 DATA_DIR = _session.data_dir
 
-MARTS = ["lot_yield_summary", "fail_ranking", "cpk_stats", "bin_pareto", "bin_fail_tests"]
-HAS_MARTS = all(m in _session.registered for m in MARTS)
-
 print(f"data_dir: {DATA_DIR}")
 print("views:", ", ".join(_session.registered))
-if not HAS_MARTS:
-    print("\n! マート未構築 — マートのセルは動きません。`stdf build` で作られます。")
-    print("  (大きなストアでは `stdf build --skip-tests --threads 1` が速い)")
-    print("  生テーブルのセルは今のままで動きます。")
 
 
 def q(sql: str, params: list | None = None):
@@ -64,8 +58,8 @@ print(s.show("cpk"))
 s.run("cpk", lot=LOT_ID, test_name="Vth%")
 
 # %% [markdown]
-# ## 生テーブル(マート不要)
-# `*_final` は retest 解決済みのビュー。歩留まり / Cpk の定義はマートと同一。
+# ## 生ビューを直接叩く(書き捨ての探索)
+# `*_final` は retest 解決済み。sql/ のクエリもこれと同じビューを読む。
 
 # %% ロット一覧
 q("SELECT * FROM lots ORDER BY start_time DESC")
@@ -74,7 +68,7 @@ q("SELECT * FROM lots ORDER BY start_time DESC")
 LOT_ID = "LOT001"
 q("SELECT * FROM wafer_yield_final WHERE lot_id = ? ORDER BY wafer_id", [LOT_ID])
 
-# %% Fail テスト上位(マート fail_ranking と同じ定義をその場で)
+# %% Fail テスト上位(sql/03_test/fail_ranking と同じ定義をその場で)
 q("""
     SELECT test_num, test_name,
            COUNT(*) AS total,
@@ -87,21 +81,6 @@ q("""
 
 # %% テストプログラムの変化(TP 混在ロットの中身)
 q("SELECT * FROM runs WHERE lot_id = ? ORDER BY start_time", [LOT_ID])
-
-# %% [markdown]
-# ## マート(`stdf build` 済みのときだけ)
-
-# %% ロット一覧(歩留まり付き)
-q("SELECT * FROM lot_yield_summary ORDER BY start_time DESC")
-
-# %% Fail ランキング
-q("SELECT * FROM fail_ranking WHERE lot_id = ? ORDER BY fail_pct DESC", [LOT_ID])
-
-# %% Cpk ワースト
-q("SELECT * FROM cpk_stats WHERE lot_id = ? ORDER BY cpk ASC LIMIT 20", [LOT_ID])
-
-# %% ビン分布
-q("SELECT * FROM bin_pareto WHERE lot_id = ? ORDER BY count DESC", [LOT_ID])
 
 # %% [markdown]
 # ## ロット限定 materialize

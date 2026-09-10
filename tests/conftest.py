@@ -4,7 +4,7 @@
 `ParquetStorage` (storage.py) write path — not hand-rolled Parquet files —
 so its schemas (runs/parts/test_data) are guaranteed to match production,
 including derived columns like `retest_flag`/`exec_seq` and `runs.retest_num`
-that storage.py itself computes. Introduced for tests/test_dbt_staging_parity.py
+that storage.py itself computes.
 (Task 3); reusable by later mart tests (Task 4).
 """
 
@@ -83,9 +83,9 @@ def synth_store(tmp_path) -> Path:
       - test_num=50 (FAIL_TEST) and test_num=100 (CPK_TEST): measured only in
         run0, never re-measured in run1, so both dies' rows keep
         retest_flag=0 from run0 regardless of the run1 retest on test_num=1
-        -> isolated, hand-computable fail_ranking / cpk_stats cases.
+        -> isolated, hand-computable fail-rate / Cpk cases.
       - FT lot (FTLOT1, wafer_id='', x=y=-32768, part_txt=package barcode):
-        lot_yield_summary's wafer_count=0 (FT has no wafer) while total/good
+        lot-yield's wafer_count=0 (FT has no wafer) while total/good
         are still probed-based (2 packages, 1 pass) -> yield 50.0.
     """
     cfg = StorageConfig(data_dir=tmp_path, database=tmp_path / "db.duckdb")
@@ -120,7 +120,7 @@ def synth_store(tmp_path) -> Path:
              "test_num": 50, "head_num": 1, "site_num": 1, "result": 1.0, "passed": True},
             # test_num=100 (CPK_TEST, lo=0 hi=10): results [4.0, 6.0] ->
             # mean=5.0, sample stddev=sqrt(2), cp=10/(6*sqrt(2)),
-            # cpk=min(5,5)/(3*sqrt(2)) (cpk_stats hand-computed case).
+            # cpk=min(5,5)/(3*sqrt(2)) (hand-computed Cpk case).
             {"lot_id": "LOT1", "wafer_id": "W1", "part_id": "LOT1_W1_0",
              "test_num": 100, "head_num": 1, "site_num": 1, "result": 4.0, "passed": True},
             {"lot_id": "LOT1", "wafer_id": "W1", "part_id": "LOT1_W1_1",
@@ -158,7 +158,7 @@ def synth_store(tmp_path) -> Path:
 
     # FT lot: no WIR -> wafer_id='', x=y=-32768, part_txt is the package
     # barcode key. 2 packages, 1 pass / 1 fail, single run (no retest) ->
-    # lot_yield_summary's wafer_count=0 (FT has no wafer identity to count)
+    # lot-yield's wafer_count=0 (FT has no wafer identity to count)
     # while total_parts=2/good_parts=1/yield_pct=50.0 stay probed-based.
     ft_run = _ft_run(
         "FTLOT1", "FT_JOB", "RevA", 5000, 6000,
@@ -176,12 +176,11 @@ def synth_store(tmp_path) -> Path:
     # storage.py only writes the chipid table for FT files with decoded
     # EN-SO-CHIPID_R data (see storage.py's `if data.chip_ids and
     # test_category == "FT"`), which the FT run above never triggers (it
-    # carries no chip_ids). dbt's stg_chipid_final source glob errors out on
+    # carries no chip_ids). A missing chipid/ directory makes any glob over
     # zero matching files (unlike setup_views(), which just skips
     # registering the view when the table dir is absent), so write one
-    # minimal chipid row directly to keep `dbt run --select staging`
-    # buildable. Reuses FTLOT1/FTLOT1_0/PKG0001 to line up with the FT
-    # parts row above.
+    # minimal chipid row directly so the fixture exercises chipid_final.
+    # Reuses FTLOT1/FTLOT1_0/PKG0001 to line up with the FT parts row above.
     chipid_path = (
         tmp_path / "chipid" / "product=PROD" / "test_category=FT"
         / "lot_id=FTLOT1" / "wafer_id=" / "retest=0" / "data.parquet"
@@ -227,12 +226,9 @@ def _write_null_flag_row(data_dir: Path) -> None:
 @pytest.fixture
 def corrupt_store(synth_store) -> Path:
     """`synth_store` plus one test_data row with retest_flag IS NULL (a
-    pre-flag file — see storage.py / views.py's `test_data_final` docstring).
-    Must fail `dbt test` (assert_no_null_retest_flag) / `run_build`.
+    pre-flag file — see storage.py / mounts.py's `test_data_final` docstring).
 
-    Hoisted from tests/test_dbt_invariant_tests.py (Task 4's inline
-    `_write_null_flag_row(synth_store)` pattern) so tests/test_build.py
-    (Task 5) can share it.
+    Must fail the `null_flags` invariant, i.e. `stdf db verify` exits 1.
     """
     _write_null_flag_row(synth_store)
     return synth_store

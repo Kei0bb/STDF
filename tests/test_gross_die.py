@@ -230,45 +230,21 @@ def test_gross_die_qc_fail_bin_bucket(tmp_path, monkeypatch):
     """Unprobed dies appear in the bin distribution under gd_fail_bin, making
     the bin total equal the gross die.
 
-    Builds the dbt marts for real (run_build) and queries the shipped
-    bin_pareto mart itself, rather than re-deriving its SQL inline here — a
-    prior version of this test asserted on SQL copy-pasted into the test
-    body, which drifted from dbt/models/marts/bin_pareto.sql and left its
-    gd_fail_bin UNION branch with no coverage anywhere.
+    Runs the shipped sql/04_bin/bin_pareto.sql itself rather than re-deriving
+    its SQL inline — a prior version asserted on SQL copy-pasted into the test
+    body, which drifted from the real query and left its gd_fail_bin UNION
+    branch with no coverage anywhere. (This used to build the dbt mart of the
+    same name; dbt is gone, the query lives in sql/ now.)
     """
-    from stdf_platform.build import run_build
     from stdf_platform.config import ProductConfig
 
     storage = _storage(tmp_path)
     data = _cp_data("LOT1", "W1", 7)  # 7 probed (bin 1), GD 10 → 3 QC
-    # run_build's "+marts" dbt selection builds the whole marts family
-    # (including fail_ranking/cpk_stats, which this test doesn't otherwise
-    # care about), and those need at least one test_data row to exist —
-    # unlike _cp_data's default (data.tests={}, empty everywhere else in
-    # this file, which only ever exercises query-time gross-die logic
-    # directly over setup_views(), never a real dbt build). Add one trivial
-    # PTR result per die so storage.py actually writes a test_data/ dir.
-    data.tests = {1: {"test_name": "VCC", "rec_type": "PTR",
-                       "lo_limit": 0.9, "hi_limit": 1.1, "units": "V"}}
-    data.test_results = [
-        {"lot_id": "LOT1", "wafer_id": "W1", "part_id": p["part_id"],
-         "test_num": 1, "head_num": 1, "site_num": 1, "result": 1.0, "passed": True}
-        for p in data.parts
-    ]
     _save(storage, data)
 
-    cfg = Config(
-        storage=StorageConfig(data_dir=tmp_path, database=tmp_path / "db.duckdb"),
-        products={"P": ProductConfig(gross_die=10, gd_fail_bin=200)},
-    )
-    run_build(cfg)
-
     with _gd_session(tmp_path, monkeypatch, {"P": (10, 200)}) as s:
-        df = s.q(
-            "SELECT soft_bin, count FROM bin_pareto WHERE lot_id = ? ORDER BY soft_bin",
-            ["LOT1"],
-        )
-    bins = dict(zip(df["soft_bin"], df["count"]))
+        df = s.run("bin_pareto", lot="LOT1")
+    bins = dict(zip(df["soft_bin"], df["die_count"]))
     assert bins[1] == 7
     assert bins[200] == 3
     assert sum(bins.values()) == 10

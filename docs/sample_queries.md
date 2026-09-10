@@ -4,28 +4,25 @@
 `chipid`）を DuckDB ビュー経由で検索する際のリファレンスです。
 
 > [!TIP]
-> **まず dbt マートを見てください。** 定番の集計（ロット別歩留まり、Fail ランキング、
-> Cp/Cpk、bin パレート、bin×Fail テストの紐付け）は `stdf build` で
-> `data/marts/*.parquet` に実体化済みで、`mounts.py` が同名ビューとして自動マウント
-> します。以下の生ビュー向けクエリの多くは、対応するマートへの単純な `SELECT` に
-> 置き換えられます:
+> **まず `sql/` を見てください。** 定番の集計（ロット別歩留まり、Fail ランキング、
+> Cp/Cpk、bin パレート、bin×Fail テストの紐付け）は名前付きクエリとして
+> `sql/` に置いてあり、`s.run("fail_ranking", lot="...")` で引けます。
+> 以下の生ビュー向けクエリの多くは、それらの単純な呼び出しに置き換えられます:
 >
-> | マート | 相当する生ビュークエリ |
+> | `sql/` のクエリ | 相当する本ドキュメントの節 |
 > |---|---|
-> | `lot_yield_summary` | 本ドキュメントの 2-3（ロット歩留りサマリ） |
-> | `fail_ranking` | 5-3（テスト項目ごとの Fail 率ワーストランキング） |
-> | `cpk_stats` | 8-1（ロット単位の Cp / Cpk） |
-> | `bin_pareto` | 4-3（ソフトビン・パレート） |
-> | `bin_fail_tests` | 7-3（Fail ビンとテスト項目の紐付け、簡易版） |
+> | `01_lots/lot_yield` | 2-3（ロット歩留りサマリ） |
+> | `03_test/fail_ranking` | 5-3（テスト項目ごとの Fail 率ワーストランキング） |
+> | `03_test/cpk` | 8-1（ロット単位の Cp / Cpk） |
+> | `04_bin/bin_pareto` | 4-3（ソフトビン・パレート） |
+> | `04_bin/bin_fail_tests` | 7-3（Fail ビンとテスト項目の紐付け、簡易版） |
 >
-> `SELECT * FROM lot_yield_summary WHERE lot_id = 'YOUR_LOT_ID'` のように使えます。
-> マートに無い切り口（ゾーン分析、外れ値検出、TP混在検出、Cpk スペック検討 等）は
-> 引き続き以下の生ビュークエリを使ってください。2回使った SQL は `sql/` へ、
-> 定着したら `dbt/models/marts/` へモデル化するのが推奨ワークフローです
-> （`workspace/README.md` の熟成ラダーを参照）。
+> `sql/` に無い切り口（ゾーン分析、外れ値検出、TP混在検出、Cpk スペック検討 等）は
+> 引き続き以下の生ビュークエリを使ってください。2回使った SQL は `sql/` へ昇格
+> させるのが推奨ワークフローです（`sql/README.md` と `workspace/README.md`）。
 
 > [!IMPORTANT]
-> **マートに無い解析は原則 `*_final` ビューを使ってください。**
+> **`sql/` に無い解析は原則 `*_final` ビューを使ってください。**
 > 生テーブル（`parts` / `test_data`）はリテストの**全試行**を含むため、そのまま
 > 集計すると二重計上になります。`parts_final` / `test_data_final` /
 > `chipid_final` は「ダイ/パッケージごとに最新リテストのみ」へ重複排除済みです。
@@ -66,10 +63,10 @@ LOT_ID = "E6A773.00"
 > かかっていました）。
 >
 > **`parts_final` / `chipid_final` は引き続き `ROW_NUMBER()` ウィンドウ**です
-> （小テーブルなのでコストは無視できる範囲）。旧実装にあった、同じロットへの
-> 繰り返しクエリ向けの `use_lot()` / `use_all()`（materialize / 復元）は、定番の
-> 集計がマートに実体化されたことで不要になり廃止されました。同じ生ビュークエリを
-> 繰り返し使うなら `sql/` への昇格を検討してください（`sql/README.md`）。
+> （小テーブルなのでコストは無視できる範囲）。同じロットへ繰り返しクエリするなら
+> `use_lot()` / `use_all()`（`workspace/query.py` のセル）で `*_final` を
+> メモリ上に materialize できます。同じ生ビュークエリを繰り返し使うなら
+> `sql/` への昇格を検討してください（`sql/README.md`）。
 
 ### CLI から直接実行
 
@@ -84,7 +81,7 @@ stdf db query "SELECT lot_id, product FROM lots ORDER BY start_time DESC LIMIT 1
 ### Python スクリプトから（`*_final` ビューの定義込み）
 
 `stdf db` / `workspace/query.py` / `AnalysisSession` は `mounts.py` の
-`setup_views(conn, data_dir, gross_die_map)` を呼んで `*_final` ビューと dbt マートを
+`setup_views(conn, data_dir, gross_die_map)` を呼んで `*_final` ビューを
 自動登録します。素の DuckDB から使う場合はそれを直接呼ぶのが最も確実です
 （`lots` は `data/lots/` という Parquet ではなく `runs` から集約した VIEW なので、
 下記のように手で再現するより本体の関数を使うほうが定義のズレが起きません）:
@@ -147,8 +144,7 @@ con.execute(f"""
 # test_data_final is NOT a window: dedup happens at ingest time (storage.py
 # writes retest_flag per row), so this is a plain predicate filter — cheap,
 # and pushed into the Parquet scan. Rows with retest_flag IS NULL (pre-flag
-# files) are excluded; that store needs a re-ingest (checked by the dbt tests
-# `stdf build` runs, dbt/tests/assert_no_null_retest_flag.sql).
+# files) are excluded; that store needs a re-ingest (checked by `stdf db verify`).
 con.execute("""
     CREATE OR REPLACE VIEW test_data_final AS
     SELECT * FROM test_data WHERE retest_flag = 0
@@ -2954,5 +2950,4 @@ ORDER BY origin_lot, origin_wafer, origin_y, origin_x;
   （`parts_final` / `chipid_final` は従来どおり `ROW_NUMBER()` ウィンドウ）、
   (die, test, pin) につき複数行が残り得ます（ループ計測）。区別には `exec_seq`
   を使ってください。`retest_flag IS NULL` の行（旧スキーマ）は
-  `test_data_final` から除外されます — 要再取り込み（`stdf build` が実行する dbt テスト
-  `dbt/tests/assert_no_null_retest_flag.sql` で検出可）。
+  `test_data_final` から除外されます — 要再取り込み（`stdf db verify` で検出可）。

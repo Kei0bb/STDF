@@ -7,7 +7,7 @@ __pycache__/
 
 Query/
 # Single runtime root: data/, data-*/, downloads/, logs/, test_data/,
-# tool caches and marts build scratch all live under var/.
+# tool caches all live under var/.
 var/
 
 # Same directories at the project root, for checkouts that predate the var/
@@ -37,7 +37,4 @@ docs/superpowers/
 workspace/*
 !workspace/README.md
 !workspace/query.py.example
-dbt/target/
-dbt/logs/
-dbt/.user.yml
 *.duckdb

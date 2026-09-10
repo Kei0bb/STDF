@@ -111,8 +111,8 @@ def test_db_query_honors_gross_die_via_dash_c(tmp_path, synth_store):
     gross_die table. Regression test: AnalysisSession used to silently
     re-resolve its own Config.load() instead of the CLI's already-resolved
     ctx.obj["config"], so a -c config's gross_die_map never reached the
-    session — CLI/serve computed GD-less yields while `stdf build` built the
-    marts WITH gross die.
+    session — CLI/serve then computed GD-less yields, silently disagreeing
+    with any other caller that passed the config properly.
     """
     cfg_path = tmp_path / "gd_config.yaml"
     cfg_path.write_text(
@@ -165,24 +165,27 @@ def test_db_shell_refresh_forces_reregistration(tmp_path, synth_store, monkeypat
     assert "Registered" in r.output and "Reusing" not in r.output
 
 
-def test_db_shell_reregisters_when_a_mart_appears(tmp_path, synth_store, monkeypatch):
-    """新しいマートが増えたら、キャッシュを使わず登録し直す。"""
-    import pyarrow as pa
-    import pyarrow.parquet as pq
+def test_db_shell_reregisters_when_gross_die_changes(tmp_path, synth_store, monkeypatch):
+    """あるべきビューの中身が変わったら、キャッシュを使わず登録し直す。
+
+    gross_die は `gross_die` テーブルと `wafer_yield_final` の定義を変えるので、
+    fingerprint に含まれる。
+    """
     monkeypatch.setattr("subprocess.run", lambda *a, **k: None)
-    env = {"STDF_CONFIG": str(_write_config(tmp_path, synth_store))}
-    CliRunner().invoke(main, ["db", "shell"], env=env)
+    plain = _write_config(tmp_path, synth_store)
+    CliRunner().invoke(main, ["db", "shell"], env={"STDF_CONFIG": str(plain)})
 
-    marts = synth_store / "marts"
-    marts.mkdir(exist_ok=True)
-    pq.write_table(pa.table({"lot_id": ["L1"]}), marts / "brand_new_mart.parquet")
+    gd = tmp_path / "gd.yaml"
+    gd.write_text(
+        f"storage:\n  data_dir: {synth_store.as_posix()}\n"
+        f"  database: {(synth_store / 'stdf.duckdb').as_posix()}\n"
+        "products:\n  PROD:\n    gross_die: 500\n    gd_fail_bin: 200\n"
+    )
+    r = CliRunner().invoke(main, ["db", "shell"], env={"STDF_CONFIG": str(gd)})
+    assert "Registered" in r.output, r.output        # 再利用ではなく登録し直す
 
-    r = CliRunner().invoke(main, ["db", "shell"], env=env)
-    assert "Registered" in r.output, r.output
-    assert "brand_new_mart" in r.output
 
-
-def test_store_fingerprint_tracks_tables_marts_and_gross_die(tmp_path, synth_store):
+def test_store_fingerprint_tracks_tables_and_gross_die(tmp_path, synth_store):
     from stdf_platform.mounts import store_fingerprint
     base = store_fingerprint(synth_store, {})
     assert base == store_fingerprint(synth_store, {})            # 安定

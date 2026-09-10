@@ -232,27 +232,6 @@ def serve(ctx, host: str | None, port: int | None):
     uvicorn.run(create_app(config), host=host, port=port)
 
 
-@main.command()
-@click.option("--skip-tests", is_flag=True,
-              help="dbt test をスキップ(不変条件の全ストア再検証を省く。大きなストアでは"
-                   "ここが build 時間の大半)")
-@click.option("--threads", type=int, default=None,
-              help="dbt の並列度(既定 4)。DuckDB は単一クエリで全コアを使うため、"
-                   "大きなストアでは 1 のほうが速いことが多い")
-@click.pass_context
-def build(ctx, skip_tests, threads):
-    """Run dbt models + tests and atomically refresh data/marts/."""
-    from .build import run_build, BuildError
-    config: Config = ctx.obj["config"]
-    try:
-        run_build(config, skip_tests=skip_tests, threads=threads)
-        console.print("[green]OK[/green] marts refreshed."
-                      + (" (tests skipped)" if skip_tests else ""))
-    except BuildError as e:
-        console.print(f"[red]Build failed:[/red]\n{e}")
-        sys.exit(1)
-
-
 # ── db group ──────────────────────────────────────────────────────
 
 @main.group()
@@ -416,8 +395,8 @@ def shell(ctx, refresh):
     Because the views ARE globs, they keep seeing newly ingested data with no
     re-registration — so the catalog in the database file is reused as long as
     the SET of views that should exist is unchanged (store_fingerprint:
-    which table directories and marts exist, plus the gross-die map). Pass
-    --refresh to rebuild the catalog by hand.
+    which table directories exist, plus the gross-die map). Pass --refresh
+    to rebuild the catalog by hand.
     """
     config: Config = ctx.obj["config"]
     db_path = config.storage.database
@@ -468,6 +447,37 @@ def shell(ctx, refresh):
 
     import subprocess
     subprocess.run(["duckdb", str(db_path)])
+
+
+@db.command()
+@click.pass_context
+def verify(ctx):
+    """test_data の retest_flag 不変条件を検証する。
+
+    storage.py が ingest 時に確定させるフラグが壊れていると、test_data_final
+    (= retest_flag = 0)が黙って誤った行集合を返す — 測定値を疑う前にここを
+    見る。ストア全体を走査するので、日常的にではなく大量 ingest のあとや
+    結果が疑わしいときに回す。
+    """
+    from .mounts import FLAG_INVARIANTS
+
+    config: Config = ctx.obj["config"]
+    failures = 0
+    with AnalysisSession(config.storage.data_dir, config=config) as s:
+        for name, description, sql in FLAG_INVARIANTS:
+            df = s.q(sql)
+            if df.empty:
+                console.print(f"[green]OK[/green]   {name}")
+            else:
+                failures += 1
+                console.print(f"[red]NG[/red]   {name} — {description}")
+                console.print(f"       違反 {len(df):,} 件（先頭 5 件）")
+                console.print(df.head(5).to_string(index=False))
+    if failures:
+        console.print(f"\n[red]{failures} 件の不変条件が破れています。"
+                      "該当ロットを再 ingest してください。[/red]")
+        sys.exit(1)
+    console.print("\n[green]すべての不変条件を満たしています。[/green]")
 
 
 def _run_ingest_batch(

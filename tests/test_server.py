@@ -132,8 +132,8 @@ def test_console_asset_ships_in_wheel():
 def test_console_sidebar_columns_start_collapsed(tmp_path):
     """Column lists are hidden until their disclosure toggle is clicked.
 
-    With ~20 views registered, always-open column lists pushed the marts far
-    below the fold. `.table-cols` is display:none until `.open` is added, and
+    With every view registered, always-open column lists pushed the later
+    ones far below the fold. `.table-cols` is display:none until `.open` is added, and
     the toggle carries aria-expanded so it is operable without a mouse.
     """
     html = _client(tmp_path).get("/").text

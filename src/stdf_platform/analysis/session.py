@@ -25,10 +25,9 @@ class AnalysisSession:
         # the CLI's ctx.obj["config"], built from -c/--env) and is used as-is
         # — none of the Config.load()/fallback resolution below runs. This is
         # what lets a store's gross_die_map reach this session's `gross_die`
-        # table consistently with whatever built the dbt marts (build.py also
-        # takes a Config), instead of this session silently re-resolving its
-        # own Config.load() and picking up a different (often empty)
-        # gross_die_map than the caller intended.
+        # table as the caller intended, instead of this session silently
+        # re-resolving its own Config.load() and picking up a different
+        # (often empty) gross_die_map.
         if config is None:
             config = Config.load()
             # workspace/ (VSCode Jupytext cell scripts, sql/ query runs,
