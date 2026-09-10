@@ -36,6 +36,7 @@ include = ["src/stdf_platform"]
 [dependency-groups]
 dev = [
     "httpx>=0.28.1",
+    "ipykernel>=7.3.0",
     "pytest>=8.0.0",
 ]
 
