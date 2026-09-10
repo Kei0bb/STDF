@@ -19,7 +19,8 @@ from ..mounts import setup_views
 
 
 class AnalysisSession:
-    def __init__(self, data_dir: Path | None = None, config: Config | None = None) -> None:
+    def __init__(self, data_dir: Path | None = None, config: Config | None = None,
+                 sql_dir: Path | None = None) -> None:
         # `config`, when given, is the caller's already-resolved Config (e.g.
         # the CLI's ctx.obj["config"], built from -c/--env) and is used as-is
         # — none of the Config.load()/fallback resolution below runs. This is
@@ -30,8 +31,8 @@ class AnalysisSession:
         # gross_die_map than the caller intended.
         if config is None:
             config = Config.load()
-            # workspace/ (VSCode Jupytext cell scripts, dbt/analyses/ SQL
-            # runs, etc.) is not the repo root, so a bare Config.load() above
+            # workspace/ (VSCode Jupytext cell scripts, sql/ query runs,
+            # etc.) is not the repo root, so a bare Config.load() above
             # resolves against the wrong cwd and silently defaults to
             # ./var/data. Fall back to the repo-root config.yaml only when the
             # caller passed no data_dir, AND no STDF_CONFIG env var is set
@@ -51,10 +52,37 @@ class AnalysisSession:
         self.data_dir = Path(data_dir)
         self.conn = duckdb.connect(":memory:")
         self.registered = setup_views(self.conn, self.data_dir, config.gross_die_map)
+        # sql/ クエリライブラリの場所(run/queries/show が読む)。既定はリポジトリ同梱。
+        self.sql_dir = sql_dir
 
     def q(self, sql: str, params: list | None = None) -> pd.DataFrame:
         """Run raw SQL (bound params) and return a DataFrame. Escape hatch."""
         return self.conn.execute(sql, params or []).fetchdf()
+
+    # ── sql/ クエリライブラリ ──────────────────────────────────────
+
+    def run(self, name: str, out: Path | str | None = None, **params):
+        """sql/ の名前付きクエリを実行して DataFrame を返す。
+
+        out を渡すと DuckDB が直接 CSV に書き(COPY TO)、書き出した行数を
+        返す — Python 側にデータが載らないので大きなエクスポート向け。
+        params はファイル冒頭の SET VARIABLE 既定値を上書きする。
+
+            s.run("fail_ranking", lot="LOT002")
+            s.run("die_test_export", lot="LOT002", out="lot002.csv")
+        """
+        from .library import run_query
+        return run_query(self.conn, name, out=out, sql_dir=self.sql_dir, **params)
+
+    def queries(self) -> pd.DataFrame:
+        """sql/ にあるクエリの一覧(name / description)。"""
+        from .library import list_queries
+        return list_queries(self.sql_dir)
+
+    def show(self, name: str) -> str:
+        """クエリの SQL 本文を返す(改造の出発点に)。"""
+        from .library import find_query
+        return find_query(name, self.sql_dir).read_text(encoding="utf-8")
 
     def lots(self, product: str | None = None,
              test_category: str | None = None) -> pd.DataFrame:

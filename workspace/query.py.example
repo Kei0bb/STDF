@@ -1,18 +1,38 @@
 # %% [markdown]
 # # stdf — 分析ワークスペース
-# `cp query.py.example query.py` して使う。Shift+Enter でセル実行。
+# `cp workspace/query.py.example workspace/query.py` して使う。Shift+Enter でセル実行。
 #
-# 定番分析は dbt マートに済んでいる — まず `SELECT * FROM <マート名>`:
-#   lot_yield_summary / fail_ranking / cpk_stats / bin_pareto / bin_fail_tests
-# 生テーブル(*_final)も同じセッションから引ける。
-# **2回使った SQL は dbt/analyses/ に昇格させること(workspace/README.md)。**
+# - 定番クエリは `sql/` にファイルとして置いてある。`s.run("名前", lot=...)` で
+#   DataFrame、`out=` を付ければ CSV。中身は `sql/` を開けば読めるし、
+#   そのファイル単体でも実行できる(冒頭の SET VARIABLE が既定値)。
+# - ここは**書き捨て**の場所。使い回すクエリは `sql/` にファイルとして足すこと。
 
 # %% Setup
 from stdf_platform.analysis import AnalysisSession
+from stdf_platform.mounts import _DEDUP_UNIT   # use_lot() が使う
 
-_session = AnalysisSession()          # config.yaml の data_dir を解決
+# 引数なし = config.yaml の storage.data_dir を解決(相対パスは config.yaml の
+# 置き場所基準。cwd がどこでも同じストアを指す)。別ストアを見るときだけ
+# AnalysisSession("/path/to/data") のように明示する。
+_session = s = AnalysisSession()   # s.run() / s.queries() / s.show() で sql/ を使う
 con = _session.conn
-q = _session.q                        # q("SELECT ...") → DataFrame
+DATA_DIR = _session.data_dir
+
+MARTS = ["lot_yield_summary", "fail_ranking", "cpk_stats", "bin_pareto", "bin_fail_tests"]
+HAS_MARTS = all(m in _session.registered for m in MARTS)
+
+print(f"data_dir: {DATA_DIR}")
+print("views:", ", ".join(_session.registered))
+if not HAS_MARTS:
+    print("\n! マート未構築 — マートのセルは動きません。`stdf build` で作られます。")
+    print("  (大きなストアでは `stdf build --skip-tests --threads 1` が速い)")
+    print("  生テーブルのセルは今のままで動きます。")
+
+
+def q(sql: str, params: list | None = None):
+    """SQL を実行して DataFrame を返す。"""
+    return con.execute(sql, params or []).fetchdf()
+
 
 def to_csv(sql: str, output="output.csv"):
     n = con.execute(
@@ -20,13 +40,61 @@ def to_csv(sql: str, output="output.csv"):
     ).fetchone()[0]
     print(f"Exported {n:,} rows → {output}")
 
-print("views:", ", ".join(_session.registered))
+
+LOT_ID: str | None = None   # use_lot() が設定。各セルでも上書き可。
+
+# %% [markdown]
+# ## 定番クエリ(sql/)
+# ファイル1個 = クエリ1個。`sql/` を開けば一覧になっている。
+
+# %% どんなクエリがあるか
+s.queries()
+
+# %% 実行 → DataFrame
+LOT_ID = "LOT001"
+s.run("fail_ranking", lot=LOT_ID)
+
+# %% CSV に書き出す(DuckDB が直接書くので Python メモリを使わない)
+# s.run("die_test_export", lot=LOT_ID, out=f"{LOT_ID}_die_test.csv")
+
+# %% SQL を見る / 改造の出発点にする
+print(s.show("cpk"))
+
+# %% 追加パラメータのあるクエリ
+s.run("cpk", lot=LOT_ID, test_name="Vth%")
+
+# %% [markdown]
+# ## 生テーブル(マート不要)
+# `*_final` は retest 解決済みのビュー。歩留まり / Cpk の定義はマートと同一。
+
+# %% ロット一覧
+q("SELECT * FROM lots ORDER BY start_time DESC")
+
+# %% ウェーハ歩留まり(gross die 適用済み)
+LOT_ID = "LOT001"
+q("SELECT * FROM wafer_yield_final WHERE lot_id = ? ORDER BY wafer_id", [LOT_ID])
+
+# %% Fail テスト上位(マート fail_ranking と同じ定義をその場で)
+q("""
+    SELECT test_num, test_name,
+           COUNT(*) AS total,
+           SUM(CASE WHEN passed = 'F' THEN 1 ELSE 0 END) AS fails,
+           ROUND(100.0 * SUM(CASE WHEN passed = 'F' THEN 1 ELSE 0 END) / COUNT(*), 2) AS fail_pct
+    FROM test_data_final WHERE lot_id = ?
+    GROUP BY test_num, test_name
+    HAVING fails > 0 ORDER BY fail_pct DESC LIMIT 20
+""", [LOT_ID])
+
+# %% テストプログラムの変化(TP 混在ロットの中身)
+q("SELECT * FROM runs WHERE lot_id = ? ORDER BY start_time", [LOT_ID])
+
+# %% [markdown]
+# ## マート(`stdf build` 済みのときだけ)
 
 # %% ロット一覧(歩留まり付き)
 q("SELECT * FROM lot_yield_summary ORDER BY start_time DESC")
 
 # %% Fail ランキング
-LOT_ID = "LOT001"
 q("SELECT * FROM fail_ranking WHERE lot_id = ? ORDER BY fail_pct DESC", [LOT_ID])
 
 # %% Cpk ワースト
@@ -34,6 +102,61 @@ q("SELECT * FROM cpk_stats WHERE lot_id = ? ORDER BY cpk ASC LIMIT 20", [LOT_ID]
 
 # %% ビン分布
 q("SELECT * FROM bin_pareto WHERE lot_id = ? ORDER BY count DESC", [LOT_ID])
+
+# %% [markdown]
+# ## ロット限定 materialize
+# 同じロットに繰り返しクエリするなら、`*_final` をメモリ上の小さな表に固めると
+# 毎回の Parquet 再スキャン(特にネットワーク共有では重い)が消える。
+
+# %% use_lot / use_all
+_FINAL_SPECS = {
+    "parts_final": ("parts", f"""
+        SELECT * EXCLUDE (rn) FROM (
+            SELECT *, ROW_NUMBER() OVER (
+                PARTITION BY lot_id, {_DEDUP_UNIT} ORDER BY retest_num DESC) AS rn
+            FROM parts {{where}}
+        ) WHERE rn = 1"""),
+    "test_data_final": ("test_data", """
+        SELECT * FROM (SELECT * FROM test_data WHERE retest_flag = 0) {where}"""),
+    "chipid_final": ("chipid", """
+        SELECT * EXCLUDE (rn) FROM (
+            SELECT *, ROW_NUMBER() OVER (
+                PARTITION BY lot_id, efuse_raw ORDER BY retest_num DESC) AS rn
+            FROM chipid {where}
+        ) WHERE rn = 1"""),
+}
+
+
+def use_lot(lot: str) -> None:
+    """対象ロットの *_final を temp テーブルに materialize し、ビューを差し替える。"""
+    global LOT_ID
+    LOT_ID = lot
+    done = []
+    for name, (base, sel) in _FINAL_SPECS.items():
+        if not (DATA_DIR / base).exists():
+            continue
+        cache = f"_lot_{name}"
+        con.execute(
+            f"CREATE OR REPLACE TEMP TABLE {cache} AS {sel.format(where='WHERE lot_id = ?')}",
+            [lot],
+        )
+        con.execute(f"CREATE OR REPLACE VIEW {name} AS SELECT * FROM {cache}")
+        n = con.execute(f"SELECT COUNT(*) FROM {cache}").fetchone()[0]
+        done.append(f"{name}={n:,}")
+    print(f"use_lot({lot!r}): " + ", ".join(done) + "  (use_all() で全ロットに復元)")
+
+
+def use_all() -> None:
+    """*_final を全ロット対象のビュー(mounts.py と同一定義)に戻す。"""
+    global LOT_ID
+    LOT_ID = None
+    for name, (base, sel) in _FINAL_SPECS.items():
+        if (DATA_DIR / base).exists():
+            con.execute(f"CREATE OR REPLACE VIEW {name} AS {sel.format(where='')}")
+    print("use_all(): 全ロットの *_final ビューを復元しました。")
+
+
+# use_lot("LOT001")
 
 # %% 自由探索(書き捨てはここから下に)
 q("SELECT 1 AS hello")
