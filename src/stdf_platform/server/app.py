@@ -54,16 +54,14 @@ def _open_locked_session(config: Config) -> AnalysisSession:
     filesystem allowlist is applied and the configuration is locked so user
     SQL cannot undo it.
     """
-    session = AnalysisSession(config.storage.data_dir, config=config)
-    conn = session.conn
     # Resource caps must be set before lock_configuration; the DuckDB defaults
     # (80% of RAM, all threads) let one request's operators consume the host.
     # DuckDB has no statement_timeout, so a runaway query is cancelled by
-    # Connection.interrupt() from the timer in query() below.
-    limit = config.server.memory_limit
-    if not re.fullmatch(r"\d+(\.\d+)?\s*(KB|MB|GB|TB|%)?", limit, re.IGNORECASE):
-        session.close()
-        raise RuntimeError(f"invalid server.memory_limit: {limit!r}")
+    # Connection.interrupt() from the timer in query() below. Validate the
+    # limit before opening the session so a bad config cannot leak a connection.
+    limit = validate_memory_limit(config.server.memory_limit)
+    session = AnalysisSession(config.storage.data_dir, config=config)
+    conn = session.conn
     conn.execute(f"SET memory_limit = '{limit}'")
     conn.execute(f"SET threads = {int(config.server.threads)}")
     conn.execute(
@@ -72,6 +70,26 @@ def _open_locked_session(config: Config) -> AnalysisSession:
     conn.execute("SET enable_external_access = false")
     conn.execute("SET lock_configuration = true")
     return session
+
+
+_MEMORY_LIMIT_RE = re.compile(r"\d+(\.\d+)?\s*(KB|MB|GB|TB|%)?", re.IGNORECASE)
+
+
+def validate_memory_limit(value) -> str:
+    """`server.memory_limit` を検証して DuckDB に渡す文字列を返す。
+
+    YAML は `memory_limit: 2` を int にするので、まず str 化してから検査する
+    (以前は re.fullmatch が TypeError を投げ、リクエストごとに 500 になった)。
+    `stdf serve` の起動時にも呼ぶ — 設定ミスは起動時に落ちるべきで、
+    毎リクエスト 500 を返して気付かせるものではない。
+    """
+    text = str(value).strip()
+    if not _MEMORY_LIMIT_RE.fullmatch(text):
+        raise ValueError(
+            f"invalid server.memory_limit: {value!r} "
+            "(例: '2GB', '512MB', '80%')"
+        )
+    return text
 
 
 def _check_select_only(sql: str) -> None:
@@ -164,10 +182,23 @@ def query(req: QueryRequest, request: Request):
     timeout = config.server.query_timeout_seconds
     session = _open_locked_session(config)
     timer = None
+    # Timer.cancel() cannot stop a callback that has already started, so a
+    # query finishing within milliseconds of the timeout could interrupt() a
+    # connection we are closing. The lock makes "mark finished" and "interrupt"
+    # mutually exclusive: once `finished` is set under it, no interrupt can
+    # still be pending, and close() below is safe.
+    state_lock = threading.Lock()
+    finished = False
+
+    def _interrupt_if_running():
+        with state_lock:
+            if not finished:
+                session.conn.interrupt()
+
     try:
         try:
             if timeout and timeout > 0:
-                timer = threading.Timer(timeout, session.conn.interrupt)
+                timer = threading.Timer(timeout, _interrupt_if_running)
                 timer.daemon = True
                 timer.start()
             cursor = session.conn.execute(req.sql)
@@ -186,15 +217,21 @@ def query(req: QueryRequest, request: Request):
     finally:
         if timer is not None:
             timer.cancel()
+        with state_lock:
+            finished = True
         session.close()
 
     if req.format == "csv":
         import csv
         import io
 
+        # 数式インジェクション対策は '=' '@' タブ CR のみ。'+' '-' は
+        # 測定データ側の正当な値(VARCHAR に入った負数、'-' で始まる
+        # test_name)と衝突し、黙って値を書き換える害の方が、fab 由来の
+        # STDF に数式が混入する確率より大きい。
         def _csv_cell(v):
             s = _jsonable(v)
-            if isinstance(s, str) and s[:1] in ("=", "+", "-", "@", "\t", "\r"):
+            if isinstance(s, str) and s[:1] in ("=", "@", "\t", "\r"):
                 return "'" + s   # 表計算ソフトの数式として解釈させない
             return s
 

@@ -5,6 +5,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import pytest
 from fastapi.testclient import TestClient
 
 from stdf_platform.config import Config, ServerConfig, StorageConfig
@@ -249,3 +250,27 @@ def test_invalid_format_rejected(tmp_path):
         "/api/query", json={"sql": "SELECT 1", "format": "xml"}
     )
     assert resp.status_code == 400
+
+
+def test_memory_limit_validation_accepts_yaml_number():
+    """YAML が memory_limit: 2 を int にしても TypeError で 500 にしない。"""
+    from stdf_platform.server.app import validate_memory_limit
+
+    assert validate_memory_limit(2) == "2"
+    assert validate_memory_limit("512MB") == "512MB"
+    assert validate_memory_limit(" 80% ") == "80%"
+    with pytest.raises(ValueError):
+        validate_memory_limit("2 gigabytes")
+
+
+def test_csv_export_does_not_mangle_negative_strings(tmp_path):
+    """数式インジェクション対策で '-' 始まりの正当な値を壊さない。"""
+    r = _client(tmp_path).post("/api/query", json={
+        "sql": "SELECT '-3.5' AS neg, '=1+1' AS formula, '-TEST_A' AS name",
+        "format": "csv",
+    })
+    assert r.status_code == 200
+    body = r.text.splitlines()[1]
+    assert "-3.5" in body and "'-3.5" not in body
+    assert "-TEST_A" in body and "'-TEST_A" not in body
+    assert "'=1+1" in body

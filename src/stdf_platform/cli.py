@@ -223,8 +223,18 @@ def serve(ctx, host: str | None, port: int | None):
     import uvicorn
 
     from .server import create_app
+    from .server.app import validate_memory_limit
 
     config: Config = ctx.obj["config"]
+    # 設定ミスは起動時に落とす(以前は毎リクエスト 500 になっていた)。
+    try:
+        validate_memory_limit(config.server.memory_limit)
+    except ValueError as e:
+        console.print(f"[red]Config error:[/red] {e}")
+        sys.exit(1)
+    if int(config.server.threads) < 1:
+        console.print("[red]Config error:[/red] server.threads は 1 以上")
+        sys.exit(1)
     host = host or config.server.host
     port = port or config.server.port
     console.print(f"[bold]stdf query server[/bold] → http://{host}:{port}")
