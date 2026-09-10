@@ -351,6 +351,16 @@ class ParquetStorage:
             if "retest_flag" not in existing_schema.names:
                 continue  # store not yet migrated; skip per docstring
 
+            # The old file may predate part_serial; build the same identity
+            # expression the new run used (part_txt → part_serial → part_id),
+            # referencing only the columns that file actually has.
+            ft_parts = ["NULLIF(old.part_txt, '')"]
+            if "part_serial" in existing_schema.names:
+                ft_parts.append("NULLIF(old.part_serial, '')")
+            if "part_id" in existing_schema.names:
+                ft_parts.append("old.part_id")
+            old_ft = f"COALESCE({', '.join(ft_parts)})"
+
             con = duckdb.connect()
             try:
                 con.register("new_keys", new_keys_table)
@@ -371,7 +381,7 @@ class ParquetStorage:
                      AND old.x_coord = nk.x_coord
                      AND old.y_coord = nk.y_coord
                      AND (CASE WHEN old.x_coord = -32768 AND old.y_coord = -32768
-                               THEN old.part_txt ELSE '' END) = nk.ft_txt
+                               THEN {old_ft} ELSE '' END) = nk.ft_txt
                      AND old.test_num = nk.test_num
                      AND old.pin_num IS NOT DISTINCT FROM nk.pin_num
                     ORDER BY old.file_row_number
@@ -379,7 +389,12 @@ class ParquetStorage:
             finally:
                 con.close()
 
-            updated = updated.cast(TEST_DATA_SCHEMA)
+            # A file lacking part_serial (pre-migration) must still be written
+            # back in the current schema; append NULL and reorder.
+            if "part_serial" not in updated.column_names:
+                updated = updated.append_column(
+                    "part_serial", pa.nulls(updated.num_rows, pa.string()))
+            updated = updated.select(TEST_DATA_SCHEMA.names).cast(TEST_DATA_SCHEMA)
             self._write_parquet(updated, old_path)
 
     def save_stdf_data(
@@ -595,7 +610,11 @@ class ParquetStorage:
                     x_coord, y_coord = part_coords.get(part_id, (-32768, -32768))
                     part_txt = part_txt_map.get(part_id, "")
                     part_serial = part_serial_map.get(part_id, "")
-                    ft_txt = part_txt if x_coord == -32768 and y_coord == -32768 else ""
+                    # Same identity as mounts.ft_identity(): barcode → PRR PART_ID
+                    # → synthetic part_id. Without the fallback an empty barcode
+                    # makes every FT package share one flag key.
+                    ft_txt = ((part_txt or part_serial or part_id)
+                              if x_coord == -32768 and y_coord == -32768 else "")
                     pin_num = r.get("pin_num")
                     flag_key = (wafer_id, x_coord, y_coord, ft_txt, test_num, pin_num)
                     exec_seq = seq_counters.get(flag_key, 0)
