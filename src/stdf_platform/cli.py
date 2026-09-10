@@ -556,17 +556,25 @@ def _run_ingest_batch(
     from .worker import run_ingest_pool
     from .atomic import atomic_write_json
 
-    successes, failures = run_ingest_pool(
-        files=to_ingest,
-        data_dir=config.storage.data_dir,
-        compression=config.processing.compression,
-        max_workers=max_workers,
-        timeout=timeout,
-        # save=False: the callback runs once per file; rewriting the whole
-        # sync_history.json per file is O(N^2). One save after the pool.
-        on_success=lambda r: sync_manager.mark_ingested(r.remote_path, save=False),
-    )
-    sync_manager.save()
+    # save=False: the callback runs once per file; rewriting the whole
+    # sync_history.json per file is O(N^2). The single flush is in a finally
+    # because it MUST also run on abort — run_ingest_pool re-raises through
+    # future.result() and Ctrl+C raises KeyboardInterrupt. Without it an
+    # aborted run leaves every already-ingested file marked ingested=False, so
+    # the next fetch re-ingests it and auto-increments retest_num into a bogus
+    # retest={n} partition (run_ingest_pool's on_success docstring promises
+    # exactly this durability).
+    try:
+        successes, failures = run_ingest_pool(
+            files=to_ingest,
+            data_dir=config.storage.data_dir,
+            compression=config.processing.compression,
+            max_workers=max_workers,
+            timeout=timeout,
+            on_success=lambda r: sync_manager.mark_ingested(r.remote_path, save=False),
+        )
+    finally:
+        sync_manager.save()
 
     # Structured failure record for automation (always written, even if empty).
     atomic_write_json(
@@ -631,59 +639,66 @@ def _download_files(
     if not files:
         return downloaded, corrupt, failed
 
-    with Progress(
-        SpinnerColumn(),
-        TextColumn("[progress.description]{task.description}"),
-        BarColumn(),
-        TextColumn("{task.completed}/{task.total}"),
-        console=console,
-    ) as progress:
-        dl_task = progress.add_task("Downloading...", total=len(files))
+    # The per-file mark_downloaded() calls below defer their JSON write
+    # (save=False) and are flushed once at the end. That flush is in a
+    # finally because a Ctrl+C mid-batch must still leave the already-
+    # downloaded files recorded — otherwise the next run re-downloads them
+    # and get_pending_ingest() never sees them.
+    try:
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
+            TextColumn("{task.completed}/{task.total}"),
+            console=console,
+        ) as progress:
+            dl_task = progress.add_task("Downloading...", total=len(files))
 
-        for remote_path, prod, ttype, filename in files:
-            # Create subdirectory structure: downloads/product/test_type/
-            local_dir = config.storage.download_dir / prod / ttype
-            try:
-                local_file = client.download_file(remote_path, local_dir, decompress=True)
-            except CorruptDownloadError as e:
-                quarantined = _quarantine(e.compressed_path, config)
-                sync_manager.mark_corrupt(
+            for remote_path, prod, ttype, filename in files:
+                # Create subdirectory structure: downloads/product/test_type/
+                local_dir = config.storage.download_dir / prod / ttype
+                try:
+                    local_file = client.download_file(remote_path, local_dir, decompress=True)
+                except CorruptDownloadError as e:
+                    quarantined = _quarantine(e.compressed_path, config)
+                    sync_manager.mark_corrupt(
+                        remote_path=remote_path,
+                        product=prod,
+                        test_type=ttype,
+                        error=e.reason,
+                        quarantine_path=quarantined,
+                    )
+                    corrupt.append((remote_path, e.reason))
+                    progress.update(dl_task, advance=1, description=f"Corrupt {filename}")
+                    if verbose:
+                        console.print(f"  [red]![/red] {filename}: {e.reason}")
+                    continue
+                except Exception as e:
+                    # Anything else (network drop, disk full) is not the file's
+                    # fault: leave it unrecorded so the next run retries it.
+                    failed.append((remote_path, f"{type(e).__name__}: {e}"))
+                    progress.update(dl_task, advance=1, description=f"Failed {filename}")
+                    if verbose:
+                        console.print(f"  [red]![/red] {filename}: {type(e).__name__}: {e}")
+                    continue
+
+                # Track in sync history (persisted once after the batch below).
+                sync_manager.mark_downloaded(
                     remote_path=remote_path,
+                    local_path=local_file,
                     product=prod,
                     test_type=ttype,
-                    error=e.reason,
-                    quarantine_path=quarantined,
+                    save=False,
                 )
-                corrupt.append((remote_path, e.reason))
-                progress.update(dl_task, advance=1, description=f"Corrupt {filename}")
-                if verbose:
-                    console.print(f"  [red]![/red] {filename}: {e.reason}")
-                continue
-            except Exception as e:
-                # Anything else (network drop, disk full) is not the file's
-                # fault: leave it unrecorded so the next run retries it.
-                failed.append((remote_path, f"{type(e).__name__}: {e}"))
-                progress.update(dl_task, advance=1, description=f"Failed {filename}")
-                if verbose:
-                    console.print(f"  [red]![/red] {filename}: {type(e).__name__}: {e}")
-                continue
+                # A --retry-corrupt run that succeeds clears the quarantine record.
+                if sync_manager.is_corrupt(remote_path):
+                    sync_manager.clear_corrupt(remote_path)
 
-            # Track in sync history (persisted once after the batch below).
-            sync_manager.mark_downloaded(
-                remote_path=remote_path,
-                local_path=local_file,
-                product=prod,
-                test_type=ttype,
-                save=False,
-            )
-            # A --retry-corrupt run that succeeds clears the quarantine record.
-            if sync_manager.is_corrupt(remote_path):
-                sync_manager.clear_corrupt(remote_path)
+                downloaded.append((remote_path, local_file, prod, ttype))
+                progress.update(dl_task, advance=1, description=f"Downloaded {filename}")
 
-            downloaded.append((remote_path, local_file, prod, ttype))
-            progress.update(dl_task, advance=1, description=f"Downloaded {filename}")
-
-    sync_manager.save()  # batched save=False marks above
+    finally:
+        sync_manager.save()  # batched save=False marks above
     return downloaded, corrupt, failed
 
 
