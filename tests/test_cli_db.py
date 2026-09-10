@@ -190,3 +190,36 @@ def test_store_fingerprint_tracks_tables_and_gross_die(tmp_path, synth_store):
     base = store_fingerprint(synth_store, {})
     assert base == store_fingerprint(synth_store, {})            # 安定
     assert base != store_fingerprint(synth_store, {"P": (100, 200)})   # GD 変化を検出
+
+
+def test_db_shell_drops_stale_views(tmp_path, synth_store, monkeypatch):
+    """永続カタログに残った、いまは定義されていないビューを落とす。
+
+    setup_views() は CREATE OR REPLACE しかしないので、一度でも作られたビューは
+    storage.database に残り続ける。dbt 時代のマートビューがこれで、参照先の
+    Parquet が消えると引いた瞬間に IOException になる(残っていれば古いデータを
+    黙って返す、というもっと悪い挙動もある)。
+    """
+    import duckdb
+    monkeypatch.setattr("subprocess.run", lambda *a, **k: None)
+    db_path = tmp_path / "shell.duckdb"
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(f"storage:\n  data_dir: {synth_store.as_posix()}\n"
+                   f"  database: {db_path.as_posix()}\n")
+    env = {"STDF_CONFIG": str(cfg)}
+    CliRunner().invoke(main, ["db", "shell"], env=env)
+
+    con = duckdb.connect(str(db_path))
+    con.execute("CREATE VIEW leftover_mart AS SELECT 1 AS x")   # 過去の登録を模す
+    con.close()
+
+    r = CliRunner().invoke(main, ["db", "shell", "--refresh"], env=env)
+    assert r.exit_code == 0, r.output
+    assert "leftover_mart" in r.output and "stale" in r.output
+
+    con = duckdb.connect(str(db_path))
+    names = {row[0] for row in
+             con.execute("SELECT view_name FROM duckdb_views() WHERE NOT internal").fetchall()}
+    con.close()
+    assert "leftover_mart" not in names
+    assert "parts_final" in names        # 現行のビューは残っている

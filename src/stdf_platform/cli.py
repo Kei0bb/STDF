@@ -429,12 +429,30 @@ def shell(ctx, refresh):
             conn.close()
             console.print(f"[red]Error:[/red] {e}")
             sys.exit(1)
+        # 過去の登録の残骸を落とす。setup_views() は CREATE OR REPLACE しかしない
+        # ので、一度でも作られたビューはこの永続ファイルに残り続ける — 消えた
+        # 定義(dbt 時代のマートビューが典型)は、参照先の Parquet ごと消えると
+        # IOException を投げるし、残っていれば古いデータを黙って返す。カタログを
+        # 「いまコードが定義しているもの」と一致させる。
+        stale = [
+            row[0]
+            for row in conn.execute(
+                "SELECT view_name FROM duckdb_views() WHERE NOT internal"
+            ).fetchall()
+            if row[0] not in registered
+        ]
+        for view in stale:
+            conn.execute(f'DROP VIEW IF EXISTS "{view}"')
+
         conn.execute(
             "CREATE OR REPLACE TABLE _stdf_mount_state AS "
             "SELECT ? AS fingerprint, ? AS registered, now() AS registered_at",
             [fingerprint, ",".join(registered)],
         )
         console.print(f"[dim]Registered {len(registered)} views in {time.time() - t0:.1f}s[/dim]")
+        if stale:
+            console.print(f"[dim]Dropped {len(stale)} stale view(s): "
+                          f"{', '.join(stale)}[/dim]")
     else:
         console.print(f"[dim]Reusing {len(registered)} views from {db_path.name} "
                       f"(--refresh で再登録)[/dim]")
