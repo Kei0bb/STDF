@@ -1,5 +1,6 @@
 """Parquet storage for STDF data."""
 
+import logging
 import os
 import re
 import tempfile
@@ -14,6 +15,8 @@ import pyarrow.parquet as pq
 from .parser import STDFData
 from .config import StorageConfig
 from .chipid import decode_chipid
+
+logger = logging.getLogger(__name__)
 
 
 # Default timestamp for invalid values (compatible with Parquet viewers)
@@ -354,8 +357,9 @@ class ParquetStorage:
             # The old file may predate part_serial; build the same identity
             # expression the new run used (part_txt → part_serial → part_id),
             # referencing only the columns that file actually has.
+            has_serial = "part_serial" in existing_schema.names
             ft_parts = ["NULLIF(old.part_txt, '')"]
-            if "part_serial" in existing_schema.names:
+            if has_serial:
                 ft_parts.append("NULLIF(old.part_serial, '')")
             if "part_id" in existing_schema.names:
                 ft_parts.append("old.part_id")
@@ -364,6 +368,29 @@ class ParquetStorage:
             con = duckdb.connect()
             try:
                 con.register("new_keys", new_keys_table)
+                if not has_serial:
+                    # A pre-part_serial file cannot express the identity the new
+                    # run uses for a barcode-less FT package: its own part_serial
+                    # was never stored and its part_id is a per-file counter. The
+                    # join below can then never match, and the superseded rows
+                    # keep retest_flag = 0 — test_data_final would return both the
+                    # old and the new measurement for one package. Nothing here
+                    # can recover it, so say so loudly instead of silently
+                    # producing duplicates.
+                    stale_ft = con.execute(f"""
+                        SELECT COUNT(*) FROM read_parquet(
+                            '{old_path.as_posix()}'
+                        ) WHERE x_coord = -32768 AND y_coord = -32768
+                          AND COALESCE(part_txt, '') = ''
+                    """).fetchone()[0]
+                    if stale_ft:
+                        logger.warning(
+                            "%s: %d barcode-less FT rows predate part_serial; "
+                            "their retest_flag cannot be reconciled with the new "
+                            "run. This lot must be wiped and re-ingested "
+                            "(test_data_final will otherwise return both runs).",
+                            old_path, stale_ft,
+                        )
                 # Skip the rewrite entirely when no key matches this file:
                 # without this, every new retest rewrote every older retest
                 # file (O(K^2) I/O) even when nothing was re-measured there.

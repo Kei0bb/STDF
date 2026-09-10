@@ -271,6 +271,13 @@ CP は従来どおりウェーハ座標、FT は座標が無いため 2D バー�
 identity に使う。FT で `part_txt` が空の場合は `part_serial`（PRR.PART_ID）、それも
 無ければ合成 `part_id` にフォールバックする（空キーで全パッケージが1つに潰れるのを防ぐ）。
 
+> **旧ストア（`part_serial` 導入前）の FT で `part_txt` が空の場合は再 ingest が必要。**
+> 旧ファイルには `part_serial` が記録されていないため identity が
+> 合成 `part_id`（ファイル内連番）まで落ちる。部分リテストではリテスト側の
+> パッケージ #n が元 run のパッケージ #n に化けるので、`parts_final` の dedup も
+> `retest_flag` の demote も成立しない（ingest 時に警告が出る）。
+> CP と、バーコードのある FT は再 ingest 不要。
+
 `parts_final` / `test_data_final` には **`die_key`** 列が付く（Parquet には保存しない、
 ビューが計算する）。CP は `CP|{x}|{y}`、FT は `FT|{part_txt}`（空なら part_serial →
 合成 part_id）。**両ビューを結合するときは `part_id` ではなく

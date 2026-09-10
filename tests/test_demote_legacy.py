@@ -88,3 +88,35 @@ def test_demote_does_not_rewrite_when_no_key_matches(tmp_path):
         wafer_dir, new_keys={("W1", 999, 999, "", 1, None)}, up_to_retest=1)
 
     assert old.stat().st_mtime_ns == before
+
+
+def test_legacy_ft_without_part_serial_warns(tmp_path, caplog):
+    """part_serial 以前の barcode 空 FT は flag を整合させられない — 警告を出す。
+
+    旧ファイルには part_serial が無く part_id はファイル内連番なので、新 run の
+    identity と一致させる術がない。黙って重複を作らず、再 ingest が必要だと
+    言わせる。
+    """
+    import logging
+
+    from stdf_platform.storage import TEST_DATA_SCHEMA
+
+    legacy_schema = pa.schema([f for f in TEST_DATA_SCHEMA if f.name != "part_serial"])
+    old_dir = tmp_path / "retest=0"
+    old_dir.mkdir(parents=True)
+    row = {f.name: None for f in legacy_schema}
+    row.update({
+        "lot_id": "LOT", "wafer_id": "", "part_id": "LOT__0", "part_txt": "",
+        "x_coord": -32768, "y_coord": -32768, "test_num": 1, "test_name": "T1",
+        "pin_num": None, "result": 1.0, "rec_type": "PTR", "passed": "P",
+        "retest_flag": 0, "exec_seq": 0,
+    })
+    pq.write_table(
+        pa.Table.from_pylist([row], schema=legacy_schema), old_dir / "data.parquet")
+
+    storage = ParquetStorage(StorageConfig(data_dir=tmp_path))
+    with caplog.at_level(logging.WARNING, logger="stdf_platform.storage"):
+        storage._demote_superseded(
+            tmp_path, {("", -32768, -32768, "SN-001", 1, None)}, up_to_retest=1)
+
+    assert any("re-ingested" in r.getMessage() for r in caplog.records), caplog.text
