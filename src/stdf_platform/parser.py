@@ -359,6 +359,7 @@ class STDFParser:
         part = {
             "part_id": synth_part_id,
             "part_txt": part_txt,
+            "part_serial": part_id_serial,  # PRR.PART_ID — FT の barcode 欠損時フォールバック
             "lot_id": self.data.lot_id,
             "wafer_id": self.data._current_wafer,
             "head_num": head_num,

@@ -86,6 +86,7 @@ WAFERS_SCHEMA = pa.schema([
 PARTS_SCHEMA = pa.schema([
     ("part_id", pa.string()),
     ("part_txt", pa.string()),   # PRR.PART_TXT (2D barcode) — unique FT package key
+    ("part_serial", pa.string()),  # PRR.PART_ID — FT の barcode 欠損時フォールバック
     ("lot_id", pa.string()),
     ("wafer_id", pa.string()),
     ("head_num", pa.int64()),
@@ -107,6 +108,7 @@ TEST_DATA_SCHEMA = pa.schema([
     ("wafer_id", pa.string()),
     ("part_id", pa.string()),
     ("part_txt", pa.string()),   # PRR.PART_TXT (2D barcode) — unique FT package key
+    ("part_serial", pa.string()),  # PRR.PART_ID — FT の barcode 欠損時フォールバック
     ("x_coord", pa.int64()),
     ("y_coord", pa.int64()),
     # Test identification
@@ -530,6 +532,7 @@ class ParquetStorage:
                 part_table = pa.table({
                     "part_id": [p.get("part_id", "") for p in parts],
                     "part_txt": [p.get("part_txt", "") for p in parts],
+                    "part_serial": [p.get("part_serial", "") for p in parts],
                     "lot_id": [p.get("lot_id", "") for p in parts],
                     "wafer_id": [p.get("wafer_id", "") for p in parts],
                     "head_num": [p.get("head_num", 0) for p in parts],
@@ -551,6 +554,7 @@ class ParquetStorage:
         if data.test_results:
             part_coords = {}
             part_txt_map = {}
+            part_serial_map = {}
             for part in data.parts:
                 part_id = part.get("part_id", "")
                 part_coords[part_id] = (
@@ -558,6 +562,7 @@ class ParquetStorage:
                     part.get("y_coord", -32768),
                 )
                 part_txt_map[part_id] = part.get("part_txt", "")
+                part_serial_map[part_id] = part.get("part_serial", "")
 
             result_groups: dict[tuple, list] = {}
             for result in data.test_results:
@@ -589,6 +594,7 @@ class ParquetStorage:
                     part_id = r.get("part_id", "")
                     x_coord, y_coord = part_coords.get(part_id, (-32768, -32768))
                     part_txt = part_txt_map.get(part_id, "")
+                    part_serial = part_serial_map.get(part_id, "")
                     ft_txt = part_txt if x_coord == -32768 and y_coord == -32768 else ""
                     pin_num = r.get("pin_num")
                     flag_key = (wafer_id, x_coord, y_coord, ft_txt, test_num, pin_num)
@@ -599,6 +605,7 @@ class ParquetStorage:
                         "wafer_id": r.get("wafer_id", ""),
                         "part_id": part_id,
                         "part_txt": part_txt,
+                        "part_serial": part_serial,
                         "x_coord": x_coord,
                         "y_coord": y_coord,
                         "test_num": test_num,
@@ -623,6 +630,7 @@ class ParquetStorage:
                     "wafer_id": [r["wafer_id"] for r in enriched],
                     "part_id": [r["part_id"] for r in enriched],
                     "part_txt": [r["part_txt"] for r in enriched],
+                    "part_serial": [r["part_serial"] for r in enriched],
                     "x_coord": [r["x_coord"] for r in enriched],
                     "y_coord": [r["y_coord"] for r in enriched],
                     "test_num": [r["test_num"] for r in enriched],
