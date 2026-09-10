@@ -957,13 +957,17 @@ def export_lot(ctx, lot_ids: tuple, output: Path, pivot: bool):
                     AND td.wafer_id = p.wafer_id
                     AND td.die_key  = p.die_key
                 WHERE td.lot_id IN ({placeholders})
-                ORDER BY td.lot_id, td.wafer_id, td.part_id, td.test_name
+                ORDER BY td.lot_id, td.wafer_id, td.die_key, td.test_name
                 """
                 long_df = s.q(sql, params)
                 if long_df.empty:
                     df = long_df
                 else:
-                    index_cols = ["lot_id", "wafer_id", "die_key", "part_id",
+                    # part_id は index に入れない。test_data_final は再測定
+                    # されたテストだけを新しい run から採るので、1ダイの行が
+                    # run をまたいで別々の part_id を持ち、part_id を index に
+                    # 入れると同じダイが NaN 補完された2行に割れる。
+                    index_cols = ["lot_id", "wafer_id", "die_key",
                                   "x_coord", "y_coord", "hard_bin", "soft_bin",
                                   "part_passed"]
                     df = long_df.pivot_table(
@@ -995,7 +999,7 @@ def export_lot(ctx, lot_ids: tuple, output: Path, pivot: bool):
                     AND td.wafer_id = p.wafer_id
                     AND td.die_key  = p.die_key
                 WHERE td.lot_id IN ({placeholders})
-                ORDER BY td.lot_id, td.wafer_id, td.part_id, td.test_num
+                ORDER BY td.lot_id, td.wafer_id, td.die_key, td.test_num
                 """
                 df = s.q(sql, params)
 

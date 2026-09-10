@@ -119,3 +119,60 @@ def test_radial_profile_does_not_duplicate_on_partial_retest(partial_retest_stor
     s = AnalysisSession(partial_retest_store)
     df = radial_profile(s, "PROD", "LOT", 100)
     assert df["n"].sum() == 2
+
+
+@pytest.fixture()
+def partial_retest_subset_store(tmp_path):
+    """部分リテストで「一部のテストだけ」再測定したストア。
+
+    再測定されなかったテストの行は古い run に残る（retest_flag=0 のまま）ので、
+    1ダイの行が run をまたいで別々の part_id を持つ。
+    """
+    storage = ParquetStorage(StorageConfig(data_dir=tmp_path))
+
+    def data(parts, results):
+        d = _cp_data(parts=parts, results=results)
+        d.tests[101] = {"test_name": "T101", "rec_type": "PTR",
+                        "lo_limit": 0.0, "hi_limit": 1.0, "units": "V"}
+        return d
+
+    def res(pid, t, v):
+        return {"lot_id": "LOT", "wafer_id": "W1", "part_id": pid, "test_num": t,
+                "head_num": 1, "site_num": 1, "result": v,
+                "passed": True, "alarm_id": ""}
+
+    storage.save_stdf_data(
+        data([_part("LOT_W1_0", 0, 0, True, 1), _part("LOT_W1_1", 1, 0, True, 1)],
+             [res("LOT_W1_0", 100, 0.1), res("LOT_W1_0", 101, 0.2),
+              res("LOT_W1_1", 100, 0.9), res("LOT_W1_1", 101, 0.8)]),
+        product="PROD", test_category="CP", sub_process="CP1", source_file="r0.stdf")
+    # (1,0) の T100 のみ再測定。T101 は古い run に残る
+    storage.save_stdf_data(
+        data([_part("LOT_W1_0", 1, 0, True, 1)], [res("LOT_W1_0", 100, 0.95)]),
+        product="PROD", test_category="CP", sub_process="CP1", source_file="r1.stdf")
+    return tmp_path
+
+
+def test_export_lot_pivot_keeps_one_row_per_die(partial_retest_subset_store):
+    """die_key で結合しても part_id を pivot index に残すとダイが2行に割れる。"""
+    from click.testing import CliRunner
+
+    from stdf_platform.cli import main
+
+    store = partial_retest_subset_store
+    cfg = store / "config.yaml"
+    cfg.write_text(f"storage:\n  data_dir: {store.as_posix()}\n")
+    out = store / "export.csv"
+    result = CliRunner().invoke(
+        main, ["export", "lot", "LOT", str(out), "--pivot"],
+        env={"STDF_CONFIG": str(cfg)})
+    assert result.exit_code == 0, result.output
+
+    import pandas as pd
+    df = pd.read_csv(out)
+
+    assert len(df) == 2, df           # ダイは2つ。3行なら part_id で割れている
+    assert "part_id" not in df.columns
+    row = df[(df.x_coord == 1) & (df.y_coord == 0)].iloc[0]
+    assert row["T100"] == pytest.approx(0.95)   # 再測定された値
+    assert row["T101"] == pytest.approx(0.8)    # 古い run に残った値が同じ行に

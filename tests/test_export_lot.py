@@ -64,4 +64,7 @@ def test_export_lot_pivot(tmp_path, monkeypatch):
     assert result.exit_code == 0, result.output
     header = out.read_text().splitlines()[0]
     assert "VDD" in header  # pivoted test_name becomes a column
-    assert "part_id" in header
+    # ダイの identity は die_key。part_id はファイル内連番なので index に
+    # 入れると、部分リテストで1ダイが複数行に割れる(test_retest_joins.py)。
+    assert "die_key" in header
+    assert "part_id" not in header
