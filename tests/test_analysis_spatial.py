@@ -88,3 +88,32 @@ def test_param_wafermap_fig_smoke(tmp_path):
         assert isinstance(fig, go.Figure)
         assert len(fig.data) == 1
         assert fig.layout.yaxis.autorange == "reversed"
+
+
+def test_radial_profile_normalizes_on_full_die_population(tmp_path):
+    """radius_bin の基準はロットの全ダイ座標。測定のある行だけから取ると
+    test_num ごとに基準が変わり、同一ロットの2テストが比較できなくなる。"""
+    _write_grid(tmp_path)
+    # 中心 3x3 のダイだけを測る test_num=8 を追加する
+    inner = [(x, y) for x in range(1, 4) for y in range(1, 4)]
+    td = (tmp_path / "test_data" / "product=PROD" / "test_category=CP"
+          / "sub_process=CP1" / "lot_id=G1" / "inner.parquet")
+    n = len(inner)
+    pq.write_table(pa.table({
+        "lot_id": ["G1"]*n, "wafer_id": ["W1"]*n,
+        "part_id": [f"d{x*5+y}" for x, y in inner], "part_txt": [""]*n,
+        "x_coord": [x for x, _ in inner], "y_coord": [y for _, y in inner],
+        "test_num": [8]*n, "pin_num": [0]*n,
+        "test_name": ["R2"]*n, "rec_type": ["PTR"]*n,
+        "lo_limit": [0.0]*n, "hi_limit": [10.0]*n, "units": ["V"]*n,
+        "result": [1.0]*n, "passed": ["P"]*n, "retest_num": [0]*n,
+        "exec_seq": [0]*n, "retest_flag": [0]*n,
+    }), td)
+
+    with AnalysisSession(tmp_path) as s:
+        inner_df = spatial.radial_profile(s, "PROD", "G1", 8)
+        full_df = spatial.radial_profile(s, "PROD", "G1", 7)
+
+    assert int(inner_df["n"].sum()) == n
+    # 内側だけのテストが最外周ビンに届いてはいけない(全ダイ基準で正規化)
+    assert inner_df["radius_bin"].max() < full_df["radius_bin"].max()

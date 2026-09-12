@@ -207,7 +207,10 @@ def _write_null_flag_row(data_dir: Path) -> None:
     in synth_store, so it doesn't disturb the other synth_store-derived
     fixtures/assertions.
     """
-    old_schema = pa.schema([f for f in TEST_DATA_SCHEMA if f.name not in ("exec_seq", "retest_flag")])
+    old_schema = pa.schema([
+        f for f in TEST_DATA_SCHEMA
+        if f.name not in ("exec_seq", "retest_flag", "part_serial")
+    ])
     row = {
         "lot_id": ["LOTCORRUPT"], "wafer_id": ["WBAD"], "part_id": ["PBAD"], "part_txt": [""],
         "x_coord": [9], "y_coord": [9], "test_num": [1], "test_name": ["VCC"],

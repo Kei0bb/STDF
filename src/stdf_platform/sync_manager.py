@@ -50,6 +50,10 @@ class SyncManager:
         """
         return remote_path in self._history["files"]
 
+    def save(self) -> None:
+        """Persist the in-memory history (call after batched save=False marks)."""
+        self._save()
+
     def mark_downloaded(
         self,
         remote_path: str,
@@ -57,6 +61,7 @@ class SyncManager:
         product: str,
         test_type: str,
         file_size: Optional[int] = None,
+        save: bool = True,
     ) -> None:
         """
         Mark a file as downloaded.
@@ -66,8 +71,16 @@ class SyncManager:
             local_path: Local file path
             product: Product name
             test_type: Test type (CP/FT)
-            file_size: File size in bytes
+            file_size: File size in bytes; stat()ed from local_path when omitted
+            save: False to defer the (whole-file) JSON write — batch callers
+                pass False in the loop and call save() once at the end, instead
+                of rewriting the entire history per file (O(N^2)).
         """
+        if file_size is None and local_path.exists():
+            try:
+                file_size = local_path.stat().st_size
+            except OSError:
+                file_size = None
         self._history["files"][remote_path] = {
             "product": product,
             "test_type": test_type,
@@ -76,19 +89,22 @@ class SyncManager:
             "file_size": file_size,
             "ingested": False,
         }
-        self._save()
+        if save:
+            self._save()
 
-    def mark_ingested(self, remote_path: str) -> None:
+    def mark_ingested(self, remote_path: str, save: bool = True) -> None:
         """
         Mark a file as ingested.
 
         Args:
             remote_path: Remote file path
+            save: False to defer the JSON write (see mark_downloaded)
         """
         if remote_path in self._history["files"]:
             self._history["files"][remote_path]["ingested"] = True
             self._history["files"][remote_path]["ingested_at"] = datetime.now().isoformat()
-            self._save()
+            if save:
+                self._save()
 
     def get_pending_ingest(self) -> list[tuple[str, Path, str, str]]:
         """

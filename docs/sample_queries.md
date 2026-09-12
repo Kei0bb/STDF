@@ -214,7 +214,8 @@ SELECT
     td.passed AS test_passed
 FROM lots l
 JOIN parts_final p      ON l.lot_id = p.lot_id
-JOIN test_data_final td ON p.lot_id = td.lot_id AND p.part_id = td.part_id
+-- part_id はファイル内連番で部分リテスト時に別ダイへ振り直される。die_key で結合する
+JOIN test_data_final td ON p.lot_id = td.lot_id AND p.wafer_id = td.wafer_id AND p.die_key = td.die_key
 WHERE l.lot_id = 'YOUR_LOT_ID'
 ORDER BY p.wafer_id, p.part_id, td.test_num;
 ```
@@ -564,7 +565,9 @@ SELECT
     ROUND(AVG(td.result), 4) AS mean,
     ROUND(STDDEV(td.result), 4) AS sigma
 FROM test_data_final td
-JOIN parts_final p ON td.lot_id = p.lot_id AND td.part_id = p.part_id
+-- part_id ではなく die_key（CP=座標 / FT=バーコード→PART_ID→合成ID）で結合する
+JOIN parts_final p ON td.lot_id = p.lot_id AND td.wafer_id = p.wafer_id
+                  AND td.die_key = p.die_key
 WHERE td.lot_id = 'YOUR_LOT_ID' AND td.test_name = 'YOUR_TEST_NAME'
 GROUP BY p.site_num, td.test_name
 ORDER BY p.site_num;

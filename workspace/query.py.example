@@ -10,7 +10,7 @@
 
 # %% Setup
 from stdf_platform.analysis import AnalysisSession
-from stdf_platform.mounts import _DEDUP_UNIT   # use_lot() が使う
+from stdf_platform.mounts import _DEDUP_UNIT, die_key_expr   # use_lot() が使う
 
 # 引数なし = config.yaml の storage.data_dir を解決(相対パスは config.yaml の
 # 置き場所基準。cwd がどこでも同じストアを指す)。別ストアを見るときだけ
@@ -91,12 +91,13 @@ q("SELECT * FROM runs WHERE lot_id = ? ORDER BY start_time", [LOT_ID])
 _FINAL_SPECS = {
     "parts_final": ("parts", f"""
         SELECT * EXCLUDE (rn) FROM (
-            SELECT *, ROW_NUMBER() OVER (
+            SELECT *, {die_key_expr()} AS die_key, ROW_NUMBER() OVER (
                 PARTITION BY lot_id, {_DEDUP_UNIT} ORDER BY retest_num DESC) AS rn
             FROM parts {{where}}
         ) WHERE rn = 1"""),
-    "test_data_final": ("test_data", """
-        SELECT * FROM (SELECT * FROM test_data WHERE retest_flag = 0) {where}"""),
+    "test_data_final": ("test_data", f"""
+        SELECT *, {die_key_expr()} AS die_key
+        FROM (SELECT * FROM test_data WHERE retest_flag = 0) {{where}}"""),
     "chipid_final": ("chipid", """
         SELECT * EXCLUDE (rn) FROM (
             SELECT *, ROW_NUMBER() OVER (

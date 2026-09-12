@@ -101,7 +101,7 @@ class AnalysisSession:
                    start_time, finish_time
             FROM (
                 SELECT *, ROW_NUMBER() OVER (
-                    PARTITION BY product, test_category, lot_id
+                    PARTITION BY product, test_category, lot_id, sub_process
                     ORDER BY start_time DESC) AS rn
                 FROM lots{clause}
             ) WHERE rn = 1

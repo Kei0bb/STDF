@@ -110,3 +110,19 @@ def test_absolute_data_dir_is_left_alone(tmp_path):
         f"storage:\n  data_dir: {abs_store.as_posix()}\n", encoding="utf-8")
     cfg = Config.load(tmp_path / "config.yaml")
     assert cfg.storage.data_dir == abs_store
+
+
+def test_server_resource_limits_are_loaded(tmp_path):
+    (tmp_path / "config.yaml").write_text(
+        "server:\n"
+        "  max_rows: 500\n"
+        "  memory_limit: 4GB\n"
+        "  threads: 3\n"
+        "  query_timeout_seconds: 15\n",
+        encoding="utf-8",
+    )
+    cfg = Config.load(tmp_path / "config.yaml")
+    assert cfg.server.max_rows == 500
+    assert cfg.server.memory_limit == "4GB"
+    assert cfg.server.threads == 3
+    assert cfg.server.query_timeout_seconds == 15

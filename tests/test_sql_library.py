@@ -63,6 +63,14 @@ def test_params_are_bound_not_interpolated(session):
     assert df.empty
 
 
+def test_run_out_path_with_single_quote(session, tmp_path):
+    """出力パスは SQL リテラルとしてクォートされる(シングルクォートは '' 化)。"""
+    out = tmp_path / "it's.csv"
+    rows = session.run("01_lots/lot_list", out=out)
+    assert rows >= 1
+    assert out.exists()
+
+
 def test_unknown_query_lists_available(session):
     with pytest.raises(FileNotFoundError, match="fail_ranking"):
         session.run("no_such_query")

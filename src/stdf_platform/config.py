@@ -97,6 +97,9 @@ class ServerConfig:
     host: str = "0.0.0.0"
     port: int = 8555
     max_rows: int = 10000
+    memory_limit: str = "2GB"          # DuckDB memory_limit per request session
+    threads: int = 2                   # DuckDB threads per request session
+    query_timeout_seconds: int = 60    # 0 = disabled (interrupt-based)
 
 
 @dataclass
@@ -223,7 +226,8 @@ class Config:
             ) if processing_data else ProcessingConfig(),
             server=ServerConfig(
                 **{k: v for k, v in server_data.items()
-                   if k in ("host", "port", "max_rows")}
+                   if k in ("host", "port", "max_rows", "memory_limit",
+                            "threads", "query_timeout_seconds")}
             ),
             filters=filters,
             exclude=exclude,

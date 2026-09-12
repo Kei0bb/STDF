@@ -201,9 +201,9 @@ def test_same_lot_files_serialize_in_timestamp_order_other_lots_parallel(tmp_pat
         str(lotb_1): "lotb_1",
     }
     sleep_map = {
-        "lota_1": 0.3,
+        "lota_1": 1.0,   # cross-lot parallelism の断言に十分なマージン
         "lota_2": 0.1,
-        "lotb_1": 0.3,
+        "lotb_1": 0.2,
     }
 
     real_popen = subprocess.Popen
@@ -248,9 +248,9 @@ def test_same_lot_files_serialize_in_timestamp_order_other_lots_parallel(tmp_pat
     assert events["lota_1"]["start"] < events["lota_2"]["start"]
     assert events["lota_1"]["end"] <= events["lota_2"]["start"]
 
-    # (b) Cross-lot PARALLELISM: LOTB starts before LOTA's group is done,
-    # i.e. it does not wait for LOTA#2 to finish. With max_workers=2 both
-    # group futures (LOTA-group, LOTB-group) are submitted together, so
-    # LOTB should start around the same time as LOTA#1, well before
-    # LOTA#2 even starts.
-    assert events["lotb_1"]["start"] < events["lota_2"]["start"]
+    # (b) Cross-lot PARALLELISM: LOTB starts while LOTA#1 is still running,
+    # i.e. LOTB is not serialized behind the LOTA group. lota_1 sleeps 1.0s,
+    # so this has a full second of margin and does not flake when the test
+    # host is under load (the old assertion compared against lota_2's start,
+    # which had only ~0.3s of margin).
+    assert events["lotb_1"]["start"] < events["lota_1"]["end"]

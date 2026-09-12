@@ -223,8 +223,18 @@ def serve(ctx, host: str | None, port: int | None):
     import uvicorn
 
     from .server import create_app
+    from .server.app import validate_memory_limit
 
     config: Config = ctx.obj["config"]
+    # 設定ミスは起動時に落とす(以前は毎リクエスト 500 になっていた)。
+    try:
+        validate_memory_limit(config.server.memory_limit)
+    except ValueError as e:
+        console.print(f"[red]Config error:[/red] {e}")
+        sys.exit(1)
+    if int(config.server.threads) < 1:
+        console.print("[red]Config error:[/red] server.threads は 1 以上")
+        sys.exit(1)
     host = host or config.server.host
     port = port or config.server.port
     console.print(f"[bold]stdf query server[/bold] → http://{host}:{port}")
@@ -354,8 +364,10 @@ def query(ctx, sql: str | None, output: Path | None, sql_file: Path | None):
     try:
         with AnalysisSession(config.storage.data_dir, config=config) as s:
             if output is not None:
+                from .analysis.library import sql_literal
                 n = s.conn.execute(
-                    f"COPY ({sql.rstrip('; ')}) TO '{output.as_posix()}' (HEADER, DELIMITER ',')"
+                    f"COPY ({sql.rstrip('; ')}) TO '{sql_literal(output.as_posix())}'"
+                    f" (HEADER, DELIMITER ',')"
                 ).fetchone()[0]
                 console.print(f"Exported {n:,} rows → {output}")
             else:
@@ -374,6 +386,27 @@ def query(ctx, sql: str | None, output: Path | None, sql_file: Path | None):
     except Exception as e:
         console.print(f"[red]Error:[/red] {e}")
         sys.exit(1)
+
+
+def _stale_views(conn, registered: list[str],
+                 previous: list[str] | None) -> list[str]:
+    """カタログから落とすべきビュー。
+
+    previous (前回 _stdf_mount_state に記録した registered) が分かる時は
+    我々が作った分の差分だけを対象にし、ユーザーが shell で作ったビューを
+    巻き込まない。前回状態が無い旧 DB は区別できないため、従来通り
+    非登録ビューを全部落とす。
+    """
+    current = set(registered)
+    if previous is None:
+        return [
+            r[0]
+            for r in conn.execute(
+                "SELECT view_name FROM duckdb_views() WHERE NOT internal"
+            ).fetchall()
+            if r[0] not in current
+        ]
+    return [v for v in previous if v not in current]
 
 
 @db.command()
@@ -421,17 +454,31 @@ def shell(ctx, refresh):
         console.print(f"[dim]  rm {db_path}   /   Remove-Item {db_path}[/dim]")
         sys.exit(1)
     registered: list[str] | None = None
+    previous: list[str] | None = None
     if not refresh:
         try:
             row = conn.execute(
                 "SELECT fingerprint, registered FROM _stdf_mount_state"
             ).fetchone()
-            if row and row[0] == fingerprint:
-                registered = row[1].split(",")
+            if row:
+                previous = row[1].split(",")
+                if row[0] == fingerprint:
+                    registered = previous
         except duckdb_mod.Error:
             pass  # 初回、または旧バージョンが作った DB — 下で登録する
 
     if registered is None:
+        # --refresh / fingerprint 変化でも前回一覧は残っているので読む
+        # (refresh 分岐では上の try が走らない)。
+        if previous is None:
+            try:
+                row = conn.execute(
+                    "SELECT registered FROM _stdf_mount_state"
+                ).fetchone()
+                if row:
+                    previous = row[0].split(",")
+            except duckdb_mod.Error:
+                pass
         t0 = time.time()
         try:
             registered = setup_views(conn, config.storage.data_dir, config.gross_die_map)
@@ -442,15 +489,9 @@ def shell(ctx, refresh):
         # 過去の登録の残骸を落とす。setup_views() は CREATE OR REPLACE しかしない
         # ので、一度でも作られたビューはこの永続ファイルに残り続ける — 消えた
         # 定義(dbt 時代のマートビューが典型)は、参照先の Parquet ごと消えると
-        # IOException を投げるし、残っていれば古いデータを黙って返す。カタログを
-        # 「いまコードが定義しているもの」と一致させる。
-        stale = [
-            row[0]
-            for row in conn.execute(
-                "SELECT view_name FROM duckdb_views() WHERE NOT internal"
-            ).fetchall()
-            if row[0] not in registered
-        ]
+        # IOException を投げるし、残っていれば古いデータを黙って返す。前回一覧が
+        # あれば差分だけを落とし、ユーザーが shell で作ったビューは残す。
+        stale = _stale_views(conn, registered, previous)
         for view in stale:
             conn.execute(f'DROP VIEW IF EXISTS "{view}"')
 
@@ -525,14 +566,25 @@ def _run_ingest_batch(
     from .worker import run_ingest_pool
     from .atomic import atomic_write_json
 
-    successes, failures = run_ingest_pool(
-        files=to_ingest,
-        data_dir=config.storage.data_dir,
-        compression=config.processing.compression,
-        max_workers=max_workers,
-        timeout=timeout,
-        on_success=lambda r: sync_manager.mark_ingested(r.remote_path),
-    )
+    # save=False: the callback runs once per file; rewriting the whole
+    # sync_history.json per file is O(N^2). The single flush is in a finally
+    # because it MUST also run on abort — run_ingest_pool re-raises through
+    # future.result() and Ctrl+C raises KeyboardInterrupt. Without it an
+    # aborted run leaves every already-ingested file marked ingested=False, so
+    # the next fetch re-ingests it and auto-increments retest_num into a bogus
+    # retest={n} partition (run_ingest_pool's on_success docstring promises
+    # exactly this durability).
+    try:
+        successes, failures = run_ingest_pool(
+            files=to_ingest,
+            data_dir=config.storage.data_dir,
+            compression=config.processing.compression,
+            max_workers=max_workers,
+            timeout=timeout,
+            on_success=lambda r: sync_manager.mark_ingested(r.remote_path, save=False),
+        )
+    finally:
+        sync_manager.save()
 
     # Structured failure record for automation (always written, even if empty).
     atomic_write_json(
@@ -597,57 +649,66 @@ def _download_files(
     if not files:
         return downloaded, corrupt, failed
 
-    with Progress(
-        SpinnerColumn(),
-        TextColumn("[progress.description]{task.description}"),
-        BarColumn(),
-        TextColumn("{task.completed}/{task.total}"),
-        console=console,
-    ) as progress:
-        dl_task = progress.add_task("Downloading...", total=len(files))
+    # The per-file mark_downloaded() calls below defer their JSON write
+    # (save=False) and are flushed once at the end. That flush is in a
+    # finally because a Ctrl+C mid-batch must still leave the already-
+    # downloaded files recorded — otherwise the next run re-downloads them
+    # and get_pending_ingest() never sees them.
+    try:
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
+            TextColumn("{task.completed}/{task.total}"),
+            console=console,
+        ) as progress:
+            dl_task = progress.add_task("Downloading...", total=len(files))
 
-        for remote_path, prod, ttype, filename in files:
-            # Create subdirectory structure: downloads/product/test_type/
-            local_dir = config.storage.download_dir / prod / ttype
-            try:
-                local_file = client.download_file(remote_path, local_dir, decompress=True)
-            except CorruptDownloadError as e:
-                quarantined = _quarantine(e.compressed_path, config)
-                sync_manager.mark_corrupt(
+            for remote_path, prod, ttype, filename in files:
+                # Create subdirectory structure: downloads/product/test_type/
+                local_dir = config.storage.download_dir / prod / ttype
+                try:
+                    local_file = client.download_file(remote_path, local_dir, decompress=True)
+                except CorruptDownloadError as e:
+                    quarantined = _quarantine(e.compressed_path, config)
+                    sync_manager.mark_corrupt(
+                        remote_path=remote_path,
+                        product=prod,
+                        test_type=ttype,
+                        error=e.reason,
+                        quarantine_path=quarantined,
+                    )
+                    corrupt.append((remote_path, e.reason))
+                    progress.update(dl_task, advance=1, description=f"Corrupt {filename}")
+                    if verbose:
+                        console.print(f"  [red]![/red] {filename}: {e.reason}")
+                    continue
+                except Exception as e:
+                    # Anything else (network drop, disk full) is not the file's
+                    # fault: leave it unrecorded so the next run retries it.
+                    failed.append((remote_path, f"{type(e).__name__}: {e}"))
+                    progress.update(dl_task, advance=1, description=f"Failed {filename}")
+                    if verbose:
+                        console.print(f"  [red]![/red] {filename}: {type(e).__name__}: {e}")
+                    continue
+
+                # Track in sync history (persisted once after the batch below).
+                sync_manager.mark_downloaded(
                     remote_path=remote_path,
+                    local_path=local_file,
                     product=prod,
                     test_type=ttype,
-                    error=e.reason,
-                    quarantine_path=quarantined,
+                    save=False,
                 )
-                corrupt.append((remote_path, e.reason))
-                progress.update(dl_task, advance=1, description=f"Corrupt {filename}")
-                if verbose:
-                    console.print(f"  [red]![/red] {filename}: {e.reason}")
-                continue
-            except Exception as e:
-                # Anything else (network drop, disk full) is not the file's
-                # fault: leave it unrecorded so the next run retries it.
-                failed.append((remote_path, f"{type(e).__name__}: {e}"))
-                progress.update(dl_task, advance=1, description=f"Failed {filename}")
-                if verbose:
-                    console.print(f"  [red]![/red] {filename}: {type(e).__name__}: {e}")
-                continue
+                # A --retry-corrupt run that succeeds clears the quarantine record.
+                if sync_manager.is_corrupt(remote_path):
+                    sync_manager.clear_corrupt(remote_path)
 
-            # Track in sync history
-            sync_manager.mark_downloaded(
-                remote_path=remote_path,
-                local_path=local_file,
-                product=prod,
-                test_type=ttype,
-            )
-            # A --retry-corrupt run that succeeds clears the quarantine record.
-            if sync_manager.is_corrupt(remote_path):
-                sync_manager.clear_corrupt(remote_path)
+                downloaded.append((remote_path, local_file, prod, ttype))
+                progress.update(dl_task, advance=1, description=f"Downloaded {filename}")
 
-            downloaded.append((remote_path, local_file, prod, ttype))
-            progress.update(dl_task, advance=1, description=f"Downloaded {filename}")
-
+    finally:
+        sync_manager.save()  # batched save=False marks above
     return downloaded, corrupt, failed
 
 
@@ -907,6 +968,7 @@ def export_lot(ctx, lot_ids: tuple, output: Path, pivot: bool):
                     td.lot_id,
                     td.wafer_id,
                     td.part_id,
+                    td.die_key,
                     p.x_coord,
                     p.y_coord,
                     p.hard_bin,
@@ -918,16 +980,21 @@ def export_lot(ctx, lot_ids: tuple, output: Path, pivot: bool):
                 JOIN parts_final p
                     ON  td.lot_id   = p.lot_id
                     AND td.wafer_id = p.wafer_id
-                    AND td.part_id  = p.part_id
+                    AND td.die_key  = p.die_key
                 WHERE td.lot_id IN ({placeholders})
-                ORDER BY td.lot_id, td.wafer_id, td.part_id, td.test_name
+                ORDER BY td.lot_id, td.wafer_id, td.die_key, td.test_name
                 """
                 long_df = s.q(sql, params)
                 if long_df.empty:
                     df = long_df
                 else:
-                    index_cols = ["lot_id", "wafer_id", "part_id", "x_coord",
-                                  "y_coord", "hard_bin", "soft_bin", "part_passed"]
+                    # part_id は index に入れない。test_data_final は再測定
+                    # されたテストだけを新しい run から採るので、1ダイの行が
+                    # run をまたいで別々の part_id を持ち、part_id を index に
+                    # 入れると同じダイが NaN 補完された2行に割れる。
+                    index_cols = ["lot_id", "wafer_id", "die_key",
+                                  "x_coord", "y_coord", "hard_bin", "soft_bin",
+                                  "part_passed"]
                     df = long_df.pivot_table(
                         index=index_cols, columns="test_name",
                         values="result", aggfunc="first",
@@ -955,9 +1022,9 @@ def export_lot(ctx, lot_ids: tuple, output: Path, pivot: bool):
                 JOIN parts_final p
                     ON  td.lot_id   = p.lot_id
                     AND td.wafer_id = p.wafer_id
-                    AND td.part_id  = p.part_id
+                    AND td.die_key  = p.die_key
                 WHERE td.lot_id IN ({placeholders})
-                ORDER BY td.lot_id, td.wafer_id, td.part_id, td.test_num
+                ORDER BY td.lot_id, td.wafer_id, td.die_key, td.test_num
                 """
                 df = s.q(sql, params)
 

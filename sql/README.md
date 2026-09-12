@@ -47,3 +47,9 @@ A と B は同じファイルを読みます。`run()` に渡したパラメー�
 歩留まりは `wafer_yield_final`(gross die 適用済み・FT ロットも含む)を使ってください。
 `wafers` テーブルを自前で集計すると FT ロットが落ち、gross die も効きません。
 測定値は `test_data_final`、ダイは `parts_final` — いずれも retest 解決済みです。
+
+`parts_final` / `test_data_final` を結合するときは `part_id` を使わない
+（ファイル内連番で、部分リテストでは別ダイに振り直される）。両ビューの
+`die_key`（CP=座標 / FT=バーコード→PART_ID→合成ID）で結合する:
+
+    AND p.lot_id = td.lot_id AND p.wafer_id = td.wafer_id AND p.die_key = td.die_key

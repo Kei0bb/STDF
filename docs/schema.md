@@ -181,8 +181,9 @@ GROUP BY lot_id, product, test_category, sub_process
 
 | 列名 | 型 | ソース | 説明 |
 |------|----|--------|------|
-| part_id | STRING | 自動生成 | `{lot_id}_{wafer_id}_{連番}`（ストリーム順） |
+| part_id | STRING | 自動生成 | `{lot_id}_{wafer_id}_{連番}`（ストリーム順。**ファイルごとに 0 から振り直されるため結合キーに使わない**） |
 | part_txt | STRING | PRR.PART_TXT | 2D バーコード（FT パッケージの一意キー。CP は通常空） |
+| part_serial | STRING | PRR.PART_ID | テスタが書くユニットシリアル。part_txt が空の FT の identity フォールバック |
 | lot_id | STRING | MIR.LOT_ID | ロットID |
 | wafer_id | STRING | WIR.WAFER_ID | ウェーハID（FT は空） |
 | head_num | INT64 | PIR.HEAD_NUM | ヘッド番号 |
@@ -206,8 +207,9 @@ GROUP BY lot_id, product, test_category, sub_process
 |------|----|--------|------|
 | lot_id | STRING | MIR.LOT_ID | ロットID |
 | wafer_id | STRING | WIR.WAFER_ID | ウェーハID |
-| part_id | STRING | 自動生成 | ダイID |
+| part_id | STRING | 自動生成 | ダイID（ファイル内連番。結合には `die_key` を使う） |
 | part_txt | STRING | PRR.PART_TXT | 2D バーコード（FT パッケージキー。CP は通常空） |
+| part_serial | STRING | PRR.PART_ID | テスタが書くユニットシリアル（FT の identity フォールバック） |
 | x_coord | INT64 | PRR.X_COORD | X座標 |
 | y_coord | INT64 | PRR.Y_COORD | Y座標 |
 | test_num | INT64 | PTR/MPR/FTR.TEST_NUM | テスト番号 |
@@ -266,7 +268,22 @@ FT chiplet 製品の die トレーサビリティ。GDR の `EN-S0-CHIPID_R`（*
 
 `parts_final` / `chipid_final` は小テーブルなのでウィンドウ計算コストが無視できる範囲。
 CP は従来どおりウェーハ座標、FT は座標が無いため 2D バーコード（`part_txt`）/ eFuse を
-identity に使う。
+identity に使う。FT で `part_txt` が空の場合は `part_serial`（PRR.PART_ID）、それも
+無ければ合成 `part_id` にフォールバックする（空キーで全パッケージが1つに潰れるのを防ぐ）。
+
+> **旧ストア（`part_serial` 導入前）の FT で `part_txt` が空の場合は再 ingest が必要。**
+> 旧ファイルには `part_serial` が記録されていないため identity が
+> 合成 `part_id`（ファイル内連番）まで落ちる。部分リテストではリテスト側の
+> パッケージ #n が元 run のパッケージ #n に化けるので、`parts_final` の dedup も
+> `retest_flag` の demote も成立しない（ingest 時に警告が出る）。
+> CP と、バーコードのある FT は再 ingest 不要。
+
+`parts_final` / `test_data_final` には **`die_key`** 列が付く（Parquet には保存しない、
+ビューが計算する）。CP は `CP|{x}|{y}`、FT は `FT|{part_txt}`（空なら part_serial →
+合成 part_id）。**両ビューを結合するときは `part_id` ではなく
+`p.lot_id = td.lot_id AND p.wafer_id = td.wafer_id AND p.die_key = td.die_key` を使う**
+— `part_id` はファイル内連番で、部分リテストでは別ダイに振り直されるため
+（全 SDR の畳み込みと同じく、identity 式の単一ソースは `mounts.py`）。
 
 `test_data_final` は `retest_num` 順のウィンドウではなく、ingest 時に `storage.py` が
 書き込む `retest_flag`（キーごとの新しさ順位。0 = 最新 run）を使った単純な述語フィルタ。
@@ -293,7 +310,7 @@ erDiagram
     lots ||--o{ wafers : "lot_id"
     lots ||--o{ parts : "lot_id"
     wafers ||--o{ parts : "lot_id, wafer_id"
-    parts ||--o{ test_data : "lot_id, wafer_id, part_id"
+    parts ||--o{ test_data : "lot_id, wafer_id, die_key"
     parts ||--o{ chipid : "lot_id, part_txt (FT)"
 
     lots {
@@ -312,7 +329,7 @@ erDiagram
         int retest_num
     }
     parts {
-        string part_id PK
+        string part_id "per-file counter"
         string lot_id FK
         string wafer_id FK
         int x_coord
@@ -322,7 +339,7 @@ erDiagram
         bool passed
     }
     test_data {
-        string part_id FK
+        string die_key "computed in *_final"
         string part_txt
         int test_num
         string test_name

@@ -211,6 +211,14 @@ def test_db_shell_drops_stale_views(tmp_path, synth_store, monkeypatch):
 
     con = duckdb.connect(str(db_path))
     con.execute("CREATE VIEW leftover_mart AS SELECT 1 AS x")   # 過去の登録を模す
+    # 過去の登録一覧に含めておく(dbt 時代のマート等)。一覧が無い旧 DB では
+    # 非登録ビュー全部を落とすが、一覧があるときは「我々が作った残骸」だけを
+    # 落とし、ユーザーが shell で作ったビューを巻き込まない。
+    con.execute(
+        "UPDATE _stdf_mount_state "
+        "SET fingerprint = 'stale', "
+        "    registered = registered || ',leftover_mart'"
+    )
     con.close()
 
     r = CliRunner().invoke(main, ["db", "shell", "--refresh"], env=env)
@@ -223,6 +231,22 @@ def test_db_shell_drops_stale_views(tmp_path, synth_store, monkeypatch):
     con.close()
     assert "leftover_mart" not in names
     assert "parts_final" in names        # 現行のビューは残っている
+
+
+def test_stale_views_preserves_user_views(tmp_path):
+    import duckdb
+    from stdf_platform.cli import _stale_views
+
+    conn = duckdb.connect()
+    conn.execute("CREATE VIEW parts_final AS SELECT 1 AS x")
+    conn.execute("CREATE VIEW user_view AS SELECT 1 AS y")
+
+    # 前回登録が分かる場合: 我々が作った previous の残骸だけ落とす
+    assert _stale_views(conn, ["parts_final"],
+                        ["parts_final", "lot_summary"]) == ["lot_summary"]
+    # 前回状態が無い旧 DB: 従来通り非登録ビューを落とす
+    assert _stale_views(conn, ["parts_final"], None) == ["user_view"]
+    conn.close()
 
 
 def test_db_shell_explains_how_to_recover_from_a_broken_db_file(tmp_path, synth_store):
