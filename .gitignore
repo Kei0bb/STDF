@@ -37,4 +37,8 @@ docs/superpowers/
 workspace/*
 !workspace/README.md
 !workspace/query.py.example
+
+# 個人用の名前付きクエリ。本番機で手元改造するので git に上げない。
+# 同梱クエリは src/stdf_platform/sql/(同名なら個人用が優先)。
+/sql/
 *.duckdb

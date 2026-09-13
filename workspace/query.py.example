@@ -2,9 +2,9 @@
 # # stdf — 分析ワークスペース
 # `cp workspace/query.py.example workspace/query.py` して使う。Shift+Enter でセル実行。
 #
-# - 定番クエリは `sql/` にファイルとして置いてある。`s.run("名前", lot=...)` で
-#   DataFrame、`out=` を付ければ CSV。中身は `sql/` を開けば読めるし、
-#   そのファイル単体でも実行できる(冒頭の SET VARIABLE が既定値)。
+# - 定番クエリは同梱(src/stdf_platform/sql/)、手元の改造・自作は直下の `sql/`
+#   (git 管理外、同名なら優先)。`s.run("名前", lot=..., product=...)` で DataFrame、
+#   `out=` を付ければ CSV。受け取れる条件は `s.queries()` の params 列。
 #   ビルドは要らない — 生ビューを直接読む。
 # - ここは**書き捨て**の場所。使い回すクエリは `sql/` にファイルとして足すこと。
 
@@ -15,7 +15,7 @@ from stdf_platform.mounts import _DEDUP_UNIT, die_key_expr   # use_lot() が使�
 # 引数なし = config.yaml の storage.data_dir を解決(相対パスは config.yaml の
 # 置き場所基準。cwd がどこでも同じストアを指す)。別ストアを見るときだけ
 # AnalysisSession("/path/to/data") のように明示する。
-_session = s = AnalysisSession()   # s.run() / s.queries() / s.show() で sql/ を使う
+_session = s = AnalysisSession()   # s.run() / s.queries() / s.show() で名前付きクエリを使う
 con = _session.conn
 DATA_DIR = _session.data_dir
 
@@ -38,8 +38,8 @@ def to_csv(sql: str, output="output.csv"):
 LOT_ID: str | None = None   # use_lot() が設定。各セルでも上書き可。
 
 # %% [markdown]
-# ## 定番クエリ(sql/)
-# ファイル1個 = クエリ1個。`sql/` を開けば一覧になっている。
+# ## 名前付きクエリ
+# ファイル1個 = クエリ1個。source 列: package = 同梱 / personal = 直下の sql/
 
 # %% どんなクエリがあるか
 s.queries()
@@ -56,6 +56,9 @@ print(s.show("cpk"))
 
 # %% 追加パラメータのあるクエリ
 s.run("cpk", lot=LOT_ID, test_name="Vth%")
+
+# %% 条件は複数同時に渡せる(渡さなかった任意条件は絞らない)
+s.run("lot_list", product="YOUR_PRODUCT", test_category="CP")
 
 # %% [markdown]
 # ## 生ビューを直接叩く(書き捨ての探索)

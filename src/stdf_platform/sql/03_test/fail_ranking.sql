@@ -1,5 +1,4 @@
 -- Fail テストランキング(ワースト順)
-SET VARIABLE lot = 'LOT001';
 
 SELECT test_num, test_name,
        COUNT(*) AS total,

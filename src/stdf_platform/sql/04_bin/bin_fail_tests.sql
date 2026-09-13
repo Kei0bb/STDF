@@ -1,5 +1,4 @@
 -- ビンごとに、どのテストで落ちたか
-SET VARIABLE lot = 'LOT001';
 
 SELECT p.hard_bin, p.soft_bin, td.test_num, td.test_name,
        COUNT(*) AS fail_count

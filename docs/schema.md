@@ -43,7 +43,7 @@ data/
 > **歩留りの算出元**: `wafers.part_count` / `good_count` は WRR の**報告値**で、
 > リテスト実行時は再測定した部分母集団しか含まず、FT には存在しません。
 > このため **歩留りは `parts_final`（ダイ/パッケージ単位・最新リテスト）から
-> 算出**します（`sql/01_lots/lot_yield.sql` / `AnalysisSession.lot_summary()` も同様）。
+> 算出**します（同梱クエリ `01_lots/lot_yield` / `AnalysisSession.lot_summary()` も同様）。
 > `wafers` は時刻・`rtst_count` 等の WRR メタ情報用と位置づけます。
 
 ---
