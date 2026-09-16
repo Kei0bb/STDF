@@ -319,3 +319,22 @@ def test_quarantined_file_is_skipped_on_the_next_run(tmp_path):
 
     _download_files(client, config, sync, remaining, verbose=False)
     assert client._ftp.fetched == first_round  # no second download
+
+
+def test_partial_download_is_removed_on_transfer_failure(tmp_path):
+    """RETR が途中で落ちた非 gz の .stdf を残さない。残留すると ingest-all が
+    切り詰めファイルを黙って取り込む（gz は decompress 失敗で消えるが、
+    非 gz はそのまま残っていた）。"""
+
+    class _FailingFTP:
+        def retrbinary(self, cmd, callback):
+            callback(b"partial")
+            raise OSError("connection reset")
+
+    client = FTPClient(FTPConfig())
+    client._ftp = _FailingFTP()
+
+    with pytest.raises(OSError):
+        client.download_file("/r/LOT.stdf", tmp_path, decompress=True)
+
+    assert not (tmp_path / "LOT.stdf").exists()

@@ -4,12 +4,12 @@
 `chipid`）を DuckDB ビュー経由で検索する際のリファレンスです。
 
 > [!TIP]
-> **まず `sql/` を見てください。** 定番の集計（ロット別歩留まり、Fail ランキング、
-> Cp/Cpk、bin パレート、bin×Fail テストの紐付け）は名前付きクエリとして
-> `sql/` に置いてあり、`s.run("fail_ranking", lot="...")` で引けます。
+> **まず名前付きクエリを見てください（`s.queries()`）。** 定番の集計（ロット別歩留まり、
+> Fail ランキング、Cp/Cpk、bin パレート、bin×Fail テストの紐付け）は名前付きクエリとして
+> 同梱してあり、`s.run("fail_ranking", lot="...")` で引けます。
 > 以下の生ビュー向けクエリの多くは、それらの単純な呼び出しに置き換えられます:
 >
-> | `sql/` のクエリ | 相当する本ドキュメントの節 |
+> | 名前付きクエリ | 相当する本ドキュメントの節 |
 > |---|---|
 > | `01_lots/lot_yield` | 2-3（ロット歩留りサマリ） |
 > | `03_test/fail_ranking` | 5-3（テスト項目ごとの Fail 率ワーストランキング） |
@@ -17,12 +17,13 @@
 > | `04_bin/bin_pareto` | 4-3（ソフトビン・パレート） |
 > | `04_bin/bin_fail_tests` | 7-3（Fail ビンとテスト項目の紐付け、簡易版） |
 >
-> `sql/` に無い切り口（ゾーン分析、外れ値検出、TP混在検出、Cpk スペック検討 等）は
-> 引き続き以下の生ビュークエリを使ってください。2回使った SQL は `sql/` へ昇格
-> させるのが推奨ワークフローです（`sql/README.md` と `workspace/README.md`）。
+> 名前付きクエリに無い切り口（ゾーン分析、外れ値検出、TP混在検出、Cpk スペック検討 等）は
+> 引き続き以下の生ビュークエリを使ってください。2回使った SQL はリポジトリ直下の
+> `sql/`（git 管理外）へ昇格させるのが推奨ワークフローです
+> （`src/stdf_platform/sql/README.md` と `workspace/README.md`）。
 
 > [!IMPORTANT]
-> **`sql/` に無い解析は原則 `*_final` ビューを使ってください。**
+> **名前付きクエリに無い解析は原則 `*_final` ビューを使ってください。**
 > 生テーブル（`parts` / `test_data`）はリテストの**全試行**を含むため、そのまま
 > 集計すると二重計上になります。`parts_final` / `test_data_final` /
 > `chipid_final` は「ダイ/パッケージごとに最新リテストのみ」へ重複排除済みです。
@@ -66,7 +67,7 @@ LOT_ID = "E6A773.00"
 > （小テーブルなのでコストは無視できる範囲）。同じロットへ繰り返しクエリするなら
 > `use_lot()` / `use_all()`（`workspace/query.py` のセル）で `*_final` を
 > メモリ上に materialize できます。同じ生ビュークエリを繰り返し使うなら
-> `sql/` への昇格を検討してください（`sql/README.md`）。
+> `sql/` への昇格を検討してください（`src/stdf_platform/sql/README.md`）。
 
 ### CLI から直接実行
 
@@ -214,7 +215,8 @@ SELECT
     td.passed AS test_passed
 FROM lots l
 JOIN parts_final p      ON l.lot_id = p.lot_id
-JOIN test_data_final td ON p.lot_id = td.lot_id AND p.part_id = td.part_id
+-- part_id はファイル内連番で部分リテスト時に別ダイへ振り直される。die_key で結合する
+JOIN test_data_final td ON p.lot_id = td.lot_id AND p.wafer_id = td.wafer_id AND p.die_key = td.die_key
 WHERE l.lot_id = 'YOUR_LOT_ID'
 ORDER BY p.wafer_id, p.part_id, td.test_num;
 ```
@@ -564,7 +566,9 @@ SELECT
     ROUND(AVG(td.result), 4) AS mean,
     ROUND(STDDEV(td.result), 4) AS sigma
 FROM test_data_final td
-JOIN parts_final p ON td.lot_id = p.lot_id AND td.part_id = p.part_id
+-- part_id ではなく die_key（CP=座標 / FT=バーコード→PART_ID→合成ID）で結合する
+JOIN parts_final p ON td.lot_id = p.lot_id AND td.wafer_id = p.wafer_id
+                  AND td.die_key = p.die_key
 WHERE td.lot_id = 'YOUR_LOT_ID' AND td.test_name = 'YOUR_TEST_NAME'
 GROUP BY p.site_num, td.test_name
 ORDER BY p.site_num;

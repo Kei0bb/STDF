@@ -1,5 +1,4 @@
 -- Cp / Cpk (test_name を '%' にすると全テスト)
-SET VARIABLE lot = 'LOT001';
 SET VARIABLE test_name = '%';
 
 SELECT test_num, test_name, units, lo_limit, hi_limit,

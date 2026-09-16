@@ -52,6 +52,7 @@ def test_verify_detects_orphaned_key(tmp_path, synth_store):
 
     row = {
         "lot_id": ["LOTORPHAN"], "wafer_id": ["W9"], "part_id": ["P9"], "part_txt": [""],
+        "part_serial": [""],
         "x_coord": [9], "y_coord": [9], "test_num": [1], "test_name": ["VCC"],
         "rec_type": ["PTR"], "lo_limit": [0.9], "hi_limit": [1.1], "units": ["V"],
         "result": [1.0], "passed": ["P"], "retest_num": [0],

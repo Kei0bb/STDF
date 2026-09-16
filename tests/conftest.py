@@ -207,7 +207,10 @@ def _write_null_flag_row(data_dir: Path) -> None:
     in synth_store, so it doesn't disturb the other synth_store-derived
     fixtures/assertions.
     """
-    old_schema = pa.schema([f for f in TEST_DATA_SCHEMA if f.name not in ("exec_seq", "retest_flag")])
+    old_schema = pa.schema([
+        f for f in TEST_DATA_SCHEMA
+        if f.name not in ("exec_seq", "retest_flag", "part_serial")
+    ])
     row = {
         "lot_id": ["LOTCORRUPT"], "wafer_id": ["WBAD"], "part_id": ["PBAD"], "part_txt": [""],
         "x_coord": [9], "y_coord": [9], "test_num": [1], "test_name": ["VCC"],
@@ -232,3 +235,16 @@ def corrupt_store(synth_store) -> Path:
     """
     _write_null_flag_row(synth_store)
     return synth_store
+
+
+@pytest.fixture(autouse=True)
+def _isolate_personal_sql_dir(tmp_path_factory, monkeypatch):
+    """開発者/本番機のリポジトリ直下 sql/(個人用・gitignore)をテストに混ぜない。
+
+    同名の個人用クエリは同梱クエリより優先されるので、手元で改造した
+    bin_pareto.sql などがテスト結果を変えてしまう。空のディレクトリに向ける。
+    """
+    from stdf_platform.analysis import library
+    if hasattr(library, "PERSONAL_SQL_DIR"):
+        monkeypatch.setattr(library, "PERSONAL_SQL_DIR",
+                            tmp_path_factory.mktemp("no_personal_sql"))

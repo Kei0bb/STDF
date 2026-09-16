@@ -51,30 +51,39 @@ class AnalysisSession:
         self.data_dir = Path(data_dir)
         self.conn = duckdb.connect(":memory:")
         self.registered = setup_views(self.conn, self.data_dir, config.gross_die_map)
-        # sql/ クエリライブラリの場所(run/queries/show が読む)。既定はリポジトリ同梱。
+        # 名前付きクエリの場所(run/queries/show が読む)。None なら個人用 sql/ →
+        # 同梱 src/stdf_platform/sql/ の順に探す。指定するとそのディレクトリだけ。
         self.sql_dir = sql_dir
 
     def q(self, sql: str, params: list | None = None) -> pd.DataFrame:
         """Run raw SQL (bound params) and return a DataFrame. Escape hatch."""
         return self.conn.execute(sql, params or []).fetchdf()
 
-    # ── sql/ クエリライブラリ ──────────────────────────────────────
+    # ── 名前付きクエリ ────────────────────────────────────────────
 
     def run(self, name: str, out: Path | str | None = None, **params):
-        """sql/ の名前付きクエリを実行して DataFrame を返す。
+        """名前付きクエリを実行して DataFrame を返す。
+
+        params はクエリの変数(条件)。いくつでも同時に渡せる。クエリが必須と
+        する変数の渡し忘れ、クエリが使わない名前(typo)は TypeError。
+        受け取れる変数は s.queries() の params 列で分かる。
 
         out を渡すと DuckDB が直接 CSV に書き(COPY TO)、書き出した行数を
         返す — Python 側にデータが載らないので大きなエクスポート向け。
-        params はファイル冒頭の SET VARIABLE 既定値を上書きする。
 
             s.run("fail_ranking", lot="LOT002")
+            s.run("lot_list", product="P1", test_category="CP")
             s.run("die_test_export", lot="LOT002", out="lot002.csv")
         """
         from .library import run_query
         return run_query(self.conn, name, out=out, sql_dir=self.sql_dir, **params)
 
     def queries(self) -> pd.DataFrame:
-        """sql/ にあるクエリの一覧(name / description)。"""
+        """クエリの一覧(name / description / params / source)。
+
+        source は personal(リポジトリ直下 sql/)か package(同梱)。
+        同じ名前は個人用が優先され、一覧にも個人用だけが出る。
+        """
         from .library import list_queries
         return list_queries(self.sql_dir)
 
@@ -101,7 +110,7 @@ class AnalysisSession:
                    start_time, finish_time
             FROM (
                 SELECT *, ROW_NUMBER() OVER (
-                    PARTITION BY product, test_category, lot_id
+                    PARTITION BY product, test_category, lot_id, sub_process
                     ORDER BY start_time DESC) AS rn
                 FROM lots{clause}
             ) WHERE rn = 1

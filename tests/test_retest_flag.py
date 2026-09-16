@@ -246,7 +246,10 @@ def test_ptr_null_pin_num_matches(tmp_path):
 # ---------------------------------------------------------------------------
 
 def _old_schema() -> pa.Schema:
-    return pa.schema([f for f in TEST_DATA_SCHEMA if f.name not in ("exec_seq", "retest_flag")])
+    return pa.schema([
+        f for f in TEST_DATA_SCHEMA
+        if f.name not in ("exec_seq", "retest_flag", "part_serial")
+    ])
 
 
 def test_old_schema_store_skipped_by_demote(tmp_path):

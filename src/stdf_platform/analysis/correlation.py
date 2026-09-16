@@ -81,12 +81,16 @@ def test_correlation(s, product, lot_id, test_category, test_nums):
     ph = ",".join("?" for _ in test_nums)
     long = s.conn.execute(
         f"""
-        SELECT part_id, test_num, result
+        SELECT lot_id, wafer_id, die_key, test_num, result
         FROM test_data_final
         WHERE lot_id = ? AND test_num IN ({ph})
           AND result IS NOT NULL AND rec_type IN ('PTR','MPR')
         """,
         [lot_id] + list(test_nums),
     ).fetchdf()
-    wide = long.pivot_table(index="part_id", columns="test_num", values="result")
+    # part_id ではなく die_key（物理ダイ/パッケージ identity）で pivot する。
+    # 部分リテストでは part_id が別ダイに振り直され、測定値が1行に混ざる。
+    wide = long.pivot_table(
+        index=["lot_id", "wafer_id", "die_key"], columns="test_num", values="result"
+    )
     return wide.corr()

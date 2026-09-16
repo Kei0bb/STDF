@@ -97,6 +97,10 @@ class STDFParser:
         self._cached_part_id = ""  # reused across all test results for current part
         self._current_chip_efuses = []  # EN-SO-CHIPID_R values for the current DUT
         self._sdr_values = {name: set() for name in SDR_FIELDS}
+        # Absolute end offset of the record currently being parsed; None outside
+        # a record. _read_cn clamps to it so a corrupt length cannot overrun
+        # into the next record (the parse loop also seek-resyncs afterward).
+        self._rec_end: int | None = None
         self._set_endian("<")  # Little endian by default
 
     def _set_endian(self, endian: str):
@@ -152,11 +156,37 @@ class STDFParser:
         length = self._read_u1(f)
         if length == 0:
             return ""
+        if self._rec_end is not None:
+            # 壊れた長さフィールドで次レコードへ読み越さない。はみ出した分は
+            # 読み捨て、レコード側の復帰シークで整合させる。
+            length = min(length, max(0, self._rec_end - f.tell()))
+            if length == 0:
+                return ""
         data = f.read(length)
         try:
             return data.decode("ascii", errors="replace").replace("\x00", "").strip()
         except Exception:
             return ""
+
+    def _sniff_endian(self, f: BinaryIO) -> None:
+        """Decide the byte order of the FAR header itself from the first 4 bytes.
+
+        `_parse_far` sets the byte order for everything *after* the FAR from its
+        CPU_TYPE byte — but the FAR's own REC_LEN (2 bytes) is already written in
+        the file's byte order. Read little-endian, a big-endian file yields
+        rec_len = 0x0200 and the parse loop skips 512 bytes past the FAR, losing
+        the MIR (and with it lot_id). The FAR is always the first record, always
+        rec_len=2, always (typ, sub) = (0, 10), so the length bytes identify the
+        order unambiguously. A file that does not start with a FAR keeps the
+        little-endian default, exactly as before.
+        """
+        head = f.read(4)
+        f.seek(0)
+        if len(head) == 4 and head[2] == 0 and head[3] == 10:
+            if head[0] == 0 and head[1] == 2:
+                self._set_endian(">")
+            elif head[0] == 2 and head[1] == 0:
+                self._set_endian("<")
 
     def _read_header(self, f: BinaryIO) -> tuple[int, int, int]:
         """Read 4-byte record header. Returns (rec_len, rec_typ, rec_sub)."""
@@ -359,6 +389,7 @@ class STDFParser:
         part = {
             "part_id": synth_part_id,
             "part_txt": part_txt,
+            "part_serial": part_id_serial,  # PRR.PART_ID — FT の barcode 欠損時フォールバック
             "lot_id": self.data.lot_id,
             "wafer_id": self.data._current_wafer,
             "head_num": head_num,
@@ -704,9 +735,16 @@ class STDFParser:
         self._part_counter = 0
         self._current_chip_efuses = []
         self._sdr_values = {name: set() for name in SDR_FIELDS}
+        self._rec_end = None
+        self._set_endian("<")  # 前ファイルの FAR を持ち越さない
 
         with open(file_path, "rb") as f:
+            self._sniff_endian(f)
             while True:
+                # 例外ハンドラが直前レコードの末尾に巻き戻して同じヘッダを
+                # 読み直す(無限ループ)のを防ぐため、毎周回クリアする。
+                rec_end: int | None = None
+                rec_typ = rec_sub = None
                 try:
                     rec_len, rec_typ, rec_sub = self._read_header(f)
 
@@ -716,6 +754,8 @@ class STDFParser:
 
                     rec_key = (rec_typ, rec_sub)
                     start_pos = f.tell()
+                    rec_end = start_pos + rec_len
+                    self._rec_end = rec_end
 
                     if rec_key == REC_FAR:
                         self._parse_far(f, rec_len)
@@ -751,17 +791,23 @@ class STDFParser:
                         # Skip unknown record
                         f.read(rec_len)
 
-                    # Ensure we consumed exactly rec_len bytes
-                    consumed = f.tell() - start_pos
-                    if consumed < rec_len:
-                        f.read(rec_len - consumed)
+                    # Ensure we consumed exactly rec_len bytes. A malformed
+                    # record (e.g. an over-long Cn) may have over-read into the
+                    # next record; always seek to the boundary so one bad record
+                    # cannot desync the rest of the stream.
+                    if f.tell() != rec_end:
+                        f.seek(rec_end)
 
                 except EOFError:
                     break
                 except Exception as e:
                     logger.debug("Skipping record (typ=%s, sub=%s): %s", rec_typ, rec_sub, e)
+                    if rec_end is None:
+                        break  # ヘッダすら読めていない — 位置が不明なので打ち切る
+                    f.seek(rec_end)
                     continue
 
+        self._rec_end = None
         # Collapse every SDR's values into one string per field (see SDR_FIELDS).
         for name in SDR_FIELDS:
             setattr(self.data, name, ",".join(sorted(self._sdr_values[name])))

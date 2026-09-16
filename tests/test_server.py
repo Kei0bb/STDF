@@ -5,6 +5,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import pytest
 from fastapi.testclient import TestClient
 
 from stdf_platform.config import Config, ServerConfig, StorageConfig
@@ -194,3 +195,82 @@ def test_schema_survives_broken_view(tmp_path, monkeypatch):
     assert "chipid" in tables
     assert "error" in tables["chipid"]
     assert "columns" not in tables["chipid"]
+
+
+def test_session_applies_server_limits(tmp_path):
+    from stdf_platform.server.app import _open_locked_session
+
+    _write_cp(tmp_path)
+    cfg = Config(storage=StorageConfig(data_dir=tmp_path),
+                 server=ServerConfig(memory_limit="1GB", threads=1))
+    session = _open_locked_session(cfg)
+    try:
+        assert session.conn.execute(
+            "SELECT current_setting('threads')"
+        ).fetchone()[0] == 1
+    finally:
+        session.close()
+
+
+def test_query_timeout_returns_504(tmp_path):
+    client = _client(tmp_path, query_timeout_seconds=1)
+    resp = client.post("/api/query", json={
+        "sql": "SELECT COUNT(*) FROM range(100000000) a, range(100000000) b",
+    })
+    assert resp.status_code == 504
+    assert "timed out" in resp.json()["detail"]
+
+
+def test_nested_nan_is_serialized_as_null(tmp_path):
+    resp = _client(tmp_path).post(
+        "/api/query", json={"sql": "SELECT [double 'nan', 1.0] AS v"}
+    )
+    assert resp.status_code == 200
+    assert resp.json()["rows"] == [[[None, 1.0]]]
+
+
+def test_nested_blob_is_hex_encoded(tmp_path):
+    resp = _client(tmp_path).post(
+        "/api/query", json={"sql": r"SELECT {'b': '\xFF'::BLOB} AS v"}
+    )
+    assert resp.status_code == 200
+    assert resp.json()["rows"] == [[{"b": "ff"}]]
+
+
+def test_csv_formula_injection_is_neutralized(tmp_path):
+    resp = _client(tmp_path).post(
+        "/api/query", json={"sql": "SELECT '=1+1' AS v", "format": "csv"}
+    )
+    assert resp.status_code == 200
+    assert resp.text.strip().splitlines()[1] == "'=1+1"
+
+
+def test_invalid_format_rejected(tmp_path):
+    resp = _client(tmp_path).post(
+        "/api/query", json={"sql": "SELECT 1", "format": "xml"}
+    )
+    assert resp.status_code == 400
+
+
+def test_memory_limit_validation_accepts_yaml_number():
+    """YAML が memory_limit: 2 を int にしても TypeError で 500 にしない。"""
+    from stdf_platform.server.app import validate_memory_limit
+
+    assert validate_memory_limit(2) == "2"
+    assert validate_memory_limit("512MB") == "512MB"
+    assert validate_memory_limit(" 80% ") == "80%"
+    with pytest.raises(ValueError):
+        validate_memory_limit("2 gigabytes")
+
+
+def test_csv_export_does_not_mangle_negative_strings(tmp_path):
+    """数式インジェクション対策で '-' 始まりの正当な値を壊さない。"""
+    r = _client(tmp_path).post("/api/query", json={
+        "sql": "SELECT '-3.5' AS neg, '=1+1' AS formula, '-TEST_A' AS name",
+        "format": "csv",
+    })
+    assert r.status_code == 200
+    body = r.text.splitlines()[1]
+    assert "-3.5" in body and "'-3.5" not in body
+    assert "-TEST_A" in body and "'-TEST_A" not in body
+    assert "'=1+1" in body

@@ -179,14 +179,14 @@ def run_ingest_pool(
 
     Grouping and ordering rely on the FTP filename convention: the lot
     prefix is the text before the first '_', and the measurement timestamp
-    is the text after the last '#'. A wrong grouping only costs parallelism
-    in one direction: OVER-grouping (e.g. two unrelated files sharing a
-    prefix) just serializes files that could have run in parallel, which is
-    safe. UNDER-grouping cannot silently happen for files that really share
-    a lot, because `_lot_key` falls back to the literal filename (its own
-    single-file group) only when there is no '_' at all — an unexpected
-    naming scheme degrades to one group per file, not to merging unrelated
-    lots.
+    is the text after the last '#'. Over-grouping (two unrelated files sharing
+    a prefix) only costs parallelism and is safe. Under-grouping is NOT
+    impossible: if files of the same MIR lot have different filename prefixes
+    (or no '_'), they land in different groups and run concurrently, racing on
+    `_get_next_retest_num` / `_demote_superseded`. The fallback to the literal
+    filename only keeps a single oddly-named file from merging with unrelated
+    lots; it does not detect same-lot files. Treat the prefix as a heuristic
+    and keep the store single-writer per lot.
 
     Args:
         files: List of (remote_path, local_path, product, ttype) tuples.

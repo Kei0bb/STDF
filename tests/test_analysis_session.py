@@ -134,3 +134,29 @@ def test_session_stdf_config_wins_over_repo_config_fallback(monkeypatch, tmp_pat
     with session_mod.AnalysisSession() as s:   # data_dir=None → STDF_CONFIG must win
         assert s.data_dir == tmp_path
         assert "parts_final" in s.registered
+
+
+def test_lots_keeps_sub_process_distinct(tmp_path):
+    """lots ビューは (lot, product, test_category, sub_process) ごとに1行。
+    lots() が sub_process を PARTITION に含めないと片方が黙って落ちる。"""
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    for sub in ("CP1", "CP2"):
+        p = (tmp_path / "runs" / "product=P" / "test_category=CP"
+             / f"sub_process={sub}" / "lot_id=LOT" / "wafer_id=W1"
+             / "retest=0" / "data.parquet")
+        p.parent.mkdir(parents=True, exist_ok=True)
+        pq.write_table(pa.table({
+            "lot_id": ["LOT"], "wafer_id": ["W1"], "product": ["P"],
+            "test_category": ["CP"], "sub_process": [sub], "retest_num": [0],
+            "part_type": ["T"], "job_name": ["J"], "job_rev": ["A"],
+            "tester_type": ["T"], "operator": ["OP"],
+            "start_time": [pa.scalar(1_700_000_000_000, pa.timestamp("ms", tz="UTC"))],
+            "finish_time": [pa.scalar(1_700_000_100_000, pa.timestamp("ms", tz="UTC"))],
+            "test_rev": [""], "source_file": [""],
+        }), p)
+
+    with AnalysisSession(tmp_path) as s:
+        df = s.lots()
+    assert sorted(df["sub_process"]) == ["CP1", "CP2"]

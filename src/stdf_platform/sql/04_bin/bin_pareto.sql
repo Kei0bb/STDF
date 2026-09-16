@@ -1,5 +1,4 @@
 -- ビン分布(ロット全体)。gross die 未測定ダイは gd_fail_bin に計上される。
-SET VARIABLE lot = 'LOT001';
 
 WITH binned AS (
     -- 実測されたダイ

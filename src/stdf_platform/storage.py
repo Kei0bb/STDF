@@ -1,5 +1,6 @@
 """Parquet storage for STDF data."""
 
+import logging
 import os
 import re
 import tempfile
@@ -14,6 +15,8 @@ import pyarrow.parquet as pq
 from .parser import STDFData
 from .config import StorageConfig
 from .chipid import decode_chipid
+
+logger = logging.getLogger(__name__)
 
 
 # Default timestamp for invalid values (compatible with Parquet viewers)
@@ -86,6 +89,7 @@ WAFERS_SCHEMA = pa.schema([
 PARTS_SCHEMA = pa.schema([
     ("part_id", pa.string()),
     ("part_txt", pa.string()),   # PRR.PART_TXT (2D barcode) — unique FT package key
+    ("part_serial", pa.string()),  # PRR.PART_ID — FT の barcode 欠損時フォールバック
     ("lot_id", pa.string()),
     ("wafer_id", pa.string()),
     ("head_num", pa.int64()),
@@ -107,6 +111,7 @@ TEST_DATA_SCHEMA = pa.schema([
     ("wafer_id", pa.string()),
     ("part_id", pa.string()),
     ("part_txt", pa.string()),   # PRR.PART_TXT (2D barcode) — unique FT package key
+    ("part_serial", pa.string()),  # PRR.PART_ID — FT の barcode 欠損時フォールバック
     ("x_coord", pa.int64()),
     ("y_coord", pa.int64()),
     # Test identification
@@ -349,9 +354,61 @@ class ParquetStorage:
             if "retest_flag" not in existing_schema.names:
                 continue  # store not yet migrated; skip per docstring
 
+            # The old file may predate part_serial; build the same identity
+            # expression the new run used (part_txt → part_serial → part_id),
+            # referencing only the columns that file actually has.
+            has_serial = "part_serial" in existing_schema.names
+            ft_parts = ["NULLIF(old.part_txt, '')"]
+            if has_serial:
+                ft_parts.append("NULLIF(old.part_serial, '')")
+            if "part_id" in existing_schema.names:
+                ft_parts.append("old.part_id")
+            old_ft = f"COALESCE({', '.join(ft_parts)})"
+
             con = duckdb.connect()
             try:
                 con.register("new_keys", new_keys_table)
+                if not has_serial:
+                    # A pre-part_serial file cannot express the identity the new
+                    # run uses for a barcode-less FT package: its own part_serial
+                    # was never stored and its part_id is a per-file counter. The
+                    # join below can then never match, and the superseded rows
+                    # keep retest_flag = 0 — test_data_final would return both the
+                    # old and the new measurement for one package. Nothing here
+                    # can recover it, so say so loudly instead of silently
+                    # producing duplicates.
+                    stale_ft = con.execute(f"""
+                        SELECT COUNT(*) FROM read_parquet(
+                            '{old_path.as_posix()}'
+                        ) WHERE x_coord = -32768 AND y_coord = -32768
+                          AND COALESCE(part_txt, '') = ''
+                    """).fetchone()[0]
+                    if stale_ft:
+                        logger.warning(
+                            "%s: %d barcode-less FT rows predate part_serial; "
+                            "their retest_flag cannot be reconciled with the new "
+                            "run. This lot must be wiped and re-ingested "
+                            "(test_data_final will otherwise return both runs).",
+                            old_path, stale_ft,
+                        )
+                # Skip the rewrite entirely when no key matches this file:
+                # without this, every new retest rewrote every older retest
+                # file (O(K^2) I/O) even when nothing was re-measured there.
+                matched = con.execute(f"""
+                    SELECT COUNT(*)
+                    FROM (SELECT * FROM read_parquet('{old_path.as_posix()}')) old
+                    JOIN (SELECT DISTINCT * FROM new_keys) nk
+                      ON old.wafer_id = nk.wafer_id
+                     AND old.x_coord = nk.x_coord
+                     AND old.y_coord = nk.y_coord
+                     AND (CASE WHEN old.x_coord = -32768 AND old.y_coord = -32768
+                               THEN {old_ft} ELSE '' END) = nk.ft_txt
+                     AND old.test_num = nk.test_num
+                     AND old.pin_num IS NOT DISTINCT FROM nk.pin_num
+                """).fetchone()[0]
+                if matched == 0:
+                    continue
+
                 updated = con.execute(f"""
                     WITH nk AS (SELECT DISTINCT * FROM new_keys)
                     SELECT old.* EXCLUDE (file_row_number) REPLACE (
@@ -369,7 +426,7 @@ class ParquetStorage:
                      AND old.x_coord = nk.x_coord
                      AND old.y_coord = nk.y_coord
                      AND (CASE WHEN old.x_coord = -32768 AND old.y_coord = -32768
-                               THEN old.part_txt ELSE '' END) = nk.ft_txt
+                               THEN {old_ft} ELSE '' END) = nk.ft_txt
                      AND old.test_num = nk.test_num
                      AND old.pin_num IS NOT DISTINCT FROM nk.pin_num
                     ORDER BY old.file_row_number
@@ -377,7 +434,12 @@ class ParquetStorage:
             finally:
                 con.close()
 
-            updated = updated.cast(TEST_DATA_SCHEMA)
+            # A file lacking part_serial (pre-migration) must still be written
+            # back in the current schema; append NULL and reorder.
+            if "part_serial" not in updated.column_names:
+                updated = updated.append_column(
+                    "part_serial", pa.nulls(updated.num_rows, pa.string()))
+            updated = updated.select(TEST_DATA_SCHEMA.names).cast(TEST_DATA_SCHEMA)
             self._write_parquet(updated, old_path)
 
     def save_stdf_data(
@@ -530,6 +592,7 @@ class ParquetStorage:
                 part_table = pa.table({
                     "part_id": [p.get("part_id", "") for p in parts],
                     "part_txt": [p.get("part_txt", "") for p in parts],
+                    "part_serial": [p.get("part_serial", "") for p in parts],
                     "lot_id": [p.get("lot_id", "") for p in parts],
                     "wafer_id": [p.get("wafer_id", "") for p in parts],
                     "head_num": [p.get("head_num", 0) for p in parts],
@@ -551,6 +614,7 @@ class ParquetStorage:
         if data.test_results:
             part_coords = {}
             part_txt_map = {}
+            part_serial_map = {}
             for part in data.parts:
                 part_id = part.get("part_id", "")
                 part_coords[part_id] = (
@@ -558,6 +622,7 @@ class ParquetStorage:
                     part.get("y_coord", -32768),
                 )
                 part_txt_map[part_id] = part.get("part_txt", "")
+                part_serial_map[part_id] = part.get("part_serial", "")
 
             result_groups: dict[tuple, list] = {}
             for result in data.test_results:
@@ -589,7 +654,12 @@ class ParquetStorage:
                     part_id = r.get("part_id", "")
                     x_coord, y_coord = part_coords.get(part_id, (-32768, -32768))
                     part_txt = part_txt_map.get(part_id, "")
-                    ft_txt = part_txt if x_coord == -32768 and y_coord == -32768 else ""
+                    part_serial = part_serial_map.get(part_id, "")
+                    # Same identity as mounts.ft_identity(): barcode → PRR PART_ID
+                    # → synthetic part_id. Without the fallback an empty barcode
+                    # makes every FT package share one flag key.
+                    ft_txt = ((part_txt or part_serial or part_id)
+                              if x_coord == -32768 and y_coord == -32768 else "")
                     pin_num = r.get("pin_num")
                     flag_key = (wafer_id, x_coord, y_coord, ft_txt, test_num, pin_num)
                     exec_seq = seq_counters.get(flag_key, 0)
@@ -599,6 +669,7 @@ class ParquetStorage:
                         "wafer_id": r.get("wafer_id", ""),
                         "part_id": part_id,
                         "part_txt": part_txt,
+                        "part_serial": part_serial,
                         "x_coord": x_coord,
                         "y_coord": y_coord,
                         "test_num": test_num,
@@ -623,6 +694,7 @@ class ParquetStorage:
                     "wafer_id": [r["wafer_id"] for r in enriched],
                     "part_id": [r["part_id"] for r in enriched],
                     "part_txt": [r["part_txt"] for r in enriched],
+                    "part_serial": [r["part_serial"] for r in enriched],
                     "x_coord": [r["x_coord"] for r in enriched],
                     "y_coord": [r["y_coord"] for r in enriched],
                     "test_num": [r["test_num"] for r in enriched],

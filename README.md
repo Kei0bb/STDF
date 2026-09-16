@@ -22,7 +22,7 @@ cp config.yaml.example config.yaml
 # 3. データ取り込み
 stdf ingest-all ./var/downloads -p YOUR_PRODUCT
 
-# 4. 解析（VS Code）— 定番クエリは sql/ に名前付きで置いてある
+# 4. 解析（VS Code）— 定番クエリは同梱、手元の改造は sql/（git 管理外）
 cp workspace/query.py.example workspace/query.py
 #    query.py を開いて  s.queries()  /  s.run("fail_ranking", lot="LOT001")
 
@@ -55,7 +55,7 @@ var/downloads/
 DuckDB glob ビュー（クエリごとに fs スキャン、mounts.py）
      ↓
      ├── stdf db query / lots / programs  (CLI)
-     ├── workspace/query.py + sql/  (VS Code インタラクティブ / 名前付きクエリ)
+     ├── workspace/query.py + 名前付きクエリ  (VS Code インタラクティブ)
      └── stdf serve (読み取り専用 HTTP API)
           ├── ブラウザ SQL コンソール（GET /、追加インストール不要）
           └── 各メンバーの PC → client/stdf_client.py (VS Code) / 将来: ダッシュボード
@@ -68,8 +68,8 @@ DuckDB glob ビュー（クエリごとに fs スキャン、mounts.py）
 追跡されるのはソースとドキュメントだけで、**動かすと増えるものはすべて `var/` の下**に集約する。
 
 ```
-src/stdf_platform/   コアライブラリ
-sql/                 名前付きクエリライブラリ（1ファイル1クエリ / 日常の解析はここ）
+src/stdf_platform/   コアライブラリ（同梱の名前付きクエリ src/stdf_platform/sql/ を含む）
+sql/                 個人用の名前付きクエリ（git 管理外。同名なら同梱より優先）
 tests/               pytest
 docs/                スキーマ・サンプルクエリ・serve 運用
 scripts/             Windows タスクスケジューラ用 .ps1/.bat、診断スクリプト
@@ -96,7 +96,7 @@ var/                 ランタイム生成物（.gitignore で丸ごと除外）
 
 | モジュール | 役割 |
 |---|---|
-| `cli.py` | Click CLI — `ingest` / `ingest-all` / `fetch` / `build` / `db` / `export` / `serve` コマンド |
+| `cli.py` | Click CLI — `ingest` / `ingest-all` / `fetch` / `db` / `export` / `serve` コマンド |
 | `worker.py` | `ThreadPoolExecutor` でファイルごとに subprocess を起動・タイムアウト管理 |
 | `_ingest_worker.py` | 独立 subprocess — 1ファイルを parse → Parquet 書き込みして JSON を stdout に出力 |
 | `parser.py` | Pure Python STDF V4 パーサー（`struct.Struct` 最適化、FAR/MIR/WIR/PIR/PRR/PTR/MPR/FTR/PMR対応） |
@@ -115,28 +115,33 @@ var/                 ランタイム生成物（.gitignore で丸ごと除外）
 | `mounts.py`（旧 `views.py`） | `_DEDUP_UNIT` / `FLAG_INVARIANTS` / `store_fingerprint()` / `setup_views(conn, data_dir, gross_die_map)` の単一ソース。ビューは glob なので、登録後に ingest したデータも再登録なしで見える |
 | `config.py` | `config.yaml` 読み込み（FTP / Storage / Server 設定、`${ENV_VAR}` 展開対応） |
 
-#### 名前付きクエリ層（`sql/`）
+#### 名前付きクエリ層
 
-1ファイル1クエリ。フォルダを開けばそれが一覧で、番号順に読めば一通り分かる。
-ビルドも中間生成物も無く、生ビューを直接読む。
+1ファイル1クエリ。`AnalysisSession.run()` から呼ぶ。ビルドも中間生成物も無く、生ビューを直接読む。
+置き場所は2つで、**同じ名前なら個人用が優先**される:
 
-| ディレクトリ | 内容 |
+| 場所 | git | 用途 |
+|---|---|---|
+| `sql/` | 管理しない | 個人用・本番機で手元改造するクエリ |
+| `src/stdf_platform/sql/` | 管理する | 同梱の定番クエリ（テストとコードが使う） |
+
+| 同梱クエリ | 内容 |
 |---|---|
-| `sql/01_lots/` | ロット一覧 / ロット別歩留まりサマリ |
-| `sql/02_wafer/` | ウェーハ別歩留まり |
-| `sql/03_test/` | テスト項目一覧 / Fail ランキング / Cp・Cpk |
-| `sql/04_bin/` | ビン分布 / ビン×Fail テスト |
-| `sql/05_export/` | ダイ×テスト明細（CSV 書き出し前提） |
+| `01_lots/` | ロット一覧 / ロット別歩留まりサマリ（product / test_category / sub_process で任意に絞れる） |
+| `02_wafer/` | ウェーハ別歩留まり |
+| `03_test/` | テスト項目一覧 / Fail ランキング / Cp・Cpk |
+| `04_bin/` | ビン分布 / ビン×Fail テスト |
+| `05_export/` | ダイ×テスト明細（CSV 書き出し前提） |
 
-各ファイルは自己完結している — 冒頭の `SET VARIABLE lot = '...';` が既定値なので、
-エディタで開いてそのまま流しても動く。`AnalysisSession.run()` から呼ぶと引数が
-その既定値を上書きする。値はバインド変数として渡すので、SQL への文字列連結は不要。
-書き方と追加手順は `sql/README.md`。
+条件（変数）はキーワード引数で複数同時に渡せる。クエリが必須とする変数の渡し忘れと、
+クエリが使わない名前（typo）は `TypeError` になり、0 行を黙って返さない。任意条件は
+`SET VARIABLE x = NULL;` と `opt_eq(col, getvariable('x'))` で書く。値はバインド変数として
+渡すので、SQL への文字列連結は不要。書き方と追加手順は `src/stdf_platform/sql/README.md`。
 
 #### 個人解析層（`workspace/`）
 
 `README.md` と `query.py.example` のみ git 追跡。SQL の熟成ラダー（書き捨て →
-`sql/` → 必要なら事前計算）は `workspace/README.md` を参照。
+名前付きクエリ → 必要なら事前計算）は `workspace/README.md` を参照。
 
 #### マルチユーザー層
 
@@ -200,12 +205,13 @@ cp workspace/query.py.example workspace/query.py
 ```
 
 VS Code で `workspace/query.py` を開き、各セル (`# %%`) を Shift+Enter で実行（DuckDB）。
-定番の集計は `sql/` に名前付きで置いてあるので、まずそこから引く:
+定番の集計は名前付きクエリとして同梱してあるので、まずそこから引く:
 
 ```python
-s.queries()                                   # クエリ一覧（name / 説明）
+s.queries()                                   # クエリ一覧（name / 説明 / 受け取る変数 / 置き場所）
 s.run("fail_ranking", lot="LOT001")           # → DataFrame
 s.run("cpk", lot="LOT001", test_name="Vth%")  # 追加パラメータ
+s.run("lot_list", product="P1", test_category="CP")  # 条件は複数同時に渡せる
 print(s.show("cpk"))                          # SQL 本文を見る（改造の出発点）
 
 # CSV 書き出し（DuckDB COPY、メモリに載せない）。返り値は書き出した行数
@@ -219,8 +225,8 @@ q("SELECT * FROM test_data_final WHERE lot_id = 'E6A773.00'")
 メモリ上に materialize できる（`use_all()` で全ロットに復元）。
 
 > 同じ SQL を2回使ったら `sql/` の該当フォルダへ昇格させる（1行目を `-- 説明` に、
-> 絞り込みは `getvariable('lot')`）。詳細は `sql/README.md` と
-> `workspace/README.md` の熟成ラダーを参照。
+> 条件は `getvariable('lot')`）。`sql/` は git 管理外なので本番機で気兼ねなく改造できる。
+> 詳細は `src/stdf_platform/sql/README.md` と `workspace/README.md` の熟成ラダーを参照。
 
 ### 分析 API（`stdf_platform.analysis`）
 
@@ -244,7 +250,7 @@ df = cp_ft_yield(s, product="SCT101A")
 df = zone_yield(s, product="SCT101A", lot_id="L001")
 ```
 
-すべての関数は `*_final` ビューを使用するため、歩留まり・Cpk の定義が `sql/` の
+すべての関数は `*_final` ビューを使用するため、歩留まり・Cpk の定義が名前付き
 クエリや CLI（`stdf db lots` / `stdf db query`）と完全に一致します。`workspace/query.py` は `# %%` セル形式（VS Code / Jupytext）で、
 Shift+Enter で逐次実行可能。
 
@@ -325,7 +331,7 @@ REM 動作テスト（即時実行）
 schtasks /Run /TN STDF_DailyFetch
 
 REM ログ確認
-type logs\fetch_*.log
+type var\logs\fetch_*.log
 
 REM 登録解除
 scripts\unregister_task.bat

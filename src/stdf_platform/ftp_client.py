@@ -171,9 +171,15 @@ class FTPClient:
         filename = Path(remote_path).name
         local_path = local_dir / filename
 
-        # Download file
-        with open(local_path, "wb") as f:
-            self._ftp.retrbinary(f"RETR {remote_path}", f.write)
+        # Download file. A transfer that dies mid-RETR leaves a partial file;
+        # for a non-gz .stdf nothing downstream would notice, and `ingest-all`
+        # would silently ingest the truncated data. Remove it on any failure.
+        try:
+            with open(local_path, "wb") as f:
+                self._ftp.retrbinary(f"RETR {remote_path}", f.write)
+        except Exception:
+            local_path.unlink(missing_ok=True)
+            raise
 
         # Decompress if needed
         if decompress and filename.endswith(".gz"):
