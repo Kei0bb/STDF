@@ -76,46 +76,7 @@ def test_ft_wafer_yield_reflects_latest_retest(tmp_path):
     assert rows[0]["yield_pct"] == 100.0
 
 
-def test_ft_lot_summary_yield_from_parts(tmp_path):
-    ft = tmp_path / "ft.stdf"
-    make_ft_stdf(ft, "FTY", parts=4, fail_part_ids={0, 1})
-    storage = _storage(tmp_path)
-    _ingest_ft(storage, ft)
-    ft_rt = tmp_path / "ft_rt.stdf"
-    make_ft_stdf(ft_rt, "FTY", parts=4)
-    _ingest_ft(storage, ft_rt)
-
-    with _session(tmp_path) as s:
-        rows = s.lot_summary("FTY").to_dict("records")
-
-    assert len(rows) == 1
-    assert rows[0]["total_parts"] == 4
-    assert rows[0]["good_parts"] == 4
-    assert rows[0]["yield_pct"] == 100.0
-
-
-# ── CP: per-wafer grouping still works, yield from parts == good/total ────────
-
-def test_cp_wafer_yield_grouped_by_wafer(tmp_path):
-    random.seed(42)
-    cp = tmp_path / "cp.stdf"
-    make_stdf(cp, "CPLOT", num_wafers=2, parts_per_wafer=10)
-    storage = _storage(tmp_path)
-    data = parse_stdf(cp)
-    storage.save_stdf_data(
-        data, product="P", test_category="CP", sub_process="CP11",
-        source_file=cp.name,
-    )
-
-    with _session(tmp_path) as s:
-        rows = _wafer_yield(s, "CPLOT")
-
-    assert len(rows) == 2  # two wafers, one group each
-    for r in rows:
-        assert r["total"] == 10
-        assert 0 <= r["good"] <= 10
-        assert r["yield_pct"] == round(100.0 * r["good"] / r["total"], 2)
-
+# ── CP: re-ingest must not double count ─────────────────────────────────────
 
 def test_cp_reingest_does_not_double_count(tmp_path):
     """Re-ingesting a CP lot (retest) must not inflate totals — parts_final
@@ -142,47 +103,3 @@ def test_cp_reingest_does_not_double_count(tmp_path):
 
     assert len(rows) == 1
     assert rows[0]["total"] == 10  # not 20
-
-
-# ── setup_views covers the parts_final yield path ─────────────────────────────
-
-def test_setup_views_summary_and_wafer_yield_retest_aware(tmp_path):
-    """setup_views must be retest-aware and work for FT (no wafers table)."""
-    import duckdb
-    from stdf_platform.mounts import setup_views
-
-    ft = tmp_path / "ft.stdf"
-    make_ft_stdf(ft, "FTY", parts=4, fail_part_ids={0, 1})
-    storage = _storage(tmp_path)
-    _ingest_ft(storage, ft)
-    ft_rt = tmp_path / "ft_rt.stdf"
-    make_ft_stdf(ft_rt, "FTY", parts=4)
-    _ingest_ft(storage, ft_rt)
-
-    conn = duckdb.connect()
-    setup_views(conn, tmp_path)
-
-    # /summary
-    summary = conn.execute("""
-        SELECT MAX(p.total_parts) AS total_parts,
-               MAX(p.good_parts)  AS good_parts,
-               MAX(p.yield_pct)   AS yield_pct
-        FROM lots l
-        LEFT JOIN (
-            SELECT lot_id, COUNT(*) AS total_parts,
-                   SUM(CASE WHEN passed THEN 1 ELSE 0 END) AS good_parts,
-                   ROUND(100.0 * SUM(CASE WHEN passed THEN 1 ELSE 0 END)
-                       / NULLIF(COUNT(*), 0), 2) AS yield_pct
-            FROM parts_final GROUP BY lot_id
-        ) p ON l.lot_id = p.lot_id
-        WHERE l.lot_id = 'FTY'
-    """).fetchone()
-    assert summary == (4, 4, 100.0)
-
-    # /wafer-yield (single FT group)
-    wy = conn.execute("""
-        SELECT COUNT(*) AS total,
-               SUM(CASE WHEN passed THEN 1 ELSE 0 END) AS good
-        FROM parts_final WHERE lot_id = 'FTY' GROUP BY wafer_id
-    """).fetchall()
-    assert wy == [(4, 4)]

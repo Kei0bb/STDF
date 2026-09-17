@@ -1,9 +1,6 @@
 """名前付きクエリライブラリ。1ファイル1クエリ、Python の `AnalysisSession.run()` から呼ぶ。
 
-置き場所は2つ。同じ名前なら個人用が勝つ:
-
-  - 個人用  <リポジトリ>/sql/              gitignore。本番機で手元改造するクエリ
-  - 同梱    src/stdf_platform/sql/         git 管理。テストとコードが使う定番クエリ
+置き場所はリポジトリ直下の sql/ だけ(git 管理)。本番機で編集して commit する。
 
 変数(条件)は呼び出し側がキーワード引数で渡す。いくつでも同時に渡せる:
 
@@ -41,48 +38,40 @@ from pathlib import Path
 import duckdb
 import pandas as pd
 
-# 同梱クエリ(src/stdf_platform/analysis/library.py → src/stdf_platform/sql)
-PACKAGE_SQL_DIR = Path(__file__).resolve().parents[1] / "sql"
-# 個人用クエリ(リポジトリ直下の sql/。gitignore)
-PERSONAL_SQL_DIR = Path(__file__).resolve().parents[3] / "sql"
+# リポジトリ直下の sql/(src/stdf_platform/analysis/library.py から3つ上)
+SQL_DIR = Path(__file__).resolve().parents[3] / "sql"
 
 _OPT_EQ_MACRO = "CREATE OR REPLACE TEMP MACRO opt_eq(col, v) AS (v IS NULL OR col = v)"
 
 
-def _search_path(sql_dir: Path | str | None) -> list[tuple[str, Path]]:
-    """探す順の (source, dir)。明示された sql_dir があればそこだけ。"""
-    if sql_dir is not None:
-        return [("explicit", Path(sql_dir))]
-    return [("personal", PERSONAL_SQL_DIR), ("package", PACKAGE_SQL_DIR)]
+def _root(sql_dir: Path | str | None) -> Path:
+    """明示された sql_dir があればそこ、無ければ SQL_DIR。"""
+    return SQL_DIR if sql_dir is None else Path(sql_dir)
 
 
-def _catalog(sql_dir: Path | str | None) -> dict[str, tuple[str, Path]]:
-    """name → (source, path)。先に見つかった方(個人用)が勝つ。"""
-    found: dict[str, tuple[str, Path]] = {}
-    for source, root in _search_path(sql_dir):
-        if not root.is_dir():
-            continue
-        for f in sorted(root.rglob("*.sql")):
-            name = f.relative_to(root).with_suffix("").as_posix()
-            found.setdefault(name, (source, f))
-    return found
+def _catalog(sql_dir: Path | str | None) -> dict[str, Path]:
+    """name("03_test/cpk")→ path。"""
+    root = _root(sql_dir)
+    if not root.is_dir():
+        return {}
+    return {f.relative_to(root).with_suffix("").as_posix(): f
+            for f in sorted(root.rglob("*.sql"))}
 
 
 def list_queries(sql_dir: Path | str | None = None) -> pd.DataFrame:
-    """`name` / `description` / `params` / `source` の一覧(フォルダ順)を返す。
+    """`name` / `description` / `params` の一覧(フォルダ順)を返す。
 
     params は必須変数をそのまま、任意変数を `name=既定値` で並べる。
     """
     rows = []
-    for name, (source, path) in sorted(_catalog(sql_dir).items()):
+    for name, path in sorted(_catalog(sql_dir).items()):
         params = query_params(path)
         rows.append({
             "name": name,
             "description": describe(path),
             "params": ", ".join(k if v is None else f"{k}={v}" for k, v in params.items()),
-            "source": source,
         })
-    return pd.DataFrame(rows, columns=["name", "description", "params", "source"])
+    return pd.DataFrame(rows, columns=["name", "description", "params"])
 
 
 def describe(path: Path) -> str:
@@ -98,21 +87,20 @@ def describe(path: Path) -> str:
 
 def find_query(name: str, sql_dir: Path | str | None = None) -> Path:
     """"03_test/fail_ranking" でも "fail_ranking" でも引けるようにする。"""
-    dirs = _search_path(sql_dir)
-    if sql_dir is not None and not Path(sql_dir).exists():
-        raise FileNotFoundError(f"クエリライブラリが見つかりません: {sql_dir}")
+    root = _root(sql_dir)
+    if not root.exists():
+        raise FileNotFoundError(f"クエリライブラリが見つかりません: {root}")
     catalog = _catalog(sql_dir)
     stem = name[:-4] if name.endswith(".sql") else name
     if stem in catalog:
-        return catalog[stem][1]
+        return catalog[stem]
     matches = [n for n in catalog if Path(n).name == Path(stem).name]
     if len(matches) == 1:
-        return catalog[matches[0]][1]
+        return catalog[matches[0]]
     if not matches:
         available = ", ".join(catalog) or "(空)"
-        searched = ", ".join(str(d) for _, d in dirs)
         raise FileNotFoundError(
-            f"クエリ '{name}' がありません。利用可能: {available}(探した場所: {searched})")
+            f"クエリ '{name}' がありません。利用可能: {available}(探した場所: {root})")
     raise ValueError(f"'{name}' は複数あります。フォルダ込みで指定してください: "
                      f"{', '.join(matches)}")
 

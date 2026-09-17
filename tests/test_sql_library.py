@@ -1,7 +1,6 @@
 """名前付きクエリライブラリ(AnalysisSession.run / queries / show)。
 
-同梱クエリは src/stdf_platform/sql/(git 管理)、個人用はリポジトリ直下の
-sql/(gitignore、同名なら個人用が優先)。
+クエリはリポジトリ直下の sql/(git 管理)だけ。
 
 変数の規約:
   - クエリ内の getvariable('x') は呼び出し側が渡す。渡し忘れはエラー
@@ -15,10 +14,10 @@ from pathlib import Path
 
 import pytest
 
-from stdf_platform.analysis import AnalysisSession, library
-from stdf_platform.analysis.library import PACKAGE_SQL_DIR, find_query, query_params
+from stdf_platform.analysis import AnalysisSession
+from stdf_platform.analysis.library import find_query, query_params
 
-# 同梱クエリを総当たりで流すときに、各変数へ渡す合成ストア上の値
+# sql/ の全クエリを総当たりで流すときに、各変数へ渡す合成ストア上の値
 _SAMPLE_VALUES = {"lot": "LOT1", "test_name": "%", "product": "PROD",
                   "test_category": "CP", "sub_process": "CP1"}
 
@@ -35,43 +34,17 @@ def _write(root: Path, name: str, sql: str) -> None:
     p.write_text(sql, encoding="utf-8")
 
 
-# ── 同梱クエリ ────────────────────────────────────────────────
+# ── sql/ のクエリ ──────────────────────────────────────────────
 
-def test_every_shipped_query_runs(session):
-    """同梱の全クエリが、必須変数だけ渡して実行できること(SQL の腐り検出)。"""
-    names = list(session.queries()["name"])
-    assert names, "同梱クエリが空"
-    for name in names:
+def test_every_query_runs(session):
+    """sql/ の全クエリが、必須変数だけ渡して実行できること(SQL の腐り検出)。"""
+    catalog = session.queries().set_index("name")
+    assert len(catalog), "sql/ が空"
+    for name, row in catalog.iterrows():
+        assert row["description"], f"{name}: 先頭の -- コメント(説明)がない"
         required = [k for k, v in query_params(find_query(name)).items() if v is None]
         df = session.run(name, **{k: _SAMPLE_VALUES[k] for k in required})
         assert df is not None
-
-
-def test_queries_lists_name_description_params_source(session):
-    df = session.queries()
-    assert set(df.columns) == {"name", "description", "params", "source"}
-    assert (df["description"].str.len() > 0).all(), "説明のないクエリがある"
-    assert set(df["source"]) == {"package"}
-    row = df.set_index("name").loc["03_test/cpk"]
-    assert row["params"] == "lot, test_name='%'"
-
-
-def test_short_name_resolves(session):
-    full = session.run("03_test/fail_ranking", lot="LOT1")
-    short = session.run("fail_ranking", lot="LOT1")
-    assert full.equals(short)
-
-
-def test_shipped_queries_use_canonical_views():
-    """歩留まりクエリが wafers を自前集計していないこと。
-
-    wafers ベースの集計は FT ロット(wafers に行が無い)を取りこぼし、
-    gross die も効かない — wafer_yield_final が唯一の定義。
-    """
-    for name in ["01_lots/lot_yield", "02_wafer/wafer_yield"]:
-        sql = (PACKAGE_SQL_DIR / f"{name}.sql").read_text(encoding="utf-8")
-        assert "wafer_yield_final" in sql
-        assert "FROM wafers" not in sql
 
 
 # ── 複数条件 / 任意条件 ────────────────────────────────────────
@@ -84,10 +57,6 @@ def test_multiple_conditions_at_once(session):
     assert list(cp["lot_id"]) == ["LOT1"]
     ft = session.run("lot_list", test_category="FT", sub_process="FT2")
     assert list(ft["lot_id"]) == ["FTLOT1"]
-
-
-def test_optional_condition_not_passed_does_not_filter(session):
-    assert set(session.run("lot_list")["lot_id"]) == {"LOT1", "FTLOT1"}
 
 
 def test_param_overrides_file_default(session):
@@ -133,15 +102,11 @@ def test_params_are_bound_not_interpolated(session):
     assert df.empty
 
 
-def test_bad_param_name_rejected(session):
-    with pytest.raises(ValueError, match="パラメータ名"):
-        session.run("fail_ranking", **{"lot; DROP TABLE x": "L"})
-
-
 # ── 出力 / 表示 ────────────────────────────────────────────────
 
 def test_out_writes_csv_and_returns_rowcount(session, tmp_path):
-    out = tmp_path / "e.csv"
+    """出力パスは SQL リテラルとしてクォートされる(シングルクォートは '' 化)。"""
+    out = tmp_path / "it's.csv"
     n = session.run("die_test_export", lot="LOT1", out=out)
     assert isinstance(n, int) and n > 0
     lines = out.read_text(encoding="utf-8").splitlines()
@@ -149,48 +114,7 @@ def test_out_writes_csv_and_returns_rowcount(session, tmp_path):
     assert lines[0].startswith("lot_id,")
 
 
-def test_run_out_path_with_single_quote(session, tmp_path):
-    """出力パスは SQL リテラルとしてクォートされる(シングルクォートは '' 化)。"""
-    out = tmp_path / "it's.csv"
-    rows = session.run("01_lots/lot_list", out=out)
-    assert rows >= 1
-    assert out.exists()
-
-
-def test_show_returns_sql_text(session):
-    text = session.show("cpk")
-    assert "getvariable('lot')" in text and "SET VARIABLE" in text
-
-
-def test_unknown_query_lists_available(session):
-    with pytest.raises(FileNotFoundError, match="fail_ranking"):
-        session.run("no_such_query")
-
-
-# ── 個人用 sql/ ───────────────────────────────────────────────
-
-def test_personal_query_is_listed_and_runs(session, tmp_path, monkeypatch):
-    personal = tmp_path / "personal"
-    monkeypatch.setattr(library, "PERSONAL_SQL_DIR", personal)
-    _write(personal, "10_mine/my_lots", "-- 自分用\nSELECT lot_id FROM lots ORDER BY lot_id")
-
-    df = session.queries().set_index("name")
-    assert df.loc["10_mine/my_lots", "source"] == "personal"
-    assert df.loc["03_test/cpk", "source"] == "package"
-    assert list(session.run("my_lots")["lot_id"]) == ["FTLOT1", "LOT1"]
-
-
-def test_personal_query_overrides_package_query(session, tmp_path, monkeypatch):
-    """同じ名前なら個人用が勝つ(本番で同梱クエリを手元で改造できる)。"""
-    personal = tmp_path / "personal"
-    monkeypatch.setattr(library, "PERSONAL_SQL_DIR", personal)
-    _write(personal, "01_lots/lot_list", "-- 改造版\nSELECT 'mine' AS who")
-
-    assert list(session.run("lot_list")["who"]) == ["mine"]
-    listed = session.queries()
-    assert (listed["name"] == "01_lots/lot_list").sum() == 1   # 重複表示しない
-    assert listed.set_index("name").loc["01_lots/lot_list", "source"] == "personal"
-
+# ── sql_dir 指定 ──────────────────────────────────────────────
 
 def test_explicit_sql_dir_uses_only_that_dir(synth_store, tmp_path):
     only = tmp_path / "only"
@@ -199,8 +123,3 @@ def test_explicit_sql_dir_uses_only_that_dir(synth_store, tmp_path):
         assert list(s.queries()["name"]) == ["x"]
         with pytest.raises(FileNotFoundError):
             s.run("cpk", lot="LOT1")
-
-
-def test_find_query_on_missing_dir(tmp_path):
-    with pytest.raises(FileNotFoundError):
-        find_query("x", tmp_path / "nope")

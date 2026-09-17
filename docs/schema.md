@@ -43,7 +43,7 @@ data/
 > **歩留りの算出元**: `wafers.part_count` / `good_count` は WRR の**報告値**で、
 > リテスト実行時は再測定した部分母集団しか含まず、FT には存在しません。
 > このため **歩留りは `parts_final`（ダイ/パッケージ単位・最新リテスト）から
-> 算出**します（同梱クエリ `01_lots/lot_yield` / `AnalysisSession.lot_summary()` も同様）。
+> 算出**します（名前付きクエリ `01_lots/lot_yield` / `AnalysisSession.lot_summary()` も同様）。
 > `wafers` は時刻・`rtst_count` 等の WRR メタ情報用と位置づけます。
 
 ---
@@ -299,7 +299,6 @@ Parquet スキャンまでプッシュダウンされ、高速。
 
 `retest_flag IS NULL`（旧スキーマ／フラグ未対応でストアされたファイル）の行は
 `test_data_final` から除外される — そのストアは再取り込みが必要。
-`stdf db verify` で検出できる。
 
 ---
 

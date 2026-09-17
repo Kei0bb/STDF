@@ -76,8 +76,8 @@
 
 利用できるビューは共有マシン上の解析と完全に同一(`runs` / `lots` / `parts_final` /
 `test_data_final` / `wafer_yield_final` などの実行時ビューは `mounts.py` に一本化)。
-定番の集計は名前付きクエリとして同梱してある — クエリ例は docs/sample_queries.md と
-`src/stdf_platform/sql/README.md` を参照。
+定番の集計は `sql/` の名前付きクエリにある — クエリ例は docs/sample_queries.md と
+`sql/README.md` を参照。
 
 ## パワーユーザー向けの代替: 共有フォルダ直読み
 

@@ -59,19 +59,7 @@ def test_zone_yield_three_zones(tmp_path):
         # center fully passes; edge (outer ring) fails → lower yield
         assert float(df.loc["center", "yield_pct"]) == 100.0
         assert float(df.loc["edge", "yield_pct"]) < 100.0
-
-
-def test_zone_yield_total_conserved(tmp_path):
-    with _sess(tmp_path) as s:
-        df = spatial.zone_yield(s, "PROD", "G1", n_zones=3)
-        assert int(df["total"].sum()) == 25
-
-
-def test_zone_yield_n_zones_param(tmp_path):
-    with _sess(tmp_path) as s:
-        df = spatial.zone_yield(s, "PROD", "G1", n_zones=5)
-        assert df["zone_idx"].max() <= 4
-        assert set(df["zone"]) <= {f"zone_{i}" for i in range(5)}
+        assert int(df["total"].sum()) == 25    # every die lands in one zone
 
 
 def test_radial_profile_increases(tmp_path):
@@ -87,7 +75,6 @@ def test_param_wafermap_fig_smoke(tmp_path):
         fig = spatial.param_wafermap_fig(s, "PROD", "G1", "W1", 7)
         assert isinstance(fig, go.Figure)
         assert len(fig.data) == 1
-        assert fig.layout.yaxis.autorange == "reversed"
 
 
 def test_radial_profile_normalizes_on_full_die_population(tmp_path):

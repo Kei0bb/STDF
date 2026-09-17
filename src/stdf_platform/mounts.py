@@ -63,46 +63,6 @@ def die_key_expr(prefix: str = "") -> str:
 _DEDUP_UNIT = f"wafer_id, x_coord, y_coord, {ft_identity()}"
 
 
-# test_data の retest_flag 整合性キー。_DEDUP_UNIT(ダイ識別)に test_num/pin_num を
-# 足したもの — flag はこの粒度で付く(storage.py が ingest 時に確定させる)。
-_FLAG_KEY = (
-    f"lot_id, wafer_id, x_coord, y_coord, {ft_identity()}, test_num, pin_num"
-)
-
-# storage.py が ingest 時に確定させる retest_flag の不変条件。壊れていれば
-# test_data_final(= retest_flag = 0)が黙って誤った行集合を返すので、
-# 測定値そのものより先にここが疑わしい。`stdf db verify` が実行する。
-#
-# 元は `stdf db verify-flags`(7813cb3 で廃止)→ dbt/tests/assert_*.sql(dbt 撤去で
-# 再び CLI へ)。SQL は素の DuckDB なので、どの経路からでも同じものが走る。
-FLAG_INVARIANTS: list[tuple[str, str, str]] = [
-    (
-        "null_flags",
-        "retest_flag が NULL の行(フラグ導入前に ingest されたファイル)",
-        "SELECT lot_id, COUNT(*) AS n FROM test_data "
-        "WHERE retest_flag IS NULL GROUP BY lot_id",
-    ),
-    (
-        "dup_current",
-        "同じキーの flag=0 が複数の run に跨っている",
-        f"SELECT {_FLAG_KEY} FROM test_data WHERE retest_flag = 0 "
-        f"GROUP BY {_FLAG_KEY} HAVING COUNT(DISTINCT retest_num) > 1",
-    ),
-    (
-        "inconsistent_runs",
-        "同一 run 内で同じキーのフラグが割れている",
-        f"SELECT {_FLAG_KEY}, retest_num FROM test_data "
-        f"GROUP BY {_FLAG_KEY}, retest_num HAVING MIN(retest_flag) != MAX(retest_flag)",
-    ),
-    (
-        "orphaned_keys",
-        "最新 run が flag=0 になっていないキー",
-        f"SELECT {_FLAG_KEY} FROM test_data "
-        f"GROUP BY {_FLAG_KEY} HAVING MIN(retest_flag) != 0",
-    ),
-]
-
-
 def store_fingerprint(data_dir: Path,
                       gross_die_map: dict[str, tuple[int, int]] | None = None) -> str:
     """A cheap signature of everything setup_views() would register.
@@ -276,9 +236,7 @@ def setup_views(
         # EXCLUDED here, not treated as "current": there is no reliable
         # per-key recency signal for them, so silently including them risks
         # mixing stale and current measurements. A store in this state must
-        # be re-ingested (the user's own WIPE-and-re-ingest plan covers
-        # this); `stdf db verify` (FLAG_INVARIANTS above) detects and
-        # reports it.
+        # be wiped and re-ingested.
         conn.execute(f"""
             CREATE OR REPLACE VIEW test_data_final AS
             SELECT *, {die_key_expr()} AS die_key

@@ -518,37 +518,6 @@ def shell(ctx, refresh):
     subprocess.run(["duckdb", str(db_path)])
 
 
-@db.command()
-@click.pass_context
-def verify(ctx):
-    """test_data の retest_flag 不変条件を検証する。
-
-    storage.py が ingest 時に確定させるフラグが壊れていると、test_data_final
-    (= retest_flag = 0)が黙って誤った行集合を返す — 測定値を疑う前にここを
-    見る。ストア全体を走査するので、日常的にではなく大量 ingest のあとや
-    結果が疑わしいときに回す。
-    """
-    from .mounts import FLAG_INVARIANTS
-
-    config: Config = ctx.obj["config"]
-    failures = 0
-    with AnalysisSession(config.storage.data_dir, config=config) as s:
-        for name, description, sql in FLAG_INVARIANTS:
-            df = s.q(sql)
-            if df.empty:
-                console.print(f"[green]OK[/green]   {name}")
-            else:
-                failures += 1
-                console.print(f"[red]NG[/red]   {name} — {description}")
-                console.print(f"       違反 {len(df):,} 件（先頭 5 件）")
-                console.print(df.head(5).to_string(index=False))
-    if failures:
-        console.print(f"\n[red]{failures} 件の不変条件が破れています。"
-                      "該当ロットを再 ingest してください。[/red]")
-        sys.exit(1)
-    console.print("\n[green]すべての不変条件を満たしています。[/green]")
-
-
 def _run_ingest_batch(
     config,
     sync_manager,

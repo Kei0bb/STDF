@@ -51,8 +51,7 @@ class AnalysisSession:
         self.data_dir = Path(data_dir)
         self.conn = duckdb.connect(":memory:")
         self.registered = setup_views(self.conn, self.data_dir, config.gross_die_map)
-        # 名前付きクエリの場所(run/queries/show が読む)。None なら個人用 sql/ →
-        # 同梱 src/stdf_platform/sql/ の順に探す。指定するとそのディレクトリだけ。
+        # 名前付きクエリの場所(run/queries/show が読む)。None ならリポジトリ直下 sql/。
         self.sql_dir = sql_dir
 
     def q(self, sql: str, params: list | None = None) -> pd.DataFrame:
@@ -79,11 +78,7 @@ class AnalysisSession:
         return run_query(self.conn, name, out=out, sql_dir=self.sql_dir, **params)
 
     def queries(self) -> pd.DataFrame:
-        """クエリの一覧(name / description / params / source)。
-
-        source は personal(リポジトリ直下 sql/)か package(同梱)。
-        同じ名前は個人用が優先され、一覧にも個人用だけが出る。
-        """
+        """sql/ のクエリ一覧(name / description / params)。"""
         from .library import list_queries
         return list_queries(self.sql_dir)
 

@@ -22,7 +22,7 @@ cp config.yaml.example config.yaml
 # 3. データ取り込み
 stdf ingest-all ./var/downloads -p YOUR_PRODUCT
 
-# 4. 解析（VS Code）— 定番クエリは同梱、手元の改造は sql/（git 管理外）
+# 4. 解析（VS Code）— 名前付きクエリは sql/
 cp workspace/query.py.example workspace/query.py
 #    query.py を開いて  s.queries()  /  s.run("fail_ranking", lot="LOT001")
 
@@ -68,8 +68,8 @@ DuckDB glob ビュー（クエリごとに fs スキャン、mounts.py）
 追跡されるのはソースとドキュメントだけで、**動かすと増えるものはすべて `var/` の下**に集約する。
 
 ```
-src/stdf_platform/   コアライブラリ（同梱の名前付きクエリ src/stdf_platform/sql/ を含む）
-sql/                 個人用の名前付きクエリ（git 管理外。同名なら同梱より優先）
+src/stdf_platform/   コアライブラリ
+sql/                 名前付きクエリ（1ファイル1クエリ）
 tests/               pytest
 docs/                スキーマ・サンプルクエリ・serve 運用
 scripts/             Windows タスクスケジューラ用 .ps1/.bat、診断スクリプト
@@ -112,20 +112,15 @@ var/                 ランタイム生成物（.gitignore で丸ごと除外）
 | モジュール | 役割 |
 |---|---|
 | `storage.py` | Parquet Hive パーティション書き込み（5テーブル） |
-| `mounts.py`（旧 `views.py`） | `_DEDUP_UNIT` / `FLAG_INVARIANTS` / `store_fingerprint()` / `setup_views(conn, data_dir, gross_die_map)` の単一ソース。ビューは glob なので、登録後に ingest したデータも再登録なしで見える |
+| `mounts.py`（旧 `views.py`） | `_DEDUP_UNIT` / `store_fingerprint()` / `setup_views(conn, data_dir, gross_die_map)` の単一ソース。ビューは glob なので、登録後に ingest したデータも再登録なしで見える |
 | `config.py` | `config.yaml` 読み込み（FTP / Storage / Server 設定、`${ENV_VAR}` 展開対応） |
 
 #### 名前付きクエリ層
 
 1ファイル1クエリ。`AnalysisSession.run()` から呼ぶ。ビルドも中間生成物も無く、生ビューを直接読む。
-置き場所は2つで、**同じ名前なら個人用が優先**される:
+置き場所はリポジトリ直下の `sql/` だけ（git 管理）。本番機で編集して commit / push する。
 
-| 場所 | git | 用途 |
-|---|---|---|
-| `sql/` | 管理しない | 個人用・本番機で手元改造するクエリ |
-| `src/stdf_platform/sql/` | 管理する | 同梱の定番クエリ（テストとコードが使う） |
-
-| 同梱クエリ | 内容 |
+| クエリ | 内容 |
 |---|---|
 | `01_lots/` | ロット一覧 / ロット別歩留まりサマリ（product / test_category / sub_process で任意に絞れる） |
 | `02_wafer/` | ウェーハ別歩留まり |
@@ -136,7 +131,7 @@ var/                 ランタイム生成物（.gitignore で丸ごと除外）
 条件（変数）はキーワード引数で複数同時に渡せる。クエリが必須とする変数の渡し忘れと、
 クエリが使わない名前（typo）は `TypeError` になり、0 行を黙って返さない。任意条件は
 `SET VARIABLE x = NULL;` と `opt_eq(col, getvariable('x'))` で書く。値はバインド変数として
-渡すので、SQL への文字列連結は不要。書き方と追加手順は `src/stdf_platform/sql/README.md`。
+渡すので、SQL への文字列連結は不要。書き方と追加手順は `sql/README.md`。
 
 #### 個人解析層（`workspace/`）
 
@@ -205,10 +200,10 @@ cp workspace/query.py.example workspace/query.py
 ```
 
 VS Code で `workspace/query.py` を開き、各セル (`# %%`) を Shift+Enter で実行（DuckDB）。
-定番の集計は名前付きクエリとして同梱してあるので、まずそこから引く:
+定番の集計は `sql/` の名前付きクエリにあるので、まずそこから引く:
 
 ```python
-s.queries()                                   # クエリ一覧（name / 説明 / 受け取る変数 / 置き場所）
+s.queries()                                   # クエリ一覧（name / 説明 / 受け取る変数）
 s.run("fail_ranking", lot="LOT001")           # → DataFrame
 s.run("cpk", lot="LOT001", test_name="Vth%")  # 追加パラメータ
 s.run("lot_list", product="P1", test_category="CP")  # 条件は複数同時に渡せる
@@ -225,8 +220,8 @@ q("SELECT * FROM test_data_final WHERE lot_id = 'E6A773.00'")
 メモリ上に materialize できる（`use_all()` で全ロットに復元）。
 
 > 同じ SQL を2回使ったら `sql/` の該当フォルダへ昇格させる（1行目を `-- 説明` に、
-> 条件は `getvariable('lot')`）。`sql/` は git 管理外なので本番機で気兼ねなく改造できる。
-> 詳細は `src/stdf_platform/sql/README.md` と `workspace/README.md` の熟成ラダーを参照。
+> 条件は `getvariable('lot')`）。
+> 詳細は `sql/README.md` と `workspace/README.md` の熟成ラダーを参照。
 
 ### 分析 API（`stdf_platform.analysis`）
 
@@ -264,19 +259,6 @@ stdf db query -f path/to/query.sql               # ファイルから SQL を読
 stdf db query "SELECT * FROM wafers" -o out.csv  # 結果を CSV に書き出す
 stdf db shell                                # DuckDB シェル（2回目以降はカタログ再利用で即起動 / --refresh で再登録）
 ```
-
-### 整合性チェック（`stdf db verify`）
-
-```bash
-stdf db verify        # test_data の retest_flag 不変条件を検証（ストア全体を走査）
-```
-
-`storage.py` が ingest 時に確定させる `retest_flag` が壊れていると、
-`test_data_final`（= `retest_flag = 0`）が黙って誤った行集合を返します。
-測定値を疑う前にここを見てください。4条件（NULL フラグ／`flag=0` の run 跨ぎ／
-同一 run 内のフラグ割れ／最新 run が `flag=0` でないキー）は
-`mounts.FLAG_INVARIANTS` が単一の定義を持ちます。ストア全体を走査するので、
-日常的にではなく大量 ingest のあとや結果が疑わしいときに回します。
 
 ### マルチユーザー解析（`stdf serve`）
 
@@ -386,7 +368,7 @@ var/data/          ← storage.data_dir（config.yaml で変更可）
 | `sub_process` | STDF MIR.TEST_COD / CLI `-s` |
 | `test_rev` | ファイル名（Rev04等） |
 | `retest_num` | 既存データから自動計算（0=初回, 1,2…=リテスト） |
-| `test_data.retest_flag` | ingest 時に自動算出（0=そのキーの最新 run）。`test_data_final` は `retest_flag = 0` の単純フィルタ（整合性は `stdf db verify` でチェック） |
+| `test_data.retest_flag` | ingest 時に自動算出（0=そのキーの最新 run）。`test_data_final` は `retest_flag = 0` の単純フィルタ |
 | `test_data.exec_seq` | ingest 時に自動算出（run 内 0 始まり出現順）。ループ計測（OTP ダンプ等）の各回を区別 |
 
 ---

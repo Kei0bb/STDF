@@ -6,7 +6,7 @@
 > [!TIP]
 > **まず名前付きクエリを見てください（`s.queries()`）。** 定番の集計（ロット別歩留まり、
 > Fail ランキング、Cp/Cpk、bin パレート、bin×Fail テストの紐付け）は名前付きクエリとして
-> 同梱してあり、`s.run("fail_ranking", lot="...")` で引けます。
+> `sql/` にあり、`s.run("fail_ranking", lot="...")` で引けます。
 > 以下の生ビュー向けクエリの多くは、それらの単純な呼び出しに置き換えられます:
 >
 > | 名前付きクエリ | 相当する本ドキュメントの節 |
@@ -19,8 +19,8 @@
 >
 > 名前付きクエリに無い切り口（ゾーン分析、外れ値検出、TP混在検出、Cpk スペック検討 等）は
 > 引き続き以下の生ビュークエリを使ってください。2回使った SQL はリポジトリ直下の
-> `sql/`（git 管理外）へ昇格させるのが推奨ワークフローです
-> （`src/stdf_platform/sql/README.md` と `workspace/README.md`）。
+> `sql/` へ昇格させるのが推奨ワークフローです
+> （`sql/README.md` と `workspace/README.md`）。
 
 > [!IMPORTANT]
 > **名前付きクエリに無い解析は原則 `*_final` ビューを使ってください。**
@@ -67,7 +67,7 @@ LOT_ID = "E6A773.00"
 > （小テーブルなのでコストは無視できる範囲）。同じロットへ繰り返しクエリするなら
 > `use_lot()` / `use_all()`（`workspace/query.py` のセル）で `*_final` を
 > メモリ上に materialize できます。同じ生ビュークエリを繰り返し使うなら
-> `sql/` への昇格を検討してください（`src/stdf_platform/sql/README.md`）。
+> `sql/` への昇格を検討してください（`sql/README.md`）。
 
 ### CLI から直接実行
 
@@ -145,7 +145,7 @@ con.execute(f"""
 # test_data_final is NOT a window: dedup happens at ingest time (storage.py
 # writes retest_flag per row), so this is a plain predicate filter — cheap,
 # and pushed into the Parquet scan. Rows with retest_flag IS NULL (pre-flag
-# files) are excluded; that store needs a re-ingest (checked by `stdf db verify`).
+# files) are excluded; that store needs a re-ingest.
 con.execute("""
     CREATE OR REPLACE VIEW test_data_final AS
     SELECT * FROM test_data WHERE retest_flag = 0
@@ -2954,4 +2954,4 @@ ORDER BY origin_lot, origin_wafer, origin_y, origin_x;
   （`parts_final` / `chipid_final` は従来どおり `ROW_NUMBER()` ウィンドウ）、
   (die, test, pin) につき複数行が残り得ます（ループ計測）。区別には `exec_seq`
   を使ってください。`retest_flag IS NULL` の行（旧スキーマ）は
-  `test_data_final` から除外されます — 要再取り込み（`stdf db verify` で検出可）。
+  `test_data_final` から除外されます — 要再取り込み。

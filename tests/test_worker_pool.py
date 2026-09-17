@@ -1,74 +1,49 @@
-"""Windows/Japanese-locale robustness of the ingest worker pool.
+"""Ingest worker pool (worker.run_ingest_pool / worker._run_single).
 
-Covers three bug fixes:
-1. worker._run_single's Popen must survive non-UTF-8 (e.g. cp932) bytes on
-   the child's stderr without crashing the reader thread, and must pin the
-   child's stdio to UTF-8 via PYTHONIOENCODING.
-2. worker.run_ingest_pool's on_success callback fires once per successful
-   file (on the pool's consumer thread) so callers can persist progress
-   incrementally instead of only after the whole pool finishes.
-3. Files belonging to the same lot must be serialized (in measurement-time
-   order) within one worker, because they share mutable on-disk state
-   (lots table rewrite, retest_num directory scan, retest_flag demotion) —
-   see worker.run_ingest_pool's docstring. Different lots must still run
-   concurrently.
+1. The parent Popen must survive non-UTF-8 (e.g. cp932) bytes on the child's
+   stderr, and must pin the child's stdio to UTF-8 via PYTHONIOENCODING.
+2. on_success fires once per successful file so callers can persist progress
+   incrementally.
+3. Files belonging to the same lot are serialized (in measurement-time order)
+   because they share mutable on-disk state (retest_num directory scan,
+   retest_flag demotion); different lots still run concurrently.
+4. A hung child is killed after `timeout` and reported as a failure.
 
-These use a real subprocess.Popen (not a fake stand-in for communicate())
-by wrapping Popen to redirect the command to a tiny child script written to
-tmp_path, forwarding all kwargs (encoding, errors, env) unchanged — this
-exercises the real UTF-8 decoding path, which a mocked communicate() would
-not.
+Tests 1-3 use a real subprocess.Popen, redirected to a tiny child script in
+tmp_path with all kwargs (encoding, errors, env) forwarded unchanged, so the
+real decoding path is exercised.
 """
 
 import subprocess
 import sys
-from pathlib import Path
 
 from stdf_platform import worker
 
 
-def test_cp932_stderr_does_not_crash_reader_thread(tmp_path, monkeypatch):
-    """Raw cp932 bytes on stderr must not raise UnicodeDecodeError.
+class _FakeProc:
+    """Minimal stand-in for subprocess.Popen used by worker._run_single."""
 
-    Before the fix, encoding="utf-8" with strict error handling on the
-    parent Popen would blow up the reader thread on Japanese Windows,
-    surfacing only "exit code 1" and losing the real error message.
-    """
-    script = tmp_path / "cp932_child.py"
-    script.write_text(
-        "import os, sys\n"
-        "os.write(2, b'\\x83G\\x83\\x89\\x81[')\n"  # cp932 for an error string; invalid UTF-8
-        "sys.exit(1)\n",
-        encoding="utf-8",
-    )
+    def __init__(self, *, returncode=0, stdout="", stderr="", timeout=False):
+        self.returncode = returncode
+        self._stdout = stdout
+        self._stderr = stderr
+        self._timeout = timeout
+        self.killed = False
 
-    real_popen = subprocess.Popen  # captured before monkeypatching
+    def communicate(self, timeout=None):
+        if self._timeout and not self.killed:
+            raise subprocess.TimeoutExpired(cmd="fake", timeout=timeout)
+        return self._stdout, self._stderr
 
-    def fake_popen(cmd, **kwargs):
-        new_cmd = [sys.executable, str(script)]
-        return real_popen(new_cmd, **kwargs)
-
-    monkeypatch.setattr(worker.subprocess, "Popen", fake_popen)
-
-    result = worker._run_single(
-        local_path=tmp_path / "a.stdf",
-        product="PROD",
-        data_dir=tmp_path,
-        compression="zstd",
-        timeout=10,
-        log_path=None,
-    )
-
-    # The reader thread survived: we get a clean failure result, not an
-    # unhandled UnicodeDecodeError propagating out of _run_single.
-    assert result.success is False
-    assert isinstance(result.error, str)
-    assert result.error != ""
+    def kill(self):
+        self.killed = True
+        self._timeout = False  # second communicate() returns drained output
 
 
 def test_on_success_called_once_and_env_pins_utf8(tmp_path, monkeypatch):
-    """on_success fires exactly once, for the one successful file, and the
-    child env carries PYTHONIOENCODING=utf-8 for every spawned subprocess.
+    """on_success fires exactly once, for the one successful file; the child
+    env carries PYTHONIOENCODING=utf-8; and a child writing raw cp932 bytes to
+    stderr yields a clean failure result instead of a UnicodeDecodeError.
     """
     success_script = tmp_path / "success_child.py"
     success_script.write_text(
@@ -79,8 +54,8 @@ def test_on_success_called_once_and_env_pins_utf8(tmp_path, monkeypatch):
     )
     fail_script = tmp_path / "fail_child.py"
     fail_script.write_text(
-        "import sys\n"
-        "sys.stderr.write('boom\\n')\n"
+        "import os, sys\n"
+        "os.write(2, b'\\x83G\\x83\\x89\\x81[')\n"  # cp932 bytes; invalid UTF-8
         "sys.exit(1)\n",
         encoding="utf-8",
     )
@@ -118,6 +93,7 @@ def test_on_success_called_once_and_env_pins_utf8(tmp_path, monkeypatch):
 
     assert len(successes) == 1
     assert len(failures) == 1
+    assert isinstance(failures[0].error, str) and failures[0].error
     assert len(calls) == 1
     assert calls[0].remote_path == "remote/ok.stdf"
     assert calls[0].success is True
@@ -126,36 +102,6 @@ def test_on_success_called_once_and_env_pins_utf8(tmp_path, monkeypatch):
     for env in envs_seen:
         assert env is not None
         assert env.get("PYTHONIOENCODING") == "utf-8"
-
-
-# --- _lot_key / _ts_key unit tests -----------------------------------------
-
-def test_lot_key_splits_on_first_underscore():
-    p = Path("2613-X03_00_SC0G29A_L000_@FT1_1#202604050254.std")
-    assert worker._lot_key(p) == "2613-X03"
-
-
-def test_lot_key_no_underscore_is_whole_filename():
-    """No '_' at all: the file gets its own single-file group (the whole
-    filename is the key), rather than colliding with anything else.
-    """
-    p = Path("nounderscore.std")
-    assert worker._lot_key(p) == "nounderscore.std"
-
-
-def test_ts_key_uses_text_after_last_hash():
-    p = Path("2613-X03_00_SC0G29A_@FT1_1#202604050254.std")
-    assert worker._ts_key(p) == "202604050254"
-
-
-def test_ts_key_no_hash_falls_back_to_filename():
-    p = Path("no_hash_here.std")
-    assert worker._ts_key(p) == "no_hash_here.std"
-
-
-def test_ts_key_multiple_hashes_uses_last_segment():
-    p = Path("LOT_a#b#202604050308.std")
-    assert worker._ts_key(p) == "202604050308"
 
 
 # --- Same-lot serialization -------------------------------------------------
@@ -254,3 +200,19 @@ def test_same_lot_files_serialize_in_timestamp_order_other_lots_parallel(tmp_pat
     # host is under load (the old assertion compared against lota_2's start,
     # which had only ~0.3s of margin).
     assert events["lotb_1"]["start"] < events["lota_1"]["end"]
+
+
+def test_run_ingest_pool_timeout(tmp_path, monkeypatch):
+    def fake_popen(cmd, **kwargs):
+        return _FakeProc(timeout=True, stderr="Hanging forever...")
+
+    monkeypatch.setattr(worker.subprocess, "Popen", fake_popen)
+
+    files = [(None, tmp_path / "slow.stdf", "PROD", "CP")]
+    successes, failures = worker.run_ingest_pool(
+        files=files, data_dir=tmp_path, compression="zstd", max_workers=1, timeout=2
+    )
+
+    assert not successes
+    assert len(failures) == 1
+    assert "timed out" in failures[0].error

@@ -1,5 +1,3 @@
-from pathlib import Path
-
 import pytest
 
 from stdf_platform.analysis import AnalysisSession
@@ -153,8 +151,13 @@ def partial_retest_subset_store(tmp_path):
     return tmp_path
 
 
-def test_export_lot_pivot_keeps_one_row_per_die(partial_retest_subset_store):
-    """die_key で結合しても part_id を pivot index に残すとダイが2行に割れる。"""
+@pytest.mark.parametrize("pivot", [True, False], ids=["pivot", "no_pivot"])
+def test_export_lot_keeps_one_row_per_die(partial_retest_subset_store, pivot):
+    """`stdf export lot` reads the final views keyed by die_key.
+
+    pivot: die_key で結合しても part_id を pivot index に残すとダイが2行に割れる。
+    no-pivot: long format, one row per (die, test) of the latest measurement.
+    """
     from click.testing import CliRunner
 
     from stdf_platform.cli import main
@@ -164,15 +167,21 @@ def test_export_lot_pivot_keeps_one_row_per_die(partial_retest_subset_store):
     cfg.write_text(f"storage:\n  data_dir: {store.as_posix()}\n")
     out = store / "export.csv"
     result = CliRunner().invoke(
-        main, ["export", "lot", "LOT", str(out), "--pivot"],
+        main, ["export", "lot", "LOT", str(out), "--pivot" if pivot else "--no-pivot"],
         env={"STDF_CONFIG": str(cfg)})
     assert result.exit_code == 0, result.output
 
     import pandas as pd
     df = pd.read_csv(out)
 
-    assert len(df) == 2, df           # ダイは2つ。3行なら part_id で割れている
-    assert "part_id" not in df.columns
-    row = df[(df.x_coord == 1) & (df.y_coord == 0)].iloc[0]
-    assert row["T100"] == pytest.approx(0.95)   # 再測定された値
-    assert row["T101"] == pytest.approx(0.8)    # 古い run に残った値が同じ行に
+    if pivot:
+        assert len(df) == 2, df           # ダイは2つ。3行なら part_id で割れている
+        assert "part_id" not in df.columns
+        row = df[(df.x_coord == 1) & (df.y_coord == 0)].iloc[0]
+        assert row["T100"] == pytest.approx(0.95)   # 再測定された値
+        assert row["T101"] == pytest.approx(0.8)    # 古い run に残った値が同じ行に
+    else:
+        assert len(df) == 4, df           # 2 dies x 2 tests, no stale T100 row
+        die = df[(df.x_coord == 1) & (df.y_coord == 0)].set_index("test_name")
+        assert die.loc["T100", "result"] == pytest.approx(0.95)
+        assert die.loc["T101", "result"] == pytest.approx(0.8)

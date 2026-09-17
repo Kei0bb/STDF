@@ -2,8 +2,7 @@
 # # stdf — 分析ワークスペース
 # `cp workspace/query.py.example workspace/query.py` して使う。Shift+Enter でセル実行。
 #
-# - 定番クエリは同梱(src/stdf_platform/sql/)、手元の改造・自作は直下の `sql/`
-#   (git 管理外、同名なら優先)。`s.run("名前", lot=..., product=...)` で DataFrame、
+# - 名前付きクエリはリポジトリ直下の `sql/`(git 管理)。`s.run("名前", lot=..., product=...)` で DataFrame、
 #   `out=` を付ければ CSV。受け取れる条件は `s.queries()` の params 列。
 #   ビルドは要らない — 生ビューを直接読む。
 # - ここは**書き捨て**の場所。使い回すクエリは `sql/` にファイルとして足すこと。

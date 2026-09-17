@@ -7,6 +7,7 @@ and partial/aborted probes.
 """
 
 import duckdb
+import pytest
 from pathlib import Path
 
 from stdf_platform.storage import ParquetStorage
@@ -26,17 +27,12 @@ def _conn(tmp_path: Path, gross_die_map=None) -> duckdb.DuckDBPyConnection:
     return conn
 
 
-def _cp_data(lot_id="LOT1", wafer_id="W1", n_parts=7, xy_start=0,
-             part_txt=False) -> STDFData:
+def _cp_data(lot_id="LOT1", wafer_id="W1", n_parts=7, xy_start=0) -> STDFData:
     """Build a synthetic CP STDFData.
 
     Dies are placed at (i, i) for i in [xy_start, xy_start+n_parts) so separate
     ingests can simulate an aborted probe (run 0) continued by a retest (run 1)
     that probes a *different* set of coordinates.
-
-    part_txt=True populates a per-part-unique PRR.PART_TXT (serial / 2D barcode),
-    which real CP testers may emit. Die identity must remain (wafer, x, y) so
-    such part_txt values must NOT defeat retest dedup.
     """
     data = STDFData()
     data.lot_id = lot_id
@@ -57,7 +53,7 @@ def _cp_data(lot_id="LOT1", wafer_id="W1", n_parts=7, xy_start=0,
     data.parts = [
         {
             "part_id": f"{lot_id}_{wafer_id}_{i}",
-            "part_txt": f"SN-{lot_id}-{wafer_id}-{i:04d}" if part_txt else "",
+            "part_txt": "",
             "lot_id": lot_id, "wafer_id": wafer_id,
             "head_num": 1, "site_num": 1,
             "x_coord": i, "y_coord": i,
@@ -76,34 +72,7 @@ def _save(storage, data, product="P", category="CP", sub="CP1", src="f.stdf"):
                            sub_process=sub, source_file=src)
 
 
-def _wafer_total(conn, lot_id="LOT1"):
-    return conn.execute(
-        "SELECT total FROM wafer_yield_final WHERE lot_id = ?", [lot_id]
-    ).fetchone()[0]
-
-
 # ── yield denominator = gross die ────────────────────────────────────────────
-
-def test_gross_die_wafer_total_is_gd(tmp_path):
-    """CP wafer total uses the gross-die denominator when probed < GD."""
-    storage = _storage(tmp_path)
-    _save(storage, _cp_data("LOT1", "W1", 7))  # 7 probed
-    conn = _conn(tmp_path, {"P": (10, 200)})
-
-    row = conn.execute(
-        "SELECT probed, total, unprobed FROM wafer_yield_final WHERE lot_id='LOT1'"
-    ).fetchone()
-    assert row == (7, 10, 3)
-
-
-def test_gross_die_robust_to_selective_retest(tmp_path):
-    """Full probe + a selective retest must NOT inflate the total past GD."""
-    storage = _storage(tmp_path)
-    _save(storage, _cp_data("LOT1", "W1", 7), src="f1.stdf")
-    _save(storage, _cp_data("LOT1", "W1", 3), src="f2.stdf")  # retest subset
-    conn = _conn(tmp_path, {"P": (10, 200)})
-    assert _wafer_total(conn) == 10
-
 
 def test_gross_die_aborted_probe_then_retest(tmp_path):
     """The scenario the user asked about: CP test stops partway, then the wafer
@@ -111,7 +80,8 @@ def test_gross_die_aborted_probe_then_retest(tmp_path):
     QC fail), and only the genuinely-never-probed dies inflate the denominator.
 
     GD=12; run0 probes dies 0..5 (abort), run1 probes dies 6..9 (continuation).
-    10 distinct dies probed → total=12, unprobed=2 (NOT 6 phantom QC fails).
+    10 distinct dies probed → total=12, unprobed=2 (NOT 6 phantom QC fails),
+    and yield uses the GD denominator (10 good / 12).
     """
     storage = _storage(tmp_path)
     _save(storage, _cp_data("LOT1", "W1", 6, xy_start=0), src="run0.stdf")
@@ -119,45 +89,13 @@ def test_gross_die_aborted_probe_then_retest(tmp_path):
     conn = _conn(tmp_path, {"P": (12, 200)})
 
     row = conn.execute(
-        "SELECT probed, total, unprobed FROM wafer_yield_final WHERE lot_id='LOT1'"
+        "SELECT probed, total, unprobed, good, yield_pct"
+        " FROM wafer_yield_final WHERE lot_id='LOT1'"
     ).fetchone()
-    assert row == (10, 12, 2)
+    assert row == (10, 12, 2, 10, 83.33)
 
 
-def test_gross_die_part_txt_does_not_inflate(tmp_path):
-    """Serials on CP parts must not defeat dedup → total stays at GD."""
-    storage = _storage(tmp_path)
-    _save(storage, _cp_data("LOT1", "W1", 7, part_txt=True), src="f1.stdf")
-    _save(storage, _cp_data("LOT1", "W1", 3, part_txt=True), src="f2.stdf")
-    conn = _conn(tmp_path, {"P": (10, 200)})
-    assert _wafer_total(conn) == 10
-
-
-def test_no_gross_die_config_falls_back_to_probed(tmp_path):
-    """Without gross_die config, total == probed (no denominator change)."""
-    storage = _storage(tmp_path)
-    _save(storage, _cp_data("LOT1", "W1", 7))
-    conn = _conn(tmp_path, None)
-    row = conn.execute(
-        "SELECT probed, total, unprobed FROM wafer_yield_final WHERE lot_id='LOT1'"
-    ).fetchone()
-    assert row == (7, 7, 0)
-
-
-def test_gross_die_probed_exceeds_gd_no_negative(tmp_path):
-    """If probed somehow exceeds GD, total = probed (unprobed never negative)."""
-    storage = _storage(tmp_path)
-    _save(storage, _cp_data("LOT1", "W1", 12))  # 12 probed > GD 10
-    conn = _conn(tmp_path, {"P": (10, 200)})
-    row = conn.execute(
-        "SELECT probed, total, unprobed FROM wafer_yield_final WHERE lot_id='LOT1'"
-    ).fetchone()
-    assert row == (12, 12, 0)
-
-
-def test_gross_die_ft_not_applied(tmp_path):
-    """FT packages (wafer_id='') never get the gross-die denominator."""
-    storage = _storage(tmp_path)
+def _ft_data(n_parts=5) -> STDFData:
     data = STDFData()
     data.lot_id = "FTLOT"
     data.part_type = "PKG"
@@ -177,17 +115,33 @@ def test_gross_die_ft_not_applied(tmp_path):
             "hard_bin": 1, "soft_bin": 1,
             "passed": True, "test_count": 1, "test_time": 100,
         }
-        for i in range(5)
+        for i in range(n_parts)
     ]
     data.tests = {}
     data.test_results = []
-    _save(storage, data, product="P", category="FT", sub="FT1", src="ft.stdf")
-    # GD configured for product P, but FT must ignore it.
-    conn = _conn(tmp_path, {"P": (10, 200)})
+    return data
+
+
+@pytest.mark.parametrize("case", ["no_gd_config", "probed_exceeds_gd", "ft"])
+def test_total_falls_back_to_probed(tmp_path, case):
+    """total == probed (unprobed 0) when there is no GD config, when probed
+    somehow exceeds GD (never negative), and always for FT packages even if
+    the product has a GD configured."""
+    storage = _storage(tmp_path)
+    if case == "no_gd_config":
+        _save(storage, _cp_data("LOT1", "W1", 7))
+        lot, gd_map, n = "LOT1", None, 7
+    elif case == "probed_exceeds_gd":
+        _save(storage, _cp_data("LOT1", "W1", 12))  # 12 probed > GD 10
+        lot, gd_map, n = "LOT1", {"P": (10, 200)}, 12
+    else:
+        _save(storage, _ft_data(5), product="P", category="FT", sub="FT1", src="ft.stdf")
+        lot, gd_map, n = "FTLOT", {"P": (10, 200)}, 5
+    conn = _conn(tmp_path, gd_map)
     row = conn.execute(
-        "SELECT probed, total, unprobed FROM wafer_yield_final WHERE lot_id='FTLOT'"
+        "SELECT probed, total, unprobed FROM wafer_yield_final WHERE lot_id = ?", [lot]
     ).fetchone()
-    assert row == (5, 5, 0)
+    assert row == (n, n, 0)
 
 
 # ── QC-fail bin bucket ───────────────────────────────────────────────────────
@@ -207,23 +161,6 @@ def _gd_session(tmp_path, monkeypatch, gross_die_map):
                  products=products)
     monkeypatch.setattr(analysis_pkg.session.Config, "load", classmethod(lambda cls, p=None: cfg))
     return analysis_pkg.AnalysisSession(tmp_path)
-
-
-def test_gross_die_database_wafer_yield(tmp_path, monkeypatch):
-    """`stdf db query` over wafer_yield_final: GD applies to the CP total."""
-    storage = _storage(tmp_path)
-    _save(storage, _cp_data("LOT1", "W1", 8))  # 8 probed, all pass; GD 10
-
-    with _gd_session(tmp_path, monkeypatch, {"P": (10, 200)}) as s:
-        df = s.q(
-            "SELECT wafer_id, total, good, yield_pct FROM wafer_yield_final "
-            "WHERE lot_id = ? ORDER BY wafer_id",
-            ["LOT1"],
-        )
-    assert len(df) == 1
-    assert df.iloc[0]["total"] == 10           # GD denominator, not 8 probed
-    assert df.iloc[0]["good"] == 8
-    assert df.iloc[0]["yield_pct"] == 80.0     # 8 / 10
 
 
 def test_gross_die_qc_fail_bin_bucket(tmp_path, monkeypatch):

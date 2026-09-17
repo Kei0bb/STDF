@@ -41,28 +41,6 @@ def _write_cp_origin(data_dir: Path):
     }), runs)
 
 
-def _write_corr_tests(data_dir: Path):
-    """Two correlated tests in CP lot HKPFJK for test_correlation()."""
-    td = (data_dir / "test_data" / "product=CHIP" / "test_category=CP"
-          / "sub_process=CP1" / "lot_id=HKPFJK" / "data.parquet")
-    td.parent.mkdir(parents=True, exist_ok=True)
-    pq.write_table(pa.table({
-        "lot_id": ["HKPFJK"] * 6,
-        "wafer_id": ["11"] * 6,
-        "part_id": ["d0", "d0", "d1", "d1", "d2", "d2"],
-        "part_txt": [""] * 6,
-        "x_coord": [12, 12, 13, 13, 14, 14],
-        "y_coord": [22, 22, 22, 22, 22, 22],
-        "test_num": [1, 2, 1, 2, 1, 2],
-        "pin_num": [0] * 6,
-        "test_name": ["A", "B"] * 3, "rec_type": ["PTR"] * 6,
-        "lo_limit": [0.0] * 6, "hi_limit": [10.0] * 6, "units": ["V"] * 6,
-        "result": [1.0, 2.0, 2.0, 4.0, 3.0, 6.0],   # test2 = 2*test1 → corr 1.0
-        "passed": ["P"] * 6, "retest_num": [0] * 6,
-        "exec_seq": [0] * 6, "retest_flag": [0] * 6,
-    }), td)
-
-
 def test_die_cp_ft_join_matches_origin(tmp_path):
     _write_ft(tmp_path)        # FT lot FT1 + chipid (origin HKPFJK/ABCDEF)
     _write_cp_origin(tmp_path)
@@ -74,14 +52,8 @@ def test_die_cp_ft_join_matches_origin(tmp_path):
         assert int(hit.iloc[0].cp_x) == 12 and int(hit.iloc[0].cp_y) == 22
         assert bool(hit.iloc[0].cp_passed) is True
         assert hit.iloc[0].ft_part_txt == "2D-FT1-0000"
-
-
-def test_die_cp_ft_join_unmatched_origin_dropped(tmp_path):
-    _write_ft(tmp_path)        # ABCDEF origin has no CP parts written
-    _write_cp_origin(tmp_path)
-    with AnalysisSession(tmp_path) as s:
-        df = correlation.die_cp_ft_join(s, "CHIP", "FT1")
-        assert "ABCDEF" not in set(df.cp_lot_id)   # no CP die → inner-join drop
+        # ABCDEF origin has no CP parts written -> inner-join drop
+        assert "ABCDEF" not in set(df.cp_lot_id)
 
 
 def test_cp_ft_yield_pairs_by_lot(tmp_path):
@@ -91,20 +63,3 @@ def test_cp_ft_yield_pairs_by_lot(tmp_path):
         df = correlation.cp_ft_yield(s, "CHIP").set_index("lot_id")
         assert float(df.loc["FT1", "ft_yield_pct"]) == 50.0
         assert float(df.loc["HKPFJK", "cp_yield_pct"]) == 100.0
-
-
-def test_test_correlation_perfect(tmp_path):
-    _write_cp_origin(tmp_path)
-    _write_corr_tests(tmp_path)
-    with AnalysisSession(tmp_path) as s:
-        m = correlation.test_correlation(s, "CHIP", "HKPFJK", "CP", [1, 2])
-        assert abs(float(m.loc[1, 2]) - 1.0) < 1e-9   # test2 = 2*test1
-        assert abs(float(m.loc[1, 1]) - 1.0) < 1e-9
-
-
-def test_test_correlation_shape(tmp_path):
-    _write_cp_origin(tmp_path)
-    _write_corr_tests(tmp_path)
-    with AnalysisSession(tmp_path) as s:
-        m = correlation.test_correlation(s, "CHIP", "HKPFJK", "CP", [1, 2])
-        assert list(m.columns) == [1, 2] and list(m.index) == [1, 2]

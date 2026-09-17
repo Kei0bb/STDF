@@ -1,7 +1,5 @@
-"""Tests for section (4) of the per-run test-program design:
-database.get_lot_summary / get_runs, `stdf db programs` CLI, and
-AnalysisSession.runs(). See
-docs/schema.md (runs / lots).
+"""Per-run test-program metadata: `stdf db lots` mixed-TP marker,
+`stdf db programs`, and AnalysisSession.runs(). See docs/schema.md (runs / lots).
 """
 
 import sys
@@ -9,6 +7,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import pytest
 from click.testing import CliRunner
 
 from stdf_platform import cli
@@ -83,82 +82,32 @@ def _write_mixed_lot(tmp_path: Path):
     )
 
 
-# ── AnalysisSession.lot_summary / .runs (ex-database.py) ──────────────
-
-def test_get_lot_summary_exposes_job_mixed(tmp_path):
-    _write_mixed_lot(tmp_path)
-    with AnalysisSession(tmp_path) as s:
-        df = s.lot_summary()
-        assert len(df) == 1
-        row = df.iloc[0]
-        assert row["job_mixed"] == True
-        assert row["job_variant_count"] == 2
-
-
-def test_get_lot_summary_job_mixed_false_for_single_program(tmp_path):
-    _write_cp(tmp_path)
-    with AnalysisSession(tmp_path) as s:
-        df = s.lot_summary("LOT1")
-        assert len(df) == 1
-        assert df.iloc[0]["job_mixed"] == False
-        assert df.iloc[0]["job_variant_count"] == 1
-
-
-def test_get_runs_returns_one_row_per_wafer_retest(tmp_path):
-    _write_mixed_lot(tmp_path)
-    with AnalysisSession(tmp_path) as s:
-        df = s.runs()
-        assert len(df) == 2
-        by_wafer = {row["wafer_id"]: row for _, row in df.iterrows()}
-        assert by_wafer["W1"]["job_rev"] == "RevA"
-        assert by_wafer["W2"]["job_rev"] == "RevB"
-        # ordering: start_time (W1 run at 1000, W2 run at 3000)
-        assert list(df["wafer_id"]) == ["W1", "W2"]
-
-
-def test_get_runs_lot_filter(tmp_path):
-    _write_mixed_lot(tmp_path)
-    _write_ft(tmp_path)
-    with AnalysisSession(tmp_path) as s:
-        df = s.runs(lot_id="FT1")
-        assert len(df) == 1
-        assert df.iloc[0]["lot_id"] == "FT1"
-        assert df.iloc[0]["wafer_id"] == ""
-
 
 # ── CLI ──────────────────────────────────────────────────────────────
 
-def test_cli_db_lots_marks_mixed_lot(tmp_path, monkeypatch):
-    _write_mixed_lot(tmp_path)
+@pytest.mark.parametrize("writer, marked", [(_write_mixed_lot, True), (_write_cp, False)],
+                         ids=["mixed", "clean"])
+def test_cli_db_lots_marks_only_mixed_lots(tmp_path, monkeypatch, writer, marked):
+    writer(tmp_path)
     monkeypatch.setattr(cli.Config, "load", classmethod(lambda cls, p=None: _patched_config(tmp_path)))
     result = CliRunner().invoke(cli.main, ["db", "lots"])
     assert result.exit_code == 0, result.output
-    assert "⚠×2" in result.output  # ⚠×2
+    if marked:
+        assert "⚠×2" in result.output
+    else:
+        assert "⚠" not in result.output
 
 
-def test_cli_db_lots_no_marker_for_clean_lot(tmp_path, monkeypatch):
-    _write_cp(tmp_path)
-    monkeypatch.setattr(cli.Config, "load", classmethod(lambda cls, p=None: _patched_config(tmp_path)))
-    result = CliRunner().invoke(cli.main, ["db", "lots"])
-    assert result.exit_code == 0, result.output
-    assert "⚠" not in result.output
-
-
-def test_cli_db_programs_lists_runs(tmp_path, monkeypatch):
-    _write_mixed_lot(tmp_path)
-    monkeypatch.setattr(cli.Config, "load", classmethod(lambda cls, p=None: _patched_config(tmp_path)))
-    result = CliRunner().invoke(cli.main, ["db", "programs"])
-    assert result.exit_code == 0, result.output
-    assert "RevA" in result.output
-    assert "RevB" in result.output
-    assert "W1" in result.output
-    assert "W2" in result.output
-
-
-def test_cli_db_programs_lot_filter(tmp_path, monkeypatch):
+def test_cli_db_programs_lists_runs_and_filters_by_lot(tmp_path, monkeypatch):
     _write_mixed_lot(tmp_path)
     _write_ft(tmp_path)
     monkeypatch.setattr(cli.Config, "load", classmethod(lambda cls, p=None: _patched_config(tmp_path)))
+
+    result = CliRunner().invoke(cli.main, ["db", "programs"])
+    assert result.exit_code == 0, result.output
+    for text in ("RevA", "RevB", "W1", "W2", "FT1"):
+        assert text in result.output
+
     result = CliRunner().invoke(cli.main, ["db", "programs", "--lot", "FT1"])
     assert result.exit_code == 0, result.output
     assert "FT1" in result.output
@@ -168,27 +117,7 @@ def test_cli_db_programs_lot_filter(tmp_path, monkeypatch):
     assert "-" in result.output
 
 
-def test_cli_db_programs_empty_store(tmp_path, monkeypatch):
-    # A totally empty data_dir has no `runs` view registered at all (there's
-    # nothing to glob), so the query itself errors — same pre-existing
-    # behavior as `stdf db lots` against an empty store (no `lots` view
-    # either). This isn't the "no rows for this filter" empty-message path;
-    # it's caught by the command's try/except like any other DB error.
-    monkeypatch.setattr(cli.Config, "load", classmethod(lambda cls, p=None: _patched_config(tmp_path)))
-    result = CliRunner().invoke(cli.main, ["db", "programs"])
-    assert result.exit_code == 1
-    assert "Error" in result.output
-
-
-# ── AnalysisSession ──────────────────────────────────────────────────
-
-def test_session_runs_row_count(tmp_path):
-    _write_mixed_lot(tmp_path)
-    with AnalysisSession(tmp_path) as s:
-        df = s.runs()
-        assert len(df) == 2
-        assert set(df["job_rev"]) == {"RevA", "RevB"}
-
+# ── AnalysisSession.runs ─────────────────────────────────────────────
 
 def test_session_runs_filters(tmp_path):
     _write_mixed_lot(tmp_path)
@@ -206,3 +135,6 @@ def test_session_runs_filters(tmp_path):
         # ordering: start_time then lot_id/wafer_id/retest_num
         all_runs = s.runs()
         assert list(all_runs["job_rev"])[:2] == ["RevA", "RevB"]  # start_time 1000 < 3000
+        # SDR equipment columns are part of the runs() projection.
+        for col in ("node_name", "handler_id", "probe_card_id", "loadboard_id", "socket_id"):
+            assert col in all_runs.columns

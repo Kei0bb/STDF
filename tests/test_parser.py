@@ -3,7 +3,7 @@
 import struct
 
 from stdf_platform.parser import STDFParser
-from make_test_stdf import cn, record
+from make_test_stdf import cn, make_ft_stdf, record
 
 
 def _mir(lot: str) -> bytes:
@@ -15,15 +15,17 @@ def _mir(lot: str) -> bytes:
         + cn("FT1"))
 
 
-def test_overlong_cn_does_not_desync_next_record(tmp_path):
-    """壊れた Cn 長で次レコードへ読み越しても、rec_len 境界へ復帰して
-    後続の MIR を正しく読めること。"""
+def test_record_boundaries_survive_overlong_cn_and_unknown_record(tmp_path):
+    """壊れた Cn 長で次レコードへ読み越しても rec_len 境界へ復帰し、未知
+    レコードも読み飛ばして、後続の MIR を正しく読めること。"""
     bad_lot = bytes([200]) + b"LOT"          # 長さ 200 だが実データ 3 バイト
     mir_bad = record(1, 10,
         struct.pack("<IIB", 0, 1, 1)
         + struct.pack("<BBBHB", 32, 32, 32, 0, 32) + bad_lot)
     # MIR の後に続く必須フィールドがない壊れたレコード + 正しい MIR
-    raw = record(0, 10, struct.pack("BB", 2, 4)) + mir_bad + _mir("GOOD_LOT")
+    raw = (record(0, 10, struct.pack("BB", 2, 4)) + mir_bad
+           + record(99, 99, b"\x01\x02\x03")   # 未知レコードは rec_len 分読み飛ばす
+           + _mir("GOOD_LOT"))
     p = tmp_path / "x.stdf"
     p.write_bytes(raw)
     assert STDFParser().parse(p).lot_id == "GOOD_LOT"
@@ -45,13 +47,6 @@ def test_big_endian_far_switches_endianness(tmp_path):
     p = tmp_path / "be.stdf"
     p.write_bytes(far + be_record(1, 10, mir))
     assert STDFParser().parse(p).lot_id == "BE_LOT"
-
-
-def test_little_endian_still_default_without_far(tmp_path):
-    """FAR が無いファイルは従来どおり little-endian 既定で読む。"""
-    p = tmp_path / "no_far.stdf"
-    p.write_bytes(_mir("LE_LOT"))
-    assert STDFParser().parse(p).lot_id == "LE_LOT"
 
 
 def test_mpr_expands_per_pin_and_resolves_pin_name(tmp_path):
@@ -86,10 +81,8 @@ def test_ftr_is_recorded_without_result(tmp_path):
     assert data.test_results[0]["result"] is None
 
 
-def test_unknown_record_is_skipped(tmp_path):
-    raw = (record(0, 10, struct.pack("BB", 2, 4))
-           + record(99, 99, b"\x01\x02\x03")     # 未知レコード
-           + _mir("AFTER_UNKNOWN"))
-    p = tmp_path / "unk.stdf"
-    p.write_bytes(raw)
-    assert STDFParser().parse(p).lot_id == "AFTER_UNKNOWN"
+def test_parser_keeps_prr_part_id(tmp_path):
+    """PRR.PART_ID は part_serial として残す(barcode 空の FT の identity)。"""
+    make_ft_stdf(tmp_path / "ft.stdf", lot_id="FL", parts=2)
+    data = STDFParser().parse(tmp_path / "ft.stdf")
+    assert [p["part_serial"] for p in data.parts] == ["UNIT0000", "UNIT0001"]
