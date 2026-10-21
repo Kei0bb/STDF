@@ -39,6 +39,9 @@ dev = [
     "ipykernel>=7.3.0",
     "pytest>=8.0.0",
 ]
+notebook = [
+    "marimo>=0.25.2",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

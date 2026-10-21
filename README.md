@@ -29,7 +29,10 @@ cp workspace/query.py.example workspace/query.py
 # 5. アドホックな SQL
 stdf db query "SELECT * FROM lots ORDER BY start_time DESC LIMIT 10"
 
-# 6. マルチユーザー: 読み取り専用クエリサーバ(ブラウザ SQL コンソール、または各メンバーの VSCode+薄クライアント)
+# 6. マルチユーザー
+#    a) ブラウザだけで SQL/Python ノートブック: 共有 marimo サーバ → docs/marimo-server.md
+uv sync --group notebook && powershell -File scripts/start_marimo.ps1
+#    b) 読み取り専用クエリサーバ(ブラウザ SQL コンソール、または各メンバーの VSCode+薄クライアント)
 stdf serve    # → docs/multi-user-server.md
 ```
 
@@ -71,7 +74,8 @@ DuckDB glob ビュー（クエリごとに fs スキャン、mounts.py）
 src/stdf_platform/   コアライブラリ
 sql/                 名前付きクエリ（1ファイル1クエリ）
 tests/               pytest
-docs/                スキーマ・サンプルクエリ・serve 運用
+docs/                スキーマ・サンプルクエリ・serve 運用・共有 marimo 運用
+notebooks/           共有 marimo サーバのノートブック（テンプレートと README 以外は git 管理外）
 scripts/             Windows タスクスケジューラ用 .ps1/.bat、診断スクリプト
 client/              stdf serve 用シンクライアント（同僚がコピーして使う）
 workspace/           個人用スクラッチ（README と .example 以外は git 管理外）
