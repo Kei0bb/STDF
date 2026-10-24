@@ -2,7 +2,7 @@
 
 半導体テストデータ（STDF V4）を **Parquet + DuckDB** に変換する高速 ETL パイプライン。  
 Pure Python パーサー × ThreadPoolExecutor による並列処理で、1000 ファイル以上のバッチ取り込みに対応。  
-数人での共同解析は読み取り専用クエリサーバ（`stdf serve`）+ 薄クライアントで対応。  
+数人での共同解析は共有 marimo サーバ（ブラウザだけで SQL / Python ノートブック）で対応。  
 **Docker 不要 — `uv sync` のみでセットアップ完了。**
 
 ---
@@ -29,11 +29,8 @@ cp workspace/query.py.example workspace/query.py
 # 5. アドホックな SQL
 stdf db query "SELECT * FROM lots ORDER BY start_time DESC LIMIT 10"
 
-# 6. マルチユーザー
-#    a) ブラウザだけで SQL/Python ノートブック: 共有 marimo サーバ → docs/marimo-server.md
+# 6. マルチユーザー: ブラウザだけで SQL/Python ノートブック(共有 marimo サーバ → docs/marimo-server.md)
 uv sync --group notebook && powershell -File scripts/start_marimo.ps1
-#    b) 読み取り専用クエリサーバ(ブラウザ SQL コンソール、または各メンバーの VSCode+薄クライアント)
-stdf serve    # → docs/multi-user-server.md
 ```
 
 ---
@@ -59,9 +56,7 @@ DuckDB glob ビュー（クエリごとに fs スキャン、mounts.py）
      ↓
      ├── stdf db query / lots / programs  (CLI)
      ├── workspace/query.py + 名前付きクエリ  (VS Code インタラクティブ)
-     └── stdf serve (読み取り専用 HTTP API)
-          ├── ブラウザ SQL コンソール（GET /、追加インストール不要）
-          └── 各メンバーの PC → client/stdf_client.py (VS Code) / 将来: ダッシュボード
+     └── 共有 marimo サーバ (notebooks/、ブラウザだけで SQL / Python)
 ```
 
 ---
@@ -74,10 +69,9 @@ DuckDB glob ビュー（クエリごとに fs スキャン、mounts.py）
 src/stdf_platform/   コアライブラリ
 sql/                 名前付きクエリ（1ファイル1クエリ）
 tests/               pytest
-docs/                スキーマ・サンプルクエリ・serve 運用・共有 marimo 運用
+docs/                スキーマ・サンプルクエリ・共有 marimo 運用
 notebooks/           共有 marimo サーバのノートブック（テンプレートと README 以外は git 管理外）
 scripts/             Windows タスクスケジューラ用 .ps1/.bat、診断スクリプト
-client/              stdf serve 用シンクライアント（同僚がコピーして使う）
 workspace/           個人用スクラッチ（README と .example 以外は git 管理外）
 config.yaml.example  → config.yaml にコピーして使う
 
@@ -100,7 +94,7 @@ var/                 ランタイム生成物（.gitignore で丸ごと除外）
 
 | モジュール | 役割 |
 |---|---|
-| `cli.py` | Click CLI — `ingest` / `ingest-all` / `fetch` / `db` / `export` / `serve` コマンド |
+| `cli.py` | Click CLI — `ingest` / `ingest-all` / `fetch` / `db` / `export` コマンド |
 | `worker.py` | `ThreadPoolExecutor` でファイルごとに subprocess を起動・タイムアウト管理 |
 | `_ingest_worker.py` | 独立 subprocess — 1ファイルを parse → Parquet 書き込みして JSON を stdout に出力 |
 | `parser.py` | Pure Python STDF V4 パーサー（`struct.Struct` 最適化、FAR/MIR/WIR/PIR/PRR/PTR/MPR/FTR/PMR対応） |
@@ -146,8 +140,6 @@ var/                 ランタイム生成物（.gitignore で丸ごと除外）
 
 | モジュール | 役割 |
 |---|---|
-| `server/app.py` | 読み取り専用 HTTP クエリ API（`stdf serve`）。`APIRouter` 実装で将来のダッシュボード統合に対応。`GET /` はブラウザ SQL コンソール（`server/console.html`、外部 CDN 依存なし）、旧来のプレーンテキスト索引は `GET /api` に移動、`GET /api/schema` はビューごとの列名を返す（DESCRIBE に失敗したビューは 500 ではなく `error` エントリになる） |
-| `client/stdf_client.py` | メンバー配布用の薄いクライアント（依存: requests + pandas のみ、単体1ファイル） |
 
 ---
 
@@ -264,36 +256,11 @@ stdf db query "SELECT * FROM wafers" -o out.csv  # 結果を CSV に書き出す
 stdf db shell                                # DuckDB シェル（2回目以降はカタログ再利用で即起動 / --refresh で再登録）
 ```
 
-### マルチユーザー解析（`stdf serve`）
+### マルチユーザー解析（共有 marimo サーバ）
 
-データと歩留まり定義は共有マシンに置いたまま、読み取り専用の HTTP API だけを社内 LAN に公開。
-メンバーはブラウザだけでも解析できます（`GET /` の自己完結 SQL コンソール、追加インストール不要）。
-pandas 連携が欲しい場合は repo 不要 — `client/stdf_client.py` 1ファイルと
-`pip install requests pandas` だけで VS Code のセルから解析できます。
-
-```bash
-# 共有マシン側（1回だけ）
-stdf serve        # config.yaml の server: 節（host / port / max_rows）に従って起動
-```
-
-```
-# メンバー側 A: ブラウザで http://<共有マシン>:8555/ を開く（インストール不要）
-```
-
-```python
-# メンバー側 B（VS Code セル、STDF_SERVER=http://<共有マシン>:8555 を設定）
-from stdf_client import q, to_csv, views
-
-views()                                                    # 使えるビュー一覧
-df = q("SELECT * FROM wafer_yield_final WHERE lot_id = 'ABC123'")
-to_csv("SELECT * FROM test_data_final WHERE lot_id = 'ABC123'", "abc123.csv")
-```
-
-- ユーザー SQL は**単一 SELECT のみ**。ファイルアクセスは data_dir 配下に制限
-  （DuckDB `allowed_directories` + `enable_external_access=false`）
-- 結果は `server.max_rows`（既定 10,000 行）で切り詰め（`truncated` フラグ付き）
-- 1リクエスト = 1 DuckDB セッション。全員が `mounts.py` の同一定義で計算
-- 常駐化（Task Scheduler）・ブラウザコンソールの詳細・メンバー配布手順 → `docs/multi-user-server.md`
+共有マシンで `marimo edit` を1つ常駐させ、メンバーはブラウザでアクセスするだけで SQL / Python の
+ノートブックを書けます（メンバー側のインストール不要）。セットアップ・運用ルール・リスクは
+`docs/marimo-server.md`、ノートブックの置き場所と作法は `notebooks/README.md` を参照。
 
 ### FTP 差分同期
 

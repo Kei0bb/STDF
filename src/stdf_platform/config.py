@@ -92,17 +92,6 @@ class ProcessingConfig:
 
 
 @dataclass
-class ServerConfig:
-    """Read-only HTTP query server (stdf serve)."""
-    host: str = "0.0.0.0"
-    port: int = 8555
-    max_rows: int = 10000
-    memory_limit: str = "2GB"          # DuckDB memory_limit per request session
-    threads: int = 2                   # DuckDB threads per request session
-    query_timeout_seconds: int = 60    # 0 = disabled (interrupt-based)
-
-
-@dataclass
 class ProductFilter:
     """Product-specific filter."""
     product: str
@@ -122,7 +111,6 @@ class Config:
     ftp: FTPConfig = field(default_factory=FTPConfig)
     storage: StorageConfig = field(default_factory=StorageConfig)
     processing: ProcessingConfig = field(default_factory=ProcessingConfig)
-    server: ServerConfig = field(default_factory=ServerConfig)
     filters: list[ProductFilter] = field(default_factory=list)
     exclude: list[str] = field(default_factory=list)
     products: dict[str, ProductConfig] = field(default_factory=dict)
@@ -188,7 +176,6 @@ class Config:
         ftp_data = data.get("ftp", {})
         storage_data = data.get("storage", {})
         processing_data = data.get("processing", {})
-        server_data = data.get("server", {}) or {}
 
         # Parse filters format
         filters_data = data.get("filters", []) or []
@@ -224,11 +211,6 @@ class Config:
             processing=ProcessingConfig(
                 **{k: v for k, v in processing_data.items() if k == "compression"}
             ) if processing_data else ProcessingConfig(),
-            server=ServerConfig(
-                **{k: v for k, v in server_data.items()
-                   if k in ("host", "port", "max_rows", "memory_limit",
-                            "threads", "query_timeout_seconds")}
-            ),
             filters=filters,
             exclude=exclude,
             products=products,

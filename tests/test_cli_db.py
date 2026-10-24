@@ -87,7 +87,7 @@ def test_db_query_honors_gross_die_via_dash_c(tmp_path, synth_store):
     """The CLI's -c config (not STDF_CONFIG/cwd) must reach AnalysisSession's
     gross_die table. Regression test: AnalysisSession used to silently
     re-resolve its own Config.load() instead of the CLI's already-resolved
-    ctx.obj["config"], so CLI/serve computed GD-less yields.
+    ctx.obj["config"], so CLI computed GD-less yields.
     """
     cfg_path = tmp_path / "gd_config.yaml"
     cfg_path.write_text(

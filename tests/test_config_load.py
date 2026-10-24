@@ -77,18 +77,3 @@ def test_relative_data_dir_anchors_to_config_dir(tmp_path, monkeypatch):
     assert cfg.storage.database == tmp_path.resolve() / "var" / "data" / "stdf.duckdb"
     assert cfg.storage.download_dir == tmp_path.resolve() / "var" / "downloads"
 
-
-def test_server_resource_limits_are_loaded(tmp_path):
-    (tmp_path / "config.yaml").write_text(
-        "server:\n"
-        "  max_rows: 500\n"
-        "  memory_limit: 4GB\n"
-        "  threads: 3\n"
-        "  query_timeout_seconds: 15\n",
-        encoding="utf-8",
-    )
-    cfg = Config.load(tmp_path / "config.yaml")
-    assert cfg.server.max_rows == 500
-    assert cfg.server.memory_limit == "4GB"
-    assert cfg.server.threads == 3
-    assert cfg.server.query_timeout_seconds == 15
