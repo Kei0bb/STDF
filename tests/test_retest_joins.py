@@ -74,52 +74,6 @@ def test_bin_fail_tests_maps_fail_to_correct_die(partial_retest_store):
 
 
 @pytest.fixture()
-def partial_retest_two_tests_store(tmp_path):
-    """part_id が衝突する部分リテスト + テスト2項目。旧実装は pivot を
-    part_id で行うため2ダイの測定値が平均で1行に潰れ、相関が NaN になる。"""
-    storage = ParquetStorage(StorageConfig(data_dir=tmp_path))
-
-    def data(parts, results):
-        d = _cp_data(parts=parts, results=results)
-        d.tests[101] = {"test_name": "T101", "rec_type": "PTR",
-                        "lo_limit": 0.0, "hi_limit": 1.0, "units": "V"}
-        return d
-
-    def result(pid, x, test, val):
-        return {"lot_id": "LOT", "wafer_id": "W1", "part_id": pid,
-                "test_num": test, "head_num": 1, "site_num": 1,
-                "result": val, "passed": True, "alarm_id": ""}
-
-    storage.save_stdf_data(
-        data([_part("LOT_W1_0", 0, 0, True, 1), _part("LOT_W1_1", 1, 0, True, 1)],
-             [result("LOT_W1_0", 0, 100, 0.1), result("LOT_W1_0", 0, 101, 0.1),
-              result("LOT_W1_1", 1, 100, 0.9), result("LOT_W1_1", 1, 101, 0.9)]),
-        product="PROD", test_category="CP", sub_process="CP1", source_file="r0.stdf")
-    # (1,0) のみ再測定 → part_id "LOT_W1_0" が旧 (0,0) と衝突
-    storage.save_stdf_data(
-        data([_part("LOT_W1_0", 1, 0, True, 1)],
-             [result("LOT_W1_0", 1, 100, 0.9), result("LOT_W1_0", 1, 101, 0.9)]),
-        product="PROD", test_category="CP", sub_process="CP1", source_file="r1.stdf")
-    return tmp_path
-
-
-def test_test_correlation_does_not_merge_colliding_dies(partial_retest_two_tests_store):
-    from stdf_platform.analysis.correlation import test_correlation
-    s = AnalysisSession(partial_retest_two_tests_store)
-    corr = test_correlation(s, "PROD", "LOT", "CP", [100, 101])
-    # 2ダイ × 2テスト。die_key で分離できていれば各ダイ内で完全相関する
-    assert corr.shape == (2, 2)
-    assert corr.loc[100, 101] == pytest.approx(1.0)
-
-
-def test_radial_profile_does_not_duplicate_on_partial_retest(partial_retest_store):
-    from stdf_platform.analysis.spatial import radial_profile
-    s = AnalysisSession(partial_retest_store)
-    df = radial_profile(s, "PROD", "LOT", 100)
-    assert df["n"].sum() == 2
-
-
-@pytest.fixture()
 def partial_retest_subset_store(tmp_path):
     """部分リテストで「一部のテストだけ」再測定したストア。
 

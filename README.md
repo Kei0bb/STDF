@@ -219,31 +219,21 @@ q("SELECT * FROM test_data_final WHERE lot_id = 'E6A773.00'")
 > 条件は `getvariable('lot')`）。
 > 詳細は `sql/README.md` と `workspace/README.md` の熟成ラダーを参照。
 
-### 分析 API（`stdf_platform.analysis`）
+### 分析（`AnalysisSession`）
 
-`AnalysisSession` を通じてリテスト重複排除済みビューにアクセスし、DataFrame / Plotly figure を返す再利用可能な分析関数群。
+`AnalysisSession` はリテスト重複排除済みビュー(`*_final`)を持つ DuckDB セッションで、歩留まり・Cpk の
+定義が名前付きクエリや CLI（`stdf db lots` / `stdf db query`）と完全に一致します。
 
 ```python
-from stdf_platform.analysis import AnalysisSession, yield_by_lot, lot_trend, cp_ft_yield, zone_yield, trend_fig
+from stdf_platform.analysis import AnalysisSession
 
 s = AnalysisSession()                              # config.yaml を自動読み込み
-
-# ロット間比較
-df = yield_by_lot(s, product="SCT101A", lot_ids=["L001", "L002"], test_category="CP")
-
-# トレンド（MIR start_time 順、mean±3σ コントロールライン付き）
-fig = trend_fig(lot_trend(s, product="SCT101A", test_category="CP"))
-
-# CP↔FT 歩留まり相関
-df = cp_ft_yield(s, product="SCT101A")
-
-# CP ウェハー面内ゾーン別歩留まり（n_zones=3 で Center / Middle / Edge）
-df = zone_yield(s, product="SCT101A", lot_id="L001")
+s.queries()                                        # sql/ の名前付きクエリ一覧
+s.run("fail_ranking", lot="L001")                  # DataFrame
+s.run("lot_yield", product="SCT101A", out="y.csv") # out= で CSV に直接書く
 ```
 
-すべての関数は `*_final` ビューを使用するため、歩留まり・Cpk の定義が名前付き
-クエリや CLI（`stdf db lots` / `stdf db query`）と完全に一致します。`workspace/query.py` は `# %%` セル形式（VS Code / Jupytext）で、
-Shift+Enter で逐次実行可能。
+`workspace/query.py` は `# %%` セル形式（VS Code / Jupytext）で、Shift+Enter で逐次実行できます。
 
 ### CLI クエリ
 
