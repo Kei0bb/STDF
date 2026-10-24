@@ -7,17 +7,16 @@ SQL / Python のノートブックを書ける構成。メンバー側のイン�
 ```
  メンバー(ブラウザのみ)          共有マシン(Windows)
  +-----------------+  HTTP      +--------------------------------------+
- | http://host:2718| ---------> | marimo edit notebooks/               |
- +-----------------+  + token   |   notebooks/<name>/*.py              |
+ | http://host:2718| ---------> | var\venv-notebook\...\marimo edit    |
+ +-----------------+  + token   |   workspace/<name>/*.py              |
                                 |   1 ノートブック = 1 カーネル        |
-                                |        | import                      |
+                                |        | AnalysisSession.for_notebook|
                                 |        v                             |
-                                |   AnalysisSession (DuckDB :memory:)  |
-                                |        | views = mounts.py           |
+                                |   DuckDB 既定接続 (views = mounts.py)|
                                 |        v                             |
-                                |   var/data/ (Parquet)                |
+                                |   var/data/ (Parquet)               |
                                 |        ^                             |
-                                |   stdf fetch / ingest-all            |
+                                |   stdf fetch / ingest-all (.venv)   |
                                 +--------------------------------------+
 ```
 
@@ -25,61 +24,118 @@ SQL / Python のノートブックを書ける構成。メンバー側のイン�
 
 ## 共有マシンのセットアップ
 
-1. 依存を入れる(marimo は `notebook` グループ):
+marimo は**専用の仮想環境 `var\venv-notebook`** から**直接**起動する(`uv run` を通さない)。
+理由: `uv run` 配下で起動すると、marimo は UI の「パッケージを入れる/消す」ボタンを
+`uv add` / `uv remove` として実行し、追跡対象の `pyproject.toml` / `uv.lock` と、夜間の
+`stdf fetch` が使う `.venv` を書き換えてしまう。専用 venv から直接起動すれば、UI からの
+インストールは `var\venv-notebook` にしか届かない(`var\` は git 管理外)。
 
-   ```
-   uv sync --group notebook
-   ```
-
-2. アクセストークンを作る(1行のパスワード。`var/` は git 管理外):
+1. アクセストークンを作る(1行のパスワード):
 
    ```
    echo <十分長いランダム文字列> > var\marimo_token.txt
    ```
 
-3. 起動確認:
+2. 起動確認(専用 venv が無ければ `uv sync --group notebook --frozen` で自動作成。
+   初回はパッケージインデックスへのネットワークが要る。`--frozen` は `uv.lock` どおりに
+   入れるだけで再解決しない — 社内 TLS 傍受環境でもロック済みの wheel だけが入る):
 
    ```
    powershell -ExecutionPolicy Bypass -File scripts\start_marimo.ps1
    # → http://<共有マシン>:2718  をブラウザで開き、トークンを入力
    ```
 
-4. Windows ファイアウォールで受信ポート 2718 を **社内ネットワークのみ**許可。
-5. 常駐化(タスクスケジューラ): 基本タスクの作成 →
-   トリガー「スタートアップ時」/ プログラム `powershell.exe` /
-   引数 `-ExecutionPolicy Bypass -NoProfile -NonInteractive -File "<repo>\scripts\start_marimo.ps1"`。
-   更新手順: `git pull` → タスクを再起動。
+3. Windows ファイアウォールの受信ポート 2718 を許可し、**RemoteAddress を利用者の IP /
+   サブネットに限定する**(「社内のみ」ではなく具体的な範囲で):
+
+   ```
+   New-NetFirewallRule -DisplayName "STDF marimo" -Direction Inbound -Protocol TCP `
+     -LocalPort 2718 -Action Allow -RemoteAddress <利用者のIP or サブネット>
+   ```
+
+4. 常駐化(管理者の PowerShell で1回):
+
+   ```
+   powershell -ExecutionPolicy Bypass -File scripts\register_marimo_task.ps1
+   ```
+
+   スタートアップ時に起動、ログオフ中も実行、**実行時間制限なし**(`schtasks` の既定は
+   72 時間で停止するため使わない)、失敗時は自動再起動。実行ユーザーのパスワードを聞かれる。
+
+5. 更新手順: `git pull` → `powershell -File scripts\start_marimo.ps1 -Sync`
+   (専用 venv を `uv.lock` に合わせ直す。ブラウザが開いていない時間帯に)→ タスクを再起動。
+   タスク停止後は `Get-NetTCPConnection -LocalPort 2718` でポートが空いたことを確かめてから起動する。
 
 `start_marimo.ps1` が渡している主なオプション(確認済み: marimo 0.25.2):
 
 | オプション | 理由 |
 |---|---|
+| `--quiet` | 無いと起動バナーに `?access_token=<トークン>` がそのままログへ出る |
 | `--token-password-file` | トークンをコマンドラインに出さない。トークン無しの API は 401 |
-| `--session-ttl 3600` | ブラウザを閉じて1時間後にカーネルとメモリを解放(放置対策) |
-| `--no-sandbox` | ノートブックを repo の環境(stdf_platform 入り)で動かす。sandbox は専用 venv を作ってしまう |
-| `--host 0.0.0.0` | LAN 公開。ファイアウォールで社内に限定すること |
+| `--session-ttl 3600` | ブラウザの接続が切れて1時間後にカーネルとメモリを解放。**タブを開いたままだと解放されない** |
+| `--no-sandbox` | ノートブックを専用 venv(stdf_platform 入り)で動かす。sandbox はノートブックごとに venv を作る |
+| `--host 0.0.0.0` | LAN 公開。ファイアウォールで利用者の範囲に限定すること |
+
+ログは `var\logs\marimo-YYYYMMDD.log`(UTF-8、14 日で削除)。
 
 ## メンバーの使い方
 
 1. `http://<共有マシン>:2718` を開いてトークンを入力。
-2. `notebooks/_template.py` を開いて「名前を付けて保存」→ `notebooks/<自分の名前>/<題材>.py`
-   (または共有マシンで `cp`)。
-3. SQL セル(`mo.sql(..., engine=con)`)で `lots` / `wafer_yield_final` / `test_data_final` など
-   の実行時ビュー(定義は `mounts.py`)を直接読める。名前付きクエリは
-   `s.run("fail_ranking", lot=...)` / 一覧は `s.queries()`。
-4. 2回使った SQL は `sql/` に `.sql` として昇格(`sql/README.md`)。ブラウザからは git が
+2. `workspace/_template.py` を開き、**編集する前に**「名前を付けて保存」→
+   `workspace/<自分の名前>/<題材>.py`(または共有マシンで `cp`)。テンプレートを直接
+   編集すると保存で作業ツリーが dirty になり、`git pull` が衝突する。
+3. セッションは `AnalysisSession.for_notebook()` で作る(テンプレートのとおり)。
+   `mo.sql(...)` は engine を指定しなくても、`lots` / `wafer_yield_final` /
+   `test_data_final` などの実行時ビュー(定義は `mounts.py`)を読める。名前付きクエリは
+   `s.run("fail_ranking", lot=...)`、一覧は `s.queries()`。
+4. **値は SQL に埋め込まない**(f-string 禁止)。条件は `s.run(name, 変数=値)` か
+   `s.q("... WHERE x = ?", [値])` で渡す。
+5. 2回使った SQL は `sql/` に `.sql` として昇格(`sql/README.md`)。ブラウザからは git が
    使えないので、保守者が共有マシンのノートブックを見て commit / push する。
+6. **パッケージを入れない。** UI から入れても `var\venv-notebook` にだけ入り、次の `-Sync` で消える。
+   必要な依存は保守者が `pyproject.toml` の `notebook` グループに足して `uv.lock` を更新する。
 
-運用ルール: **自分のフォルダ以外のノートブックは編集しない。**
+運用ルール: **自分のフォルダ以外のノートブックは編集しない。** 配信されるのは `workspace/` 全体なので、
+共有マシンに置いた個人ファイル(`query.py` など)も他のメンバーから見える。見せたくないものは `workspace/` の外に置く。
+
 同じファイルを2人目が開くと、その人は「reader(閲覧のみ)」としてつながり、1人目と
 同じカーネルを共有する(確認済み)。画面の **Take over** を押すと編集権が移り、
 前の人は閲覧側に回る。他人のノートブックを開いても壊れはしないが、Take over は押さない。
 
+AI 補完は `pyproject.toml` の `[tool.marimo.ai]` / `[tool.marimo.completion]` で**無効に固定**
+している。全員が同じ Windows アカウントで動くため、個人の API キーや設定を持たせられず、
+コードや出力が社外の AI サービスへ送られるのを防ぐ。
+
 ## リソース
 
-- 各カーネルが DuckDB を1つ持つ。`_template.py` の冒頭で `memory_limit` / `threads` を
-  絞っている(共有マシンの搭載量に合わせて調整)。ユーザーが上書きできるので目安。
-- ingest / fetch と同じマシンなので、取り込み中は重くなりうる。重いクエリは取り込み時間帯を避ける。
+- 各カーネルが DuckDB の既定接続を1つ持つ。`config.yaml` の `notebook:` 節
+  (`memory_limit` 既定 4GB / `threads` 既定 4 / `temp_directory` 既定 `var/tmp`)を
+  `AnalysisSession.for_notebook()` が掛ける。ユーザーが `SET` で上書きできるので目安であり、
+  強制ではない。
+- **予算の見積り**: 同時カーネル数 N × `memory_limit` に、各カーネルの Python ヒープ上の
+  pandas 結果(`memory_limit` の対象外)を足した分を、共有マシンの搭載量から
+  取り込み(ingest)の分を引いた範囲に収める。3 人で各 1〜2 ノートブックなら N = 3〜6。
+  搭載量に合わせて `notebook:` を調整する。
+- ingest / fetch と同じマシンなので、取り込み中は重くなりうる。
+
+## ingest との同居(要検証 — 採用前に Win11 で1回)
+
+ingest は retest の古いファイルを降格するとき、新しい Parquet を `os.replace` で上書きする
+(`storage.py`、約3秒だけリトライして例外)。**Windows では、別プロセス(= marimo のカーネル)が
+同じ Parquet を読んでいる間は、この置換が失敗する可能性がある**(未確認)。失敗すると新旧の
+retest が両方 `retest_flag=0` のまま残り、`test_data_final` に重複が永続する(移行手段は無い)。
+
+採用前に Win11 で次を実行し、PASS / FAIL を確認する(実データは使わない):
+
+```
+uv run python scripts/diag_parquet_lock.py
+```
+
+- `PASS`: スキャン中でも置換できた。現状の運用で問題ない。
+- `FAIL`: 置換が拒否された。**ingest の時間帯(夜間 fetch の前後)は marimo のタスクを止める**
+  運用にする(`Stop-ScheduledTask STDF_Marimo` → ingest 完了後に `Start-ScheduledTask`)。
+
+(Linux では常に PASS になる。意味があるのは Windows での結果。)
 
 ## 未対応のリスク(意図的に後回し)
 
@@ -91,18 +147,27 @@ Windows アカウントを分けられない環境のため、次は現状**防�
 | データの破損 | ノートブックから `var/data/` の Parquet を削除・上書きできる |
 | 秘密情報の読み取り | 同じアカウントの環境変数・ファイル(FTP 認証情報など)を読める |
 | 他人のノートブック | 閲覧・編集できる |
-| 負荷 | 重いクエリで共有マシン(と ingest)が遅くなる |
+| 負荷 | 重いクエリで共有マシン(と ingest)が遅くなる。marimo にはクエリのタイムアウトが無い |
 | 監査 | トークンが共通なので誰の操作か分からない |
+| 平文の通信 | HTTP で、トークンは URL(`?access_token=`)でも渡る。社内 LAN で受け入れる前提 |
+
+`var/` 配下の専用 venv 化と `--quiet` により、**ブラウザ操作が `.venv` / 追跡ファイルを書き換える**
+経路と、**トークンがログに残る**経路は塞いである。
 
 信頼できるエンジニアだけが使う前提で運用する。対策を足す場合の候補(コスト順):
 
-1. **`var/data/` の定期バックアップ**(robocopy 等)。最後の砦。元の STDF を `fetch` の
-   cleanup で消していると Parquet が唯一のコピーになるので、特に重要。
-2. **FTP は読み取り専用の認証情報にする**。
-3. **marimo にはレプリカ(`var/data/` の取り込み後コピー)だけを見せる**。
+1. **`var/data/` と `workspace/` の定期バックアップ**(robocopy 等)。最後の砦。元の STDF を
+   `fetch` の cleanup で消していると Parquet が唯一のコピーになる。`workspace/` は git 管理外で
+   履歴が無いので、これが唯一のコピー。
+2. **FTP は読み取り専用の認証情報にする**。同一アカウント内では秘密を隔離できない。
+3. **ファイアウォールを利用者の IP に限定**(セットアップ手順 3)。
+4. **marimo にはレプリカ(`var/data/` の取り込み後コピー)だけを見せる**。
    専用 `config.yaml` を `STDF_CONFIG` で渡す。事故は防げるが容量が倍になり、
    意図的な操作は防げない。
-4. **マシンを分ける**(ingest 用と marimo 用)。確実な境界。
+5. **書き込み禁止の起動**(未検証の候補): marimo を低整合性レベルで起動すると `var/data` への
+   書き込みを防げる可能性がある。`workspace/` と `var/logs` に低整合性ラベルが要る。試す場合は
+   まず検証用の環境で。
+6. **マシンを分ける**(ingest 用と marimo 用)。確実な境界。
 
 ## 他の入口との使い分け
 

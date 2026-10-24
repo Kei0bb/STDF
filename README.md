@@ -30,7 +30,7 @@ cp workspace/query.py.example workspace/query.py
 stdf db query "SELECT * FROM lots ORDER BY start_time DESC LIMIT 10"
 
 # 6. マルチユーザー: ブラウザだけで SQL/Python ノートブック(共有 marimo サーバ → docs/marimo-server.md)
-uv sync --group notebook && powershell -File scripts/start_marimo.ps1
+powershell -File scripts/start_marimo.ps1   # 専用 venv (var/venv-notebook) を自動作成して起動
 ```
 
 ---
@@ -56,7 +56,7 @@ DuckDB glob ビュー（クエリごとに fs スキャン、mounts.py）
      ↓
      ├── stdf db query / lots / programs  (CLI)
      ├── workspace/query.py + 名前付きクエリ  (VS Code インタラクティブ)
-     └── 共有 marimo サーバ (notebooks/、ブラウザだけで SQL / Python)
+     └── 共有 marimo サーバ (workspace/、ブラウザだけで SQL / Python)
 ```
 
 ---
@@ -70,9 +70,8 @@ src/stdf_platform/   コアライブラリ
 sql/                 名前付きクエリ（1ファイル1クエリ）
 tests/               pytest
 docs/                スキーマ・サンプルクエリ・共有 marimo 運用
-notebooks/           共有 marimo サーバのノートブック（テンプレートと README 以外は git 管理外）
 scripts/             Windows タスクスケジューラ用 .ps1/.bat、診断スクリプト
-workspace/           個人用スクラッチ（README と .example 以外は git 管理外）
+workspace/           個人用スクラッチ兼 共有 marimo のノートブック置き場（README・.example・_template.py 以外は git 管理外）
 config.yaml.example  → config.yaml にコピーして使う
 
 var/                 ランタイム生成物（.gitignore で丸ごと除外）
@@ -250,7 +249,7 @@ stdf db shell                                # DuckDB シェル（2回目以降�
 
 共有マシンで `marimo edit` を1つ常駐させ、メンバーはブラウザでアクセスするだけで SQL / Python の
 ノートブックを書けます（メンバー側のインストール不要）。セットアップ・運用ルール・リスクは
-`docs/marimo-server.md`、ノートブックの置き場所と作法は `notebooks/README.md` を参照。
+`docs/marimo-server.md`、ノートブックの置き場所と作法は `workspace/README.md` を参照。
 
 ### FTP 差分同期
 

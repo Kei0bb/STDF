@@ -20,7 +20,8 @@ from ..mounts import setup_views
 
 class AnalysisSession:
     def __init__(self, data_dir: Path | None = None, config: Config | None = None,
-                 sql_dir: Path | None = None) -> None:
+                 sql_dir: Path | None = None,
+                 conn: duckdb.DuckDBPyConnection | None = None) -> None:
         # `config`, when given, is the caller's already-resolved Config (e.g.
         # the CLI's ctx.obj["config"], built from -c/--env) and is used as-is
         # — none of the Config.load()/fallback resolution below runs. This is
@@ -48,11 +49,34 @@ class AnalysisSession:
                     config = Config.load(repo_cfg)
         if data_dir is None:
             data_dir = config.storage.data_dir
+        self.config = config
         self.data_dir = Path(data_dir)
-        self.conn = duckdb.connect(":memory:")
+        # conn は for_notebook 用(既定接続を載せる)。通常は私的な :memory: 接続。
+        self.conn = conn if conn is not None else duckdb.connect(":memory:")
         self.registered = setup_views(self.conn, self.data_dir, config.gross_die_map)
         # 名前付きクエリの場所(run/queries/show が読む)。None ならリポジトリ直下 sql/。
         self.sql_dir = sql_dir
+
+    @classmethod
+    def for_notebook(cls, data_dir: Path | None = None, config: Config | None = None,
+                     sql_dir: Path | None = None,
+                     conn: duckdb.DuckDBPyConnection | None = None) -> "AnalysisSession":
+        """共有 marimo サーバのカーネル用セッション。
+
+        `mo.sql(...)` は engine を指定しないと DuckDB の既定接続(`duckdb.sql`)を
+        使う。そこにはビューも memory_limit も無く、生の read_parquet は retest
+        未解決の行を読んでしまう。そこでセッションを既定接続の上に作り、ビュー登録と
+        資源制限(config の `notebook:` 節)を同じ接続に掛ける — SQL セルも
+        `s.run()` も、同じ制限付きビューを見る。1カーネル = 1セッション前提。
+        """
+        s = cls(data_dir=data_dir, config=config, sql_dir=sql_dir,
+                conn=conn if conn is not None else duckdb.default_connection())
+        nb = s.config.notebook
+        s.conn.execute("SET memory_limit = ?", [nb.memory_limit])
+        s.conn.execute("SET threads = ?", [nb.threads])
+        nb.temp_directory.mkdir(parents=True, exist_ok=True)
+        s.conn.execute("SET temp_directory = ?", [str(nb.temp_directory)])
+        return s
 
     def q(self, sql: str, params: list | None = None) -> pd.DataFrame:
         """Run raw SQL (bound params) and return a DataFrame. Escape hatch."""

@@ -37,10 +37,6 @@ docs/superpowers/
 workspace/*
 !workspace/README.md
 !workspace/query.py.example
-
-# 共有 marimo サーバの個人ノートブック（テンプレートと README だけ追跡）
-notebooks/*
-!notebooks/README.md
-!notebooks/_template.py
+!workspace/_template.py
 
 *.duckdb

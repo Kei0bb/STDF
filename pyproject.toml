@@ -37,7 +37,19 @@ dev = [
 ]
 notebook = [
     "marimo>=0.25.2",
+    # mo.sql を engine 無し(DuckDB 既定接続)で使うのに必須。pure Python(Win11 でも wheel で入る)。
+    # marimo[sql] の sqlglot[c] はコンパイル済み拡張なので使わない。
+    "sqlglot>=30.7.0",
 ]
+
+# 共有 marimo サーバ: 全員が同じアカウントで動くので、AI 補完の設定(API キー、
+# 社外への送信)を個人に持たせない。データを LAN の外に出さないための固定。
+[tool.marimo.ai]
+enabled = false
+allow_provider_config = false
+
+[tool.marimo.completion]
+copilot = false
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

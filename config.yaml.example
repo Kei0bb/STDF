@@ -52,3 +52,12 @@ products:
   # SCT101A:
   #   gross_die: 1234
   #   gd_fail_bin: 200
+
+# 共有 marimo サーバ(scripts/start_marimo.ps1, docs/marimo-server.md)。
+# ノートブックのカーネルごとに DuckDB へ掛ける制限。同時に N カーネル動くので、
+# 共有マシン全体の予算は N x memory_limit(+ pandas 結果の Python ヒープ分)。
+# ingest と同居するので、搭載メモリから逆算して決める。
+notebook:
+  memory_limit: "4GB"
+  threads: 4
+  temp_directory: "./var/tmp"   # 溢れた中間結果の置き場(config.yaml 基準の相対パス)

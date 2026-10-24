@@ -92,6 +92,34 @@ class ProcessingConfig:
 
 
 @dataclass
+class NotebookConfig:
+    """Shared marimo server: per-kernel DuckDB limits (AnalysisSession.for_notebook).
+
+    N kernels run on the same box as the nightly ingest, so the budget is
+    N x memory_limit (+ pandas results held in each kernel's Python heap,
+    which DuckDB's limit does not cover). temp_directory keeps spill files
+    under var/ instead of DuckDB's default <cwd>/.tmp.
+    """
+    memory_limit: str = "4GB"
+    threads: int = 4
+    temp_directory: Path = field(default_factory=lambda: Path("./var/tmp"))
+
+    def __post_init__(self):
+        if isinstance(self.temp_directory, str):
+            self.temp_directory = Path(self.temp_directory)
+        self.memory_limit = str(self.memory_limit)
+
+    def resolve_against(self, base: Path) -> "NotebookConfig":
+        """Anchor a relative temp_directory to the config file's directory."""
+        return NotebookConfig(
+            memory_limit=self.memory_limit,
+            threads=self.threads,
+            temp_directory=(self.temp_directory if self.temp_directory.is_absolute()
+                            else base / self.temp_directory),
+        )
+
+
+@dataclass
 class ProductFilter:
     """Product-specific filter."""
     product: str
@@ -111,6 +139,7 @@ class Config:
     ftp: FTPConfig = field(default_factory=FTPConfig)
     storage: StorageConfig = field(default_factory=StorageConfig)
     processing: ProcessingConfig = field(default_factory=ProcessingConfig)
+    notebook: NotebookConfig = field(default_factory=NotebookConfig)
     filters: list[ProductFilter] = field(default_factory=list)
     exclude: list[str] = field(default_factory=list)
     products: dict[str, ProductConfig] = field(default_factory=dict)
@@ -176,6 +205,7 @@ class Config:
         ftp_data = data.get("ftp", {})
         storage_data = data.get("storage", {})
         processing_data = data.get("processing", {})
+        notebook_data = data.get("notebook", {}) or {}
 
         # Parse filters format
         filters_data = data.get("filters", []) or []
@@ -211,6 +241,10 @@ class Config:
             processing=ProcessingConfig(
                 **{k: v for k, v in processing_data.items() if k == "compression"}
             ) if processing_data else ProcessingConfig(),
+            notebook=NotebookConfig(
+                **{k: v for k, v in notebook_data.items()
+                   if k in ("memory_limit", "threads", "temp_directory")}
+            ).resolve_against(config_path.parent.resolve()),
             filters=filters,
             exclude=exclude,
             products=products,
