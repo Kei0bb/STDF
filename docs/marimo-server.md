@@ -30,10 +30,12 @@ marimo は**専用の仮想環境 `var\venv-notebook`** から**直接**起動�
 `stdf fetch` が使う `.venv` を書き換えてしまう。専用 venv から直接起動すれば、UI からの
 インストールは `var\venv-notebook` にしか届かない(`var\` は git 管理外)。
 
-1. アクセストークンを作る(1行のパスワード):
+1. アクセストークンを作る(1行のパスワード)。**`echo ... > file` は使わない**: Windows PowerShell 5.1 では
+   UTF-16 で書き出され、marimo が読めず即終了する(`-Encoding UTF8` も BOM がトークンに混ざる)。
+   起動スクリプトが検出してメッセージを出す:
 
    ```
-   echo <十分長いランダム文字列> > var\marimo_token.txt
+   Set-Content -Path var\marimo_token.txt -Value '<十分長いランダム文字列>' -Encoding ascii
    ```
 
 2. 起動確認(専用 venv が無ければ `uv sync --group notebook --frozen` で自動作成。
@@ -77,7 +79,14 @@ marimo は**専用の仮想環境 `var\venv-notebook`** から**直接**起動�
 | `--no-sandbox` | ノートブックを専用 venv(stdf_platform 入り)で動かす。sandbox はノートブックごとに venv を作る |
 | `--host 0.0.0.0` | LAN 公開。ファイアウォールで利用者の範囲に限定すること |
 
-ログは `var\logs\marimo-YYYYMMDD.log`(UTF-8、14 日で削除)。
+marimo の**実行場所(カレントディレクトリ)と配信先は `workspace\`**。ノートブック内の相対パス
+(`s.run(..., out="x.csv")` など)は `workspace\` を基準に解決される。設定(`config.yaml`)は
+`workspace\` から見つからなければリポジトリ直下のものが使われる。
+
+出力はコンソールにも出る(起動・URL・終了コード・エラー)。トークンは表示しない。ログは
+`var\logs\marimo-YYYYMMDD.log`(UTF-8、14 日で削除)。タスクスケジューラ経由ではコンソールが無いので、
+起動しない・落ちるときはこのログを見る。`start_marimo.ps1` は PowerShell 5.1 向けに ASCII のみで書く
+(BOM なし UTF-8 の日本語は ANSI として読まれて化ける)。
 
 ## メンバーの使い方
 
