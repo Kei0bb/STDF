@@ -17,7 +17,7 @@
     Started directly from a separate venv, UI installs can only touch that venv.
 
     The access token is read from var\marimo_token.txt (one line, create it before the
-    first start; var\ is git-ignored). It is never printed.
+    first start; var\ is git-ignored). It is never printed (output lines are redacted).
 
     NOTE: keep this file ASCII. Windows PowerShell 5.1 reads a BOM-less UTF-8 .ps1 as ANSI
     (cp932), so Japanese text in it turns into garbage.
@@ -40,6 +40,7 @@ $ErrorActionPreference = "Continue"
 
 # Same encoding handling as daily_fetch.ps1 (cp932 consoles break rich/Python output).
 $env:PYTHONIOENCODING = "utf-8"
+$env:PYTHONUNBUFFERED = "1"   # piped stdout is block-buffered otherwise: banner/errors would appear late
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
 $ProjectRoot  = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
@@ -89,6 +90,7 @@ try {
         Say "Token file is empty. $fixHint"
         exit 1
     }
+    $token = ([System.Text.Encoding]::ASCII.GetString($tokenBytes)).Trim()
     if (-not (Test-Path $WorkspaceDir)) {
         Say "Workspace directory not found: $WorkspaceDir"
         exit 1
@@ -122,20 +124,23 @@ try {
     Say "Workspace : $WorkspaceDir"
     Say "URL       : http://$($env:COMPUTERNAME):$Port  (enter the token from var\marimo_token.txt)"
     Say "Log       : $LogFile"
-    Say "Starting marimo... (Ctrl+C to stop)"
+    Say "Starting marimo... When it is up, marimo prints its URL below (the token is hidden)."
+    Say "The server runs in this window until you press Ctrl+C - no further output is normal."
 
-    # --quiet: without it marimo's startup banner prints ...?access_token=<token>
-    #   (into the console and the log file).
+    # No --quiet: with it marimo prints NOTHING, so a running server looks hung. Without it
+    #   the startup banner (the "it is up" signal) includes ...?access_token=<token>, so every
+    #   output line is redacted below before it reaches the console or the log.
     # --no-sandbox: notebooks must run in this venv, where stdf_platform is installed,
     #   not in a per-notebook uv venv.
     # Output is appended with Add-Content (UTF-8); `*>>` writes UTF-16 on PowerShell 5.1.
-    & $Marimo --quiet edit . `
+    & $Marimo edit . `
         --headless --host 0.0.0.0 --port $Port `
         --token-password-file $TokenFile `
         --session-ttl $SessionTtl `
         --no-sandbox --skip-update-check 2>&1 |
         ForEach-Object {
-            $line = $_.ToString()
+            $line = $_.ToString().Replace($token, "***")
+            $line = $line -replace "access_token=[^\s&]+", "access_token=***"
             Write-Host $line
             Add-Content -Path $LogFile -Value $line -Encoding UTF8
         }
