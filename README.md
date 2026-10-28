@@ -30,7 +30,7 @@ cp workspace/query.py.example workspace/query.py
 stdf db query "SELECT * FROM lots ORDER BY start_time DESC LIMIT 10"
 
 # 6. マルチユーザー: ブラウザだけで SQL/Python ノートブック(共有 marimo サーバ → docs/marimo-server.md)
-powershell -File scripts/start_marimo.ps1   # 専用 venv (var/venv-notebook) を自動作成して起動
+scripts\start_marimo.bat   # 専用 venv (var\venv-notebook) を必要なら作って起動 → docs/marimo-server.md
 ```
 
 ---

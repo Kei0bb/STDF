@@ -4,7 +4,7 @@
 任意の *.py / *.sql を置いてください。**README.md・query.py.example・`_template.py`・`_sample_*.py` 以外は
 git 追跡されません。**
 
-共有 marimo サーバ(`scripts/start_marimo.ps1`、運用は `docs/marimo-server.md`)は
+共有 marimo サーバ(`scripts/start_marimo.bat`、運用は `docs/marimo-server.md`)は
 この `workspace/` を配信します。ブラウザからは次のルールで使います。
 
 - `_template.py` — marimo ノートブックの出発点(git 管理)。**直接編集しない**(保存で作業ツリーが
