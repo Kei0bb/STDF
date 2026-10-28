@@ -22,7 +22,8 @@
     This file is ASCII on purpose (Windows PowerShell 5.1 reads BOM-less UTF-8 as ANSI).
 
 .PARAMETER HostAddress
-    The marimo server, as you type it in the browser: an IP address or a computer name.
+    The marimo server: an IP address or a computer name, WITHOUT the port (the port is -Port).
+    "host:port" is tolerated and split for you.
 
 .PARAMETER Port
     marimo port (default 2718).
@@ -37,6 +38,13 @@ param(
 )
 
 $ErrorActionPreference = "Continue"
+
+# Be forgiving: "10.0.0.5:2718", "http://10.0.0.5:2718/" and "10.0.0.5:2718:2718" all mean host 10.0.0.5.
+$HostAddress = ($HostAddress -replace "^https?://", "") -replace "/.*$", ""
+if ($HostAddress -match "^([^:]+):(\d+)") {
+    $HostAddress = $Matches[1]
+    $Port = [int]$Matches[2]
+}
 $Base = "http://${HostAddress}:$Port"
 $Work = Join-Path $env:TEMP "marimo_diag"
 New-Item -ItemType Directory -Path $Work -Force | Out-Null
@@ -108,9 +116,14 @@ foreach ($t in $Targets) {
 # 4. Plain-language reading of the result.
 function Ok([string]$k) { return $results[$k] -eq "OK" }
 $w = $Targets[0].Name; $c = $Targets[1].Name
+$noFile = @($results.Values | Where-Object { $_ -like "NO FILE*" }).Count
 Write-Host ""
 Write-Host "== Reading =="
-if ($curl -and (Ok "curl|$w") -and (Ok "iwr|$w")) {
+if ($noFile -eq $results.Count) {
+    Write-Host "No download produced a file at all - this is NOT a truncation result. The request itself failed"
+    Write-Host "(wrong address/port, server not running, firewall). Check the 'Reach' line and the messages above."
+}
+elseif ($curl -and (Ok "curl|$w") -and (Ok "iwr|$w")) {
     Write-Host "Both downloads are intact: the network path is fine. The problem is in the browser (extensions, cache, a"
     Write-Host "different proxy setting). Try Ctrl+F5, a private window with no extensions, another browser."
 }

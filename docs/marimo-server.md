@@ -115,6 +115,11 @@ curl.exe -s -o loro.wasm http://<共有マシンのIP>:2718/assets/loro_wasm_bg-
 (Get-FileHash loro.wasm -Algorithm SHA256).Hash
 ```
 
+**実績**: 接続元 PC で `curl.exe` と `Invoke-WebRequest` は wasm を完全に取得でき(プロキシなし)、
+**Chrome では開けたが Edge では同じエラーが出た**。この場合は経路ではなく **Edge 固有**の要因: 拡張機能、
+会社配布の Edge ポリシー(`edge://policy`)、Enhanced Security(`edge://settings/privacy`)。
+InPrivate ウィンドウ(拡張機能なし)で開けるかが最初の切り分け。当面は Chrome を使えば回避できる。
+
 - サイズが小さい: 経路で切られている。**ホスト名ではなく IP で**開く、ブラウザ/OS のプロキシ設定の
   除外リストに共有マシンを入れる、別のブラウザ・シークレットウィンドウ(拡張機能なし)で試す、
   を順に。それでも切れるなら、ネットワーク側のセキュリティ製品が大きな `application/wasm` を
