@@ -7,7 +7,10 @@
     NO execution time limit (schtasks /Create defaults to stopping a task after 72h,
     which would silently take the server down every 3 days) and a few automatic restarts.
     It runs as the current user (asks for the password once), not SYSTEM: uv, config.yaml
-    and the data live under that account.
+    and the data live under that account. It runs NOT elevated (-RunLevel Limited): marimo
+    kernels execute whatever code the browser users type, so they must not get an admin
+    token. Port 2718 and the venv under var\ need no elevation. Prefer a dedicated
+    non-admin account that can write only workspace\ and var\ if one can be created.
 
     Remove with:  Unregister-ScheduledTask -TaskName STDF_Marimo -Confirm:$false
     After stopping the task, check the port is free before restarting:
@@ -36,7 +39,7 @@ $settings = New-ScheduledTaskSettingsSet `
 
 Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger `
     -Settings $settings -User $cred.UserName `
-    -Password $cred.GetNetworkCredential().Password -RunLevel Highest -Force | Out-Null
+    -Password $cred.GetNetworkCredential().Password -RunLevel Limited -Force | Out-Null
 
 Write-Host "[OK] Registered $TaskName (at startup, no time limit)."
 Write-Host "Run now:  Start-ScheduledTask -TaskName $TaskName"

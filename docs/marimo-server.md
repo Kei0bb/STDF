@@ -53,7 +53,8 @@ marimo は**専用の仮想環境 `var\venv-notebook`** から**直接**起動�
      -LocalPort 2718 -Action Allow -RemoteAddress <利用者のIP or サブネット>
    ```
 
-4. 常駐化(管理者の PowerShell で1回):
+4. 常駐化(登録は管理者の PowerShell で1回。**タスク自体は昇格なし(`-RunLevel Limited`)で動く** —
+   カーネルは利用者のコードをそのまま実行するので、管理者トークンを渡さない):
 
    ```
    powershell -ExecutionPolicy Bypass -File scripts\register_marimo_task.ps1
