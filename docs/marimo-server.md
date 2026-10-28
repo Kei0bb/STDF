@@ -89,6 +89,39 @@ marimo の**実行場所(カレントディレクトリ)と配信先は `workspa
 起動しない・落ちるときはこのログを見る。`start_marimo.ps1` は PowerShell 5.1 向けに ASCII のみで書く
 (BOM なし UTF-8 の日本語は ANSI として読まれて化ける)。
 
+## つながらないとき
+
+| 症状 | 原因と確認 |
+|---|---|
+| 共有マシン自身で `localhost` / `0.0.0.0` が開けないが IP なら開ける | サーバは IPv4 の `0.0.0.0` で待ち受ける。`localhost` は IPv6(`::1`)に解決されて失敗することがあり、`0.0.0.0` は待ち受けアドレスで接続先としては使えない(Windows)。**`http://127.0.0.1:2718`**(同じ PC)か、起動時に表示される IP を使う。確認: `curl.exe -i http://127.0.0.1:2718/api/status` が `401` を返せばサーバは動いている |
+| 他の PC からトークン入力までは進むが、ノートブックを開くと `WebAssembly.instantiateStreaming(): expected … bytes, fell off end` | 画面を構成する wasm ファイル(`loro_wasm_bg-*.wasm`、3,240,077 バイト)が**途中で切れて**届いている。サーバ側は全バイトを正しく返すことを確認済み(ローカルと LAN の IP の両方でハッシュ一致)ので、**経路上**(プロキシ、セキュリティ製品、ブラウザ拡張など)で切れている。下の手順で切り分ける |
+
+wasm の切り分けは、**接続元の PC**で `scripts\diag_marimo_remote.ps1` を実行する(リポジトリは不要、
+このファイル1つだけをコピーして使える。何もインストール・変更せず、`%TEMP%` に2ファイルをダウンロードして
+サイズと SHA-256 を既知の値と比べ、結果の読み方まで表示する。出力にトークンは含まれない):
+
+```
+powershell -ExecutionPolicy Bypass -File diag_marimo_remote.ps1 -HostAddress <共有マシンのIP>
+```
+
+`curl.exe`(システムのプロキシ設定を無視)と `Invoke-WebRequest`(プロキシ設定を使う)の2通りで、
+wasm と、それより大きい非 wasm ファイル(対照)を比べるので、プロキシ・content-type フィルタ・
+経路全般のどれかを切り分けられる。手動でやる場合は次のとおり(サイズが `3240077`、SHA-256 が
+`75ff0754c7681ec2c83345ea191e7ebf079cdf099fadea7da6401cd031217b67` なら正常):
+
+```
+curl.exe -s -o loro.wasm http://<共有マシンのIP>:2718/assets/loro_wasm_bg-CSolyDSZ.wasm
+(Get-Item loro.wasm).Length
+(Get-FileHash loro.wasm -Algorithm SHA256).Hash
+```
+
+- サイズが小さい: 経路で切られている。**ホスト名ではなく IP で**開く、ブラウザ/OS のプロキシ設定の
+  除外リストに共有マシンを入れる、別のブラウザ・シークレットウィンドウ(拡張機能なし)で試す、
+  を順に。それでも切れるなら、ネットワーク側のセキュリティ製品が大きな `application/wasm` を
+  通していないので、情報システム部門への確認が要る。
+- サイズが正しい(CLI では届く): ブラウザ側(拡張機能・キャッシュ)。ハードリロード(Ctrl+F5)を試す。
+- 別のポートで試す(`start_marimo.ps1` の `$Port`)と、ポート単位のフィルタかを切り分けられる。
+
 ## メンバーの使い方
 
 1. `http://<共有マシン>:2718` を開いてトークンを入力。

@@ -122,7 +122,18 @@ try {
     Set-Location $WorkspaceDir
 
     Say "Workspace : $WorkspaceDir"
-    Say "URL       : http://$($env:COMPUTERNAME):$Port  (enter the token from var\marimo_token.txt)"
+    # marimo prints "localhost" in its own URL line, but this server listens on IPv4 only
+    # (0.0.0.0): "localhost" can resolve to IPv6 (::1) and fail, and 0.0.0.0 is a bind
+    # address, not something a browser can connect to on Windows. List usable addresses.
+    Say "Open one of these (token: var\marimo_token.txt):"
+    Say "  on this machine : http://127.0.0.1:$Port"
+    try {
+        [System.Net.Dns]::GetHostAddresses($env:COMPUTERNAME) |
+            Where-Object { $_.AddressFamily -eq "InterNetwork" -and -not $_.ToString().StartsWith("127.") } |
+            ForEach-Object { Say "  from other PCs  : http://$($_.ToString()):$Port" }
+    } catch {
+        Say "  from other PCs  : http://<this machine's IPv4 address>:$Port"
+    }
     Say "Log       : $LogFile"
     Say "Starting marimo... When it is up, marimo prints its URL below (the token is hidden)."
     Say "The server runs in this window until you press Ctrl+C - no further output is normal."
