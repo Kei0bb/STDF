@@ -38,5 +38,6 @@ workspace/*
 !workspace/README.md
 !workspace/query.py.example
 !workspace/_template.py
+!workspace/_sample_core_redundancy.py
 
 *.duckdb
