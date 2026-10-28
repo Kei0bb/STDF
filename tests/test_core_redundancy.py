@@ -41,7 +41,7 @@ def _judge(lot, i, psdn, hns):
 def redundancy_store(tmp_path):
     st = ParquetStorage(StorageConfig(data_dir=tmp_path, database=tmp_path / "db.duckdb"))
 
-    def ingest(data, name, sub="CP1", product="PROD"):
+    def ingest(data, name, sub="CP1", product="SCT101B"):
         st.save_stdf_data(data, product=product, test_category="CP", sub_process=sub,
                           source_file=name)
 
@@ -74,8 +74,12 @@ def redundancy_store(tmp_path):
         "LOTC", "W1", "JOB", "Rev", NOW - 5 * DAY, NOW - 5 * DAY + 100,
         parts=[_die("LOTC", 1, True)], test_results=_judge("LOTC", 1, 0, 0),
         tests=TESTS), "c0.stdf", sub="CP2")
+    # 別製品のロットは SCT101B の集計に混ざらない
+    ingest(_cp_run(
+        "LOTX", "W1", "JOB", "Rev", NOW - 5 * DAY, NOW - 5 * DAY + 100,
+        parts=[_die("LOTX", 1, True)], test_results=_judge("LOTX", 1, 0, 0),
+        tests=TESTS), "x0.stdf", product="OTHER")
     return tmp_path
-
 
 
 def _load_notebook(store, tmp_path, monkeypatch):
@@ -104,7 +108,7 @@ def test_notebook_counts_latest_retest_within_3_months(redundancy_store, tmp_pat
     _outputs, defs = module.app.run()
 
     df = defs["df"]
-    assert list(df["lot_id"]) == ["LOTA", "LOTB"]  # LOTOLD(4か月前)・LOTC(CP2) は除外、開始時刻順
+    assert list(df["lot_id"]) == ["LOTA", "LOTB"]  # LOTOLD(4か月前)・LOTC(CP2)・LOTX(別製品) は除外、開始時刻順
     assert _rows(df) == {
         # d1(0,0) d2(2,6) d3 再検 pass (0,0) d4 判定なし
         "LOTA": (4, 4, 3, 2, 3),
@@ -116,17 +120,11 @@ def test_notebook_counts_latest_retest_within_3_months(redundancy_store, tmp_pat
     assert len(long) == 6  # 2 ロット × 3 系列
 
 
-def test_notebook_months_slider_widens_window(redundancy_store, tmp_path, monkeypatch):
-    """スライダーを 6 か月にすると 4 か月前の LOTOLD も入る(範囲を決めているのは months だけ)。"""
-    import marimo as mo
+def test_notebook_months_constant_widens_window(redundancy_store, tmp_path, monkeypatch):
+    """MONTHS を 6 にすると 4 か月前の LOTOLD も入る(範囲を決めているのは MONTHS だけ)。"""
     module = _load_notebook(redundancy_store, tmp_path, monkeypatch)
-    # 上書きは、そのセルの定義(コントロール 5 つ)をすべて渡す必要がある
-    controls = {
-        "products": ["PROD"],
-        "product": mo.ui.dropdown(options=["(すべて)", "PROD"], value="(すべて)"),
-        "sub_process": mo.ui.text(value="CP1"),
-        "months": mo.ui.slider(1, 6, value=6),
-        "mode": mo.ui.radio(options=["個数", "割合 (% of probed)"], value="個数"),
-    }
-    _outputs, defs = module.app.run(defs=controls)
+    # 上書きは、そのセルの定義(定数 6 つ)をすべて渡す必要がある
+    consts = {"PRODUCT": "SCT101B", "SUB": "CP1", "MONTHS": 6, "MAX_N": 6,
+              "PSDN": PSDN, "HNS": HNS}
+    _outputs, defs = module.app.run(defs=consts)
     assert list(defs["df"]["lot_id"]) == ["LOTOLD", "LOTA", "LOTB"]

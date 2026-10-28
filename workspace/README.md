@@ -10,8 +10,8 @@ git 追跡されません。**
 - `_template.py` — marimo ノートブックの出発点(git 管理)。**直接編集しない**(保存で作業ツリーが
   dirty になり `git pull` が衝突する)。「名前を付けて保存」か `cp _template.py <自分の名前>/<題材>.py`
   でコピーしてから使う。
-- `_sample_core_redundancy.py` — サンプル(git 管理、同じく直接編集しない): CP1 の PSDN/HNS 判定値を
-  ロット別トレンドにする。SQL はノートブック内、直近 3 か月に限定、グラフは altair。
+- `_sample_core_redundancy.py` — サンプル(git 管理、同じく直接編集しない): SCT101B CP1 の PSDN/HNS
+  判定値をロット別トレンドにする。SQL はノートブック内、直近 3 か月。製品・工程・期間はセル冒頭の定数。
 - `<自分の名前>/` — 個人のノートブック。**自分のフォルダ以外は編集しない。**
 - 値は SQL に埋め込まない(f-string 禁止)。`s.run(name, 変数=値)` か `s.q("... ?", [値])`。
 - パッケージは UI から入れない(`var/venv-notebook` にだけ入り、次の更新で消える)。
