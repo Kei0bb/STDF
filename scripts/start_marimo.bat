@@ -28,16 +28,18 @@ if not exist "%VENV%\Scripts\marimo.exe" (
     if errorlevel 1 exit /b 1
 )
 
+rem The token is written by Python so it is plain ASCII: cmd echo to a file adds a trailing
+rem space, and PowerShell 5.1 writes UTF-16 which marimo cannot read.
+rem Do not put a closing parenthesis in any echo or rem line inside an if block below:
+rem cmd ends the block at it and runs the rest of the line as a command.
 if not exist "%TOKEN%" (
-    rem Written by Python so it is plain ASCII (cmd "echo > file" would add a trailing
-    rem space/newline, PowerShell 5.1 would write UTF-16 which marimo cannot read).
     "%VENV%\Scripts\python.exe" -c "import secrets,pathlib; pathlib.Path(r'%TOKEN%').write_text(secrets.token_urlsafe(24), encoding='ascii')"
     if errorlevel 1 (
-        echo [marimo] could not create the token file (var\marimo_token.txt).
+        echo [marimo] could not create the token file: var\marimo_token.txt
         pause
         exit /b 1
     )
-    echo [marimo] created a new access token file (var\marimo_token.txt).
+    echo [marimo] created a new access token file: var\marimo_token.txt
 )
 
 echo [marimo] Open one of these and enter the token (the contents of var\marimo_token.txt):
