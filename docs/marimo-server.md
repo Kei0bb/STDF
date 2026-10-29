@@ -93,6 +93,7 @@ marimo の**実行場所(カレントディレクトリ)と配信先は `workspa
 | 症状 | 原因と確認 |
 |---|---|
 | 共有マシン自身で `localhost` / `0.0.0.0` が開けないが IP なら開ける | サーバは IPv4 の `0.0.0.0` で待ち受ける。`localhost` は IPv6(`::1`)に解決されて失敗することがあり、`0.0.0.0` は待ち受けアドレスで接続先としては使えない(Windows)。**`http://127.0.0.1:2718`**(同じ PC)か、起動時に表示される IP を使う。確認: `curl.exe -i http://127.0.0.1:2718/api/status` が `401` を返せばサーバは動いている |
+| ノートブックの保存で `[Errno 13] Permission denied: ...\.marimo\notebook-locks\<hash>.lock` | marimo は保存のたびに `%USERPROFILE%\.marimo\notebook-locks` にロックファイルを作り、そのフォルダを `mkdir(mode=0o700)` で作る。Windows の Python 3.13 ではこれが「作成者も入れない」権限になることがあり(実機で確認: 中のファイル作成も、`takeown` / `icacls` / 削除も拒否)、`workspace\` は書けるのに保存だけ失敗する。**`start_marimo.bat` が起動時にこのフォルダを mode なしで先に作る**ので、新規には起きない。すでに壊れているときは、marimo を止めて **`scripts\marimo_fix_state_dir.bat`**(削除できなければ `.marimo` を `.marimo_broken_*` に改名して退避し、作り直す。残った退避フォルダは管理者が後で消す)。切り分けは `scripts\diag_marimo_save.bat` |
 | 他の PC からトークン入力までは進むが、ノートブックを開くと `WebAssembly.instantiateStreaming(): expected … bytes, fell off end` | 画面を構成する wasm ファイル(`loro_wasm_bg-*.wasm`、3,240,077 バイト)が**途中で切れて**届いている。サーバ側は全バイトを正しく返すことを確認済み(ローカルと LAN の IP の両方でハッシュ一致)ので、**経路上**(プロキシ、セキュリティ製品、ブラウザ拡張など)で切れている。下の手順で切り分ける |
 
 wasm の切り分けは、**接続元の PC**(`cmd.exe`)で wasm を直接ダウンロードして、サイズと

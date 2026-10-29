@@ -22,6 +22,12 @@ rem Idle notebooks free their kernel (and DuckDB memory) this many seconds after
 rem browser disconnects. A tab left open keeps its kernel alive.
 set "TTL=3600"
 
+rem marimo takes a lock under %USERPROFILE%\.marimo\notebook-locks on every save and creates
+rem that folder with mkdir mode 0o700. With Python 3.13 on Windows this becomes an ACL that
+rem locks the owner out, and saving fails with errno 13. Create it first, without a mode.
+rem Repair an already broken one: scripts\marimo_fix_state_dir.bat
+if not exist "%USERPROFILE%\.marimo\notebook-locks" mkdir "%USERPROFILE%\.marimo\notebook-locks"
+
 if not exist "%VENV%\Scripts\marimo.exe" (
     echo [marimo] venv not found; building it first.
     call "%~dp0marimo_sync.bat"
