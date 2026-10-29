@@ -82,11 +82,12 @@ def redundancy_store(tmp_path):
     return tmp_path
 
 
-def _load_notebook(store, tmp_path, monkeypatch):
+def _load_notebook(store, tmp_path, monkeypatch, gross_die=None):
     pytest.importorskip("marimo")
-    pytest.importorskip("altair")
+    pytest.importorskip("plotly")
+    products = (f"products:\n  SCT101B:\n    gross_die: {gross_die}\n" if gross_die else "")
     cfg = tmp_path / "config.yaml"
-    cfg.write_text(f"storage:\n  data_dir: {store.as_posix()}\n"
+    cfg.write_text(f"storage:\n  data_dir: {store.as_posix()}\n{products}"
                    f"notebook:\n  temp_directory: {(tmp_path / 'spill').as_posix()}\n",
                    encoding="utf-8")
     monkeypatch.setenv("STDF_CONFIG", str(cfg))
@@ -97,27 +98,58 @@ def _load_notebook(store, tmp_path, monkeypatch):
     return module
 
 
-def _rows(df):
-    return {r.lot_id: (r.probed, r.pass_cnt, r.judged, r.both_zero, r.both_le_n)
-            for r in df.itertuples()}
+def _rows(lot):
+    # (probed, 母数, yield %, 0 redun %, 6 redun %)
+    return {row.lot_id: (row.probed, row.total, *row[-3:]) for _, row in lot.iterrows()}
 
 
 def test_notebook_counts_latest_retest_within_3_months(redundancy_store, tmp_path, monkeypatch):
-    """既定(直近 3 か月)で、再検の最新結果をロット別に数え、古いロットと別工程は除く。"""
+    """既定(直近 3 か月)で、再検の最新結果をロット別に数え、古いロット・別工程・別製品は除く。"""
     module = _load_notebook(redundancy_store, tmp_path, monkeypatch)
     _outputs, defs = module.app.run()
 
-    df = defs["df"]
-    assert list(df["lot_id"]) == ["LOTA", "LOTB"]  # LOTOLD(4か月前)・LOTC(CP2)・LOTX(別製品) は除外、開始時刻順
-    assert _rows(df) == {
-        # d1(0,0) d2(2,6) d3 再検 pass (0,0) d4 判定なし
-        "LOTA": (4, 4, 3, 2, 3),
-        # e1 pass (6,7) / e2 fail (0,0)
-        "LOTB": (2, 1, 2, 1, 1),
+    die, lot = defs["die"], defs["lot"]
+    # ダイ表: LOTA 4 + LOTB 2。LOTOLD(4か月前)・LOTC(CP2)・LOTX(別製品) は入らない。
+    assert list(die["lot_id"].unique()) == ["LOTA", "LOTB"]  # 開始時刻順
+    assert len(die) == 6
+    # 再検で測り直した d3 は最新の (0,0) / pass になっている。判定値の無い d4 は NULL。
+    a = die[die["lot_id"] == "LOTA"].set_index("x")
+    assert (a.loc[3, "psdn"], a.loc[3, "hns"], bool(a.loc[3, "passed"])) == (0, 0, True)
+    assert a.loc[4, ["psdn", "hns"]].isna().all()
+
+    assert list(lot["lot_id"]) == ["LOTA", "LOTB"]
+    assert list(lot.columns[-3:]) == ["yield %", "0 redun %", "6 redun %"]
+    # gross_die 未設定: 母数 = probed
+    assert _rows(lot) == {
+        # LOTA: 4 ダイ中 pass 4 / d1(0,0) d3(0,0) が両方 0 / d1 d2(2,6) d3 が 6 以下
+        "LOTA": (4, 4, 100.0, 50.0, 75.0),
+        # LOTB: 2 ダイ中 pass 1(e1) / e2(0,0) だけ両方 0 / e1 は HNS=7 で 6 以下に入らず e2 のみ
+        "LOTB": (2, 2, 50.0, 50.0, 50.0),
     }
-    long = defs["long"]
-    assert set(long["series"]) == {"pass(ハードビン)", "PSDN = HNS = 0", "PSDN, HNS ≤ 6"}
-    assert len(long) == 6  # 2 ロット × 3 系列
+    fig = defs["fig"]
+    assert [tr.name for tr in fig.data] == ["yield %", "0 redun %", "6 redun %"]
+    assert list(fig.data[0].x) == ["LOTA", "LOTB"]
+    assert list(fig.data[1].y) == [50.0, 50.0]
+
+
+def test_notebook_denominator_is_gross_die(redundancy_store, tmp_path, monkeypatch):
+    """母数 = ウェハーごとの max(probed, gross_die)。測っていないダイは分子に入らない。"""
+    module = _load_notebook(redundancy_store, tmp_path, monkeypatch, gross_die=8)
+    _outputs, defs = module.app.run()
+    assert _rows(defs["lot"]) == {
+        "LOTA": (4, 8, 50.0, 25.0, 37.5),   # pass 4 / 8、両方 0 が 2 / 8、6 以下が 3 / 8
+        "LOTB": (2, 8, 12.5, 12.5, 12.5),   # pass 1 / 8、両方 0 が 1 / 8、6 以下が 1 / 8
+    }
+    assert list(defs["fig"].data[0].y) == [50.0, 12.5]
+
+
+def test_notebook_gross_die_below_probed_keeps_probed(redundancy_store, tmp_path, monkeypatch):
+    """probed が gross_die を超えるウェハーは probed のまま(GREATEST)。"""
+    module = _load_notebook(redundancy_store, tmp_path, monkeypatch, gross_die=3)
+    _outputs, defs = module.app.run()
+    rows = _rows(defs["lot"])
+    assert rows["LOTA"] == (4, 4, 100.0, 50.0, 75.0)       # 4 > 3 → probed
+    assert rows["LOTB"] == (2, 3, 33.33, 33.33, 33.33)     # 2 < 3 → gross_die
 
 
 def test_notebook_months_constant_widens_window(redundancy_store, tmp_path, monkeypatch):
@@ -127,4 +159,4 @@ def test_notebook_months_constant_widens_window(redundancy_store, tmp_path, monk
     consts = {"PRODUCT": "SCT101B", "SUB": "CP1", "MONTHS": 6, "MAX_N": 6,
               "PSDN": PSDN, "HNS": HNS}
     _outputs, defs = module.app.run(defs=consts)
-    assert list(defs["df"]["lot_id"]) == ["LOTOLD", "LOTA", "LOTB"]
+    assert list(defs["lot"]["lot_id"]) == ["LOTOLD", "LOTA", "LOTB"]

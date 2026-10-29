@@ -7,11 +7,11 @@ app = marimo.App(width="medium")
 @app.cell
 def _():
     import marimo as mo
-    import altair as alt
+    import plotly.graph_objects as go
     from stdf_platform.analysis import AnalysisSession
 
     s = AnalysisSession.for_notebook()
-    return alt, mo, s
+    return go, mo, s
 
 
 @app.cell
@@ -22,7 +22,10 @@ def _(mo):
     **サンプル。直接編集せず、「名前を付けて保存」で `workspace/<自分の名前>/` にコピーして使う。**
 
     直近 3 か月のロットについて、ダイごとの `PASS2_JUDGE_PSDN_CPLT` / `PASS2_JUDGE_HNS_CPLT`
-    (再検は最新結果)を数える。pass = ハードビン pass、probed = 実際に測ったダイ数(gross die なし)。
+    (再検は最新結果)から、次の順に進める: **ダイ表 → ロット表 → グラフ**。
+    割合の**母数は gross die**: ウェハーごとに max(probed, gross_die) を求め、ロット内で合計する
+    (`config.yaml` の `products.<製品>.gross_die`。未設定の製品は probed)。測っていないダイは
+    母数に入り、yield と redun の分子には入らない。
     """)
     return
 
@@ -39,8 +42,11 @@ def _():
 
 
 @app.cell
-def _(HNS, MAX_N, MONTHS, PRODUCT, PSDN, SUB, mo, s):
-    # 先に対象ロットを絞る(下の集計は、そのロットのパーティションしか読まない)。
+def _(HNS, MONTHS, PRODUCT, PSDN, SUB, mo, s):
+    # 1) query: 直近 MONTHS か月のロットを先に絞り(下の集計はそのパーティションしか読まない)、
+    #    ダイごとの判定値を取る。parts_final / test_data_final は再検解決済み(最新の結果)。
+    #    ダイは lot_id + wafer_id + die_key で結ぶ(part_id では結ばない)。
+    #    ループ測定で 1 ダイに複数行あっても MAX で 1 値にする。
     recent = s.q(
         """
         SELECT lot_id, MIN(start_time) AS start_time
@@ -57,9 +63,7 @@ def _(HNS, MAX_N, MONTHS, PRODUCT, PSDN, SUB, mo, s):
     lot_ids = recent["lot_id"].tolist()
     marks = ",".join("?" * len(lot_ids))  # IN の ? だけを組み立てる(値は bind)
 
-    # parts_final / test_data_final は再検解決済み。ダイは lot_id + wafer_id + die_key で結ぶ。
-    # ループ測定で 1 ダイに複数行あっても MAX で 1 値にする。NULL は条件を満たさない扱い。
-    counts = s.q(
+    die = s.q(
         f"""
         WITH judge AS (
             SELECT lot_id, wafer_id, die_key,
@@ -70,58 +74,87 @@ def _(HNS, MAX_N, MONTHS, PRODUCT, PSDN, SUB, mo, s):
               AND lot_id IN ({marks}) AND test_name IN (?, ?)
             GROUP BY lot_id, wafer_id, die_key
         )
-        SELECT p.lot_id,
-               COUNT(*)                                      AS probed,
-               COUNT(*) FILTER (WHERE p.passed)              AS pass_cnt,
-               COUNT(*) FILTER (WHERE j.psdn = 0 AND j.hns = 0)        AS both_zero,
-               COUNT(*) FILTER (WHERE j.psdn <= ? AND j.hns <= ?)      AS both_le_n,
-               COUNT(*) FILTER (WHERE j.psdn IS NOT NULL AND j.hns IS NOT NULL) AS judged
+        SELECT p.lot_id, p.wafer_id, p.x_coord AS x, p.y_coord AS y,
+               p.hard_bin, p.passed, j.psdn, j.hns
         FROM parts_final p
         LEFT JOIN judge j
           ON p.lot_id = j.lot_id AND p.wafer_id = j.wafer_id AND p.die_key = j.die_key
         WHERE p.test_category = 'CP' AND p.product = ? AND p.sub_process = ?
           AND p.lot_id IN ({marks})
-        GROUP BY p.lot_id
         """,
-        [PSDN, HNS, PRODUCT, SUB, *lot_ids, PSDN, HNS, MAX_N, MAX_N,
-         PRODUCT, SUB, *lot_ids],
+        [PSDN, HNS, PRODUCT, SUB, *lot_ids, PSDN, HNS, PRODUCT, SUB, *lot_ids],
     )
-    df = counts.merge(recent, on="lot_id").sort_values(["start_time", "lot_id"], ignore_index=True)
+    # 開始時刻順(古い → 新しい)。ロット表・グラフはこの順に並ぶ。
+    die = (die.merge(recent, on="lot_id")
+              .sort_values(["start_time", "lot_id", "wafer_id", "y", "x"], ignore_index=True))
 
     # 判定値が 1 ダイも無い = テスト名が違う。空のグラフを黙って出さない。
-    mo.stop(int(df["judged"].sum()) == 0, mo.callout(mo.md(
+    mo.stop(not (die["psdn"].notna() & die["hns"].notna()).any(), mo.callout(mo.md(
         "ダイはありますが PSDN / HNS の測定値が 1 件もありません。テスト名を確認: "
         "`s.q(\"SELECT DISTINCT test_name FROM test_data_final "
         "WHERE sub_process = 'CP1' AND test_name LIKE '%JUDGE%'\")`"), kind="warn"))
-    return (df,)
+    return (die,)
 
 
 @app.cell
-def _(MAX_N, alt, df, mo):
-    names = {"pass_cnt": "pass(ハードビン)", "both_zero": "PSDN = HNS = 0",
-             "both_le_n": f"PSDN, HNS ≤ {MAX_N}"}
-    long = df.melt(id_vars=["lot_id"], value_vars=list(names), var_name="key", value_name="dies")
-    long["series"] = long["key"].map(names)
-
-    domain = list(names.values())
-    chart = alt.Chart(long).mark_line(point=True, strokeWidth=2).encode(
-        x=alt.X("lot_id:N", sort=df["lot_id"].tolist(), title="ロット(開始順)",
-                axis=alt.Axis(labelAngle=-45)),
-        y=alt.Y("dies:Q", title="ダイ数"),
-        color=alt.Color("series:N", title=None, legend=alt.Legend(orient="top"),
-                        scale=alt.Scale(domain=domain, range=["#2a78d6", "#eb6834", "#1baf7a"])),
-        strokeDash=alt.StrokeDash("series:N", legend=None,
-                                  scale=alt.Scale(domain=domain, range=[[1, 0], [6, 3], [2, 2]])),
-        tooltip=["lot_id:N", "series:N", "dies:Q"],
-    ).properties(height=380, width="container")
-    mo.ui.altair_chart(chart)
-    return (long,)
-
-
-@app.cell
-def _(df):
-    df  # グラフと同じ数字(CSV にコピーできる)
+def _(die, mo):
+    # 2) ダイごとの core 冗長表(psdn / hns が NULL = そのダイの判定値なし)
+    mo.vstack([mo.md(f"**ダイごとの core 冗長**({len(die):,} ダイ)"), die])
     return
+
+
+@app.cell
+def _(MAX_N, PRODUCT, die, mo, s):
+    # 3) ロット表: yield %, 0 redun %, 6 redun %。母数(total)= ウェハーごとの max(probed, gross_die) の合計。
+    #    分子は測ったダイだけ(NULL は条件を満たさない)。測っていないダイは母数にだけ入る。
+    YIELD, ZERO, LE_N = "yield %", "0 redun %", f"{MAX_N} redun %"
+    gd = s.q("SELECT gross_die FROM gross_die WHERE product = ?", [PRODUCT])
+    GROSS = int(gd["gross_die"].iloc[0]) if not gd.empty else None
+
+    flags = die.assign(
+        ok=die["passed"].fillna(False).astype(bool),
+        zero=(die["psdn"] == 0) & (die["hns"] == 0),
+        le_n=(die["psdn"] <= MAX_N) & (die["hns"] <= MAX_N),
+    )
+    probed_w = flags.groupby(["lot_id", "wafer_id"], sort=False).size()  # ウェハーごとの probed
+    total_w = probed_w.clip(lower=GROSS) if GROSS else probed_w
+    by_lot = flags.groupby("lot_id", sort=False)  # die は開始時刻順なので、その順を保つ
+    lot = by_lot.agg(start_time=("start_time", "first"))
+    lot["probed"] = by_lot.size()
+    lot["total"] = total_w.groupby("lot_id", sort=False).sum()
+    for _name, _col in ((YIELD, "ok"), (ZERO, "zero"), (LE_N, "le_n")):
+        lot[_name] = (by_lot[_col].sum() / lot["total"] * 100).round(2)
+    lot = lot.reset_index()
+
+    note = (mo.md(f"`{PRODUCT}` の gross_die が未設定なので、母数は probed。") if GROSS is None
+            else mo.md(f"母数 = ウェハーごとの max(probed, gross_die = {GROSS}) の合計。"))
+    mo.vstack([
+        mo.md(f"**ロット別**(yield = ハードビン pass、`{MAX_N} redun` = PSDN, HNS とも {MAX_N} 以下)"),
+        note, lot,
+    ])
+    return LE_N, YIELD, ZERO, lot
+
+
+@app.cell
+def _(LE_N, YIELD, ZERO, go, lot):
+    # 4) グラフ: 3 系列を % で 1 つに。色 + 線種の二重符号化(色だけに頼らない)。
+    style = {YIELD: ("#2a78d6", "solid"), ZERO: ("#eb6834", "dash"), LE_N: ("#1baf7a", "dot")}
+    fig = go.Figure([
+        go.Scatter(x=lot["lot_id"], y=lot[name], name=name, mode="lines+markers",
+                   line=dict(color=color, dash=dash, width=2), marker=dict(size=8),
+                   hovertemplate="%{y:.2f} %")
+        for name, (color, dash) in style.items()
+    ])
+    fig.update_layout(
+        template="plotly_white", height=420, hovermode="x unified",
+        legend=dict(orientation="h", y=1.1, x=0),
+        margin=dict(l=60, r=20, t=40, b=80),
+        xaxis=dict(title="ロット(開始順)", type="category", tickangle=-45,
+                   categoryorder="array", categoryarray=lot["lot_id"].tolist()),
+        yaxis=dict(title="% of 母数", rangemode="tozero"),
+    )
+    fig
+    return (fig,)
 
 
 if __name__ == "__main__":
