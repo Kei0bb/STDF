@@ -1,3 +1,4 @@
 uv.lock merge=binary -diff
 scripts/start_marimo.bat text eol=crlf
 scripts/marimo_sync.bat text eol=crlf
+scripts/diag_marimo_save.bat text eol=crlf
