@@ -42,7 +42,7 @@ def step(name: str, fn) -> None:
 def info() -> None:
     print(f"platform    : {sys.platform}")
     print(f"user        : {getpass.getuser()}")
-    print(f"python      : {sys.executable}")
+    print(f"python      : {sys.executable}  ({sys.version.split()[0]})")
     for key in ("USERPROFILE", "HOME", "HOMEDRIVE", "HOMEPATH", "XDG_STATE_HOME"):
         print(f"{key:<12}: {os.environ.get(key, '(not set)')}")
     try:
@@ -66,6 +66,40 @@ def make_lock_dir() -> str:
     d = state_dir() / "notebook-locks"
     d.mkdir(mode=0o700, parents=True, exist_ok=True)
     return str(d)
+
+
+def plain_file_in_lock_dir() -> str:
+    # The lock file is the one marimo opens; a plain file shows whether ANY file can be made there.
+    d = state_dir() / "notebook-locks"
+    fd, tmp = tempfile.mkstemp(dir=d, prefix=".diag_", suffix=".tmp")
+    os.close(fd)
+    os.unlink(tmp)
+    return "create + delete a temp file in notebook-locks"
+
+
+def default_mode_dir() -> str:
+    # Same as above but the folder is made WITHOUT mode=0o700 (Python 3.13 turns 0o700 into a
+    # restrictive ACL on Windows). Works here but not in notebook-locks -> that ACL is the cause.
+    d = state_dir() / "_diag_default_mode"
+    d.mkdir(parents=True, exist_ok=True)
+    try:
+        fd = os.open(d / "x.lock", os.O_RDWR | os.O_CREAT, 0o600)
+        os.close(fd)
+        os.unlink(d / "x.lock")
+    finally:
+        d.rmdir()
+    return "folder without mode=0o700: lock-style file ok"
+
+
+def show_acl() -> None:
+    if sys.platform != "win32":
+        return
+    import subprocess
+
+    d = state_dir() / "notebook-locks"
+    print()
+    print(f"icacls {d}")
+    subprocess.run(["icacls", str(d)], check=False)
 
 
 def take_lock() -> str:
@@ -102,6 +136,8 @@ def main() -> int:
     info()
     step("create <home>\\.marimo\\notebook-locks", make_lock_dir)
     step("take a notebook lock (marimo's own code)", take_lock)
+    step("plain file in notebook-locks", plain_file_in_lock_dir)
+    step("lock-style file in a folder made without mode=0o700", default_mode_dir)
     step("write into workspace\\", can_write_dir(WORKSPACE))
     for sub in sorted(p for p in WORKSPACE.iterdir() if p.is_dir() and not p.name.startswith((".", "__"))):
         step(f"write into workspace\\{sub.name}\\", can_write_dir(sub))
@@ -109,6 +145,8 @@ def main() -> int:
         if any(part.startswith((".", "__")) for part in nb.relative_to(WORKSPACE).parts):
             continue
         step(f"open for writing: {nb.relative_to(WORKSPACE)}", can_append(nb))
+    if failures:
+        show_acl()
     print()
     print("RESULT      :", "PASS" if not failures else f"FAIL ({failures} step(s))")
     return 1 if failures else 0
