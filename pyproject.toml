@@ -40,9 +40,8 @@ notebook = [
     # mo.sql を engine 無し(DuckDB 既定接続)で使うのに必須。pure Python(Win11 でも wheel で入る)。
     # marimo[sql] の sqlglot[c] はコンパイル済み拡張なので使わない。
     "sqlglot>=30.7.0",
-    # ノートブックのグラフ用(marimo が altair_chart として描画し、ツールチップも付く)。
-    # pure Python + wheel のみ(Win11 でも入る)。
-    "altair>=5.5.0",
+    # ノートブックのグラフ用。pure Python の wheel のみ(Win11 でも入る)。
+    "plotly>=6.0.0",
 ]
 
 # 共有 marimo サーバ: 全員が同じアカウントで動くので、AI 補完の設定(API キー、
