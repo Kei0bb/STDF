@@ -58,11 +58,13 @@ def redundancy_store(tmp_path):
         "LOTA", "W1", "JOB", "Rev", NOW - 20 * DAY, NOW - 20 * DAY + 100,
         parts=[_die("LOTA", 3, True)],
         test_results=_judge("LOTA", 3, 0, 0), tests=TESTS), "a1.stdf")
-    # LOTB: e1 は pass だが HNS=7 / e2 は fail だが両方 0
+    # LOTB: e1 pass (6,7) / e2 fail (0,0) / e3 pass (6,1) / e4 fail (7,0)
     ingest(_cp_run(
         "LOTB", "W1", "JOB", "Rev", NOW - 10 * DAY, NOW - 10 * DAY + 100,
-        parts=[_die("LOTB", 1, True), _die("LOTB", 2, False)],
-        test_results=_judge("LOTB", 1, 6, 7) + _judge("LOTB", 2, 0, 0),
+        parts=[_die("LOTB", 1, True), _die("LOTB", 2, False),
+               _die("LOTB", 3, True), _die("LOTB", 4, False)],
+        test_results=(_judge("LOTB", 1, 6, 7) + _judge("LOTB", 2, 0, 0)
+                      + _judge("LOTB", 3, 6, 1) + _judge("LOTB", 4, 7, 0)),
         tests=TESTS), "b0.stdf")
     # 4 か月前に始まったロット: 既定の 3 か月には入らない
     ingest(_cp_run(
@@ -98,8 +100,11 @@ def _load_notebook(store, tmp_path, monkeypatch, gross_die=None):
     return module
 
 
+LE = "PSDN≤6 & HNS≤2 %"  # 既定のしきい値: PSDN は 6 以下、HNS は 2 以下(別々)
+
+
 def _rows(lot):
-    # (probed, 母数, yield %, 0 redun %, 6 redun %)
+    # (probed, 母数, yield %, 0 redun %, PSDN/HNS しきい値 %)
     return {row.lot_id: (row.probed, row.total, *row[-3:]) for _, row in lot.iterrows()}
 
 
@@ -109,54 +114,67 @@ def test_notebook_counts_latest_retest_within_3_months(redundancy_store, tmp_pat
     _outputs, defs = module.app.run()
 
     die, lot = defs["die"], defs["lot"]
-    # ダイ表: LOTA 4 + LOTB 2。LOTOLD(4か月前)・LOTC(CP2)・LOTX(別製品) は入らない。
+    # ダイ表: LOTA 4 + LOTB 4。LOTOLD(4か月前)・LOTC(CP2)・LOTX(別製品) は入らない。
     assert list(die["lot_id"].unique()) == ["LOTA", "LOTB"]  # 開始時刻順
-    assert len(die) == 6
+    assert len(die) == 8
     # 再検で測り直した d3 は最新の (0,0) / pass になっている。判定値の無い d4 は NULL。
     a = die[die["lot_id"] == "LOTA"].set_index("x")
     assert (a.loc[3, "psdn"], a.loc[3, "hns"], bool(a.loc[3, "passed"])) == (0, 0, True)
     assert a.loc[4, ["psdn", "hns"]].isna().all()
 
     assert list(lot["lot_id"]) == ["LOTA", "LOTB"]
-    assert list(lot.columns[-3:]) == ["yield %", "0 redun %", "6 redun %"]
+    assert list(lot.columns[-3:]) == ["yield %", "0 redun %", LE]
     # gross_die 未設定: 母数 = probed
     assert _rows(lot) == {
-        # LOTA: 4 ダイ中 pass 4 / d1(0,0) d3(0,0) が両方 0 / d1 d2(2,6) d3 が 6 以下
-        "LOTA": (4, 4, 100.0, 50.0, 75.0),
-        # LOTB: 2 ダイ中 pass 1(e1) / e2(0,0) だけ両方 0 / e1 は HNS=7 で 6 以下に入らず e2 のみ
-        "LOTB": (2, 2, 50.0, 50.0, 50.0),
+        # LOTA: pass 4 / 両方 0 は d1 d3 / PSDN≤6 & HNS≤2 は d1 d3(d2 は HNS=6 で外れる、d4 は判定なし)
+        "LOTA": (4, 4, 100.0, 50.0, 50.0),
+        # LOTB: pass 2(e1 e3) / 両方 0 は e2 / e2 e3 が該当(e1 は HNS=7、e4 は PSDN=7 で外れる)
+        "LOTB": (4, 4, 50.0, 25.0, 50.0),
     }
     fig = defs["fig"]
-    assert [tr.name for tr in fig.data] == ["yield %", "0 redun %", "6 redun %"]
+    assert [tr.name for tr in fig.data] == ["yield %", "0 redun %", LE]
     assert list(fig.data[0].x) == ["LOTA", "LOTB"]
-    assert list(fig.data[1].y) == [50.0, 50.0]
+    assert list(fig.data[1].y) == [50.0, 25.0]
+
+
+def test_notebook_thresholds_are_separate_for_psdn_and_hns(redundancy_store, tmp_path, monkeypatch):
+    """PSDN と HNS のしきい値は別々。HNS を 6 に上げると d2(2,6) と e1 の扱いが変わる。"""
+    module = _load_notebook(redundancy_store, tmp_path, monkeypatch)
+    consts = {"PRODUCT": "SCT101B", "SUB": "CP1", "MONTHS": 3, "MAX_PSDN": 6, "MAX_HNS": 6,
+              "PSDN": PSDN, "HNS": HNS}
+    _outputs, defs = module.app.run(defs=consts)
+    lot = defs["lot"]
+    assert lot.columns[-1] == "PSDN≤6 & HNS≤6 %"
+    # LOTA は d1 d2 d3 の 3 / 4。LOTB は e2 e3 の 2 / 4(e1 は HNS=7、e4 は PSDN=7)
+    assert list(lot["PSDN≤6 & HNS≤6 %"]) == [75.0, 50.0]
 
 
 def test_notebook_denominator_is_gross_die(redundancy_store, tmp_path, monkeypatch):
     """母数 = ウェハーごとの max(probed, gross_die)。測っていないダイは分子に入らない。"""
-    module = _load_notebook(redundancy_store, tmp_path, monkeypatch, gross_die=8)
+    module = _load_notebook(redundancy_store, tmp_path, monkeypatch, gross_die=5)
     _outputs, defs = module.app.run()
     assert _rows(defs["lot"]) == {
-        "LOTA": (4, 8, 50.0, 25.0, 37.5),   # pass 4 / 8、両方 0 が 2 / 8、6 以下が 3 / 8
-        "LOTB": (2, 8, 12.5, 12.5, 12.5),   # pass 1 / 8、両方 0 が 1 / 8、6 以下が 1 / 8
+        "LOTA": (4, 5, 80.0, 40.0, 40.0),   # 4 ダイ中 pass 4 / 両方 0 が 2 / 該当 2、母数 5
+        "LOTB": (4, 5, 40.0, 20.0, 40.0),   # pass 2 / 両方 0 が 1 / 該当 2、母数 5
     }
-    assert list(defs["fig"].data[0].y) == [50.0, 12.5]
+    assert list(defs["fig"].data[0].y) == [80.0, 40.0]
 
 
 def test_notebook_gross_die_below_probed_keeps_probed(redundancy_store, tmp_path, monkeypatch):
     """probed が gross_die を超えるウェハーは probed のまま(GREATEST)。"""
     module = _load_notebook(redundancy_store, tmp_path, monkeypatch, gross_die=3)
     _outputs, defs = module.app.run()
-    rows = _rows(defs["lot"])
-    assert rows["LOTA"] == (4, 4, 100.0, 50.0, 75.0)       # 4 > 3 → probed
-    assert rows["LOTB"] == (2, 3, 33.33, 33.33, 33.33)     # 2 < 3 → gross_die
+    assert _rows(defs["lot"]) == {
+        "LOTA": (4, 4, 100.0, 50.0, 50.0),   # 4 > 3 → probed
+        "LOTB": (4, 4, 50.0, 25.0, 50.0),
+    }
 
 
 def test_notebook_months_constant_widens_window(redundancy_store, tmp_path, monkeypatch):
     """MONTHS を 6 にすると 4 か月前の LOTOLD も入る(範囲を決めているのは MONTHS だけ)。"""
     module = _load_notebook(redundancy_store, tmp_path, monkeypatch)
-    # 上書きは、そのセルの定義(定数 6 つ)をすべて渡す必要がある
-    consts = {"PRODUCT": "SCT101B", "SUB": "CP1", "MONTHS": 6, "MAX_N": 6,
+    # 上書きは、そのセルの定義(定数 7 つ)をすべて渡す必要がある
+    consts = {"PRODUCT": "SCT101B", "SUB": "CP1", "MONTHS": 6, "MAX_PSDN": 6, "MAX_HNS": 2,
               "PSDN": PSDN, "HNS": HNS}
     _outputs, defs = module.app.run(defs=consts)
     assert list(defs["lot"]["lot_id"]) == ["LOTOLD", "LOTA", "LOTB"]

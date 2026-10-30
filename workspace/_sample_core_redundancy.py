@@ -35,10 +35,11 @@ def _():
     PRODUCT = "SCT101B"
     SUB = "CP1"
     MONTHS = 3
-    MAX_N = 6  # 「共に 6 以下」
+    MAX_PSDN = 6  # PSDN と HNS は別々のしきい値で判定する
+    MAX_HNS = 2
     PSDN = "PASS2_JUDGE_PSDN_CPLT"
     HNS = "PASS2_JUDGE_HNS_CPLT"
-    return HNS, MAX_N, MONTHS, PRODUCT, PSDN, SUB
+    return HNS, MAX_HNS, MAX_PSDN, MONTHS, PRODUCT, PSDN, SUB
 
 
 @app.cell
@@ -104,17 +105,17 @@ def _(die, mo):
 
 
 @app.cell
-def _(MAX_N, PRODUCT, die, mo, s):
-    # 3) ロット表: yield %, 0 redun %, 6 redun %。母数(total)= ウェハーごとの max(probed, gross_die) の合計。
+def _(MAX_HNS, MAX_PSDN, PRODUCT, die, mo, s):
+    # 3) ロット表: yield %, 0 redun %, PSDN≤MAX_PSDN & HNS≤MAX_HNS %。母数(total)= ウェハーごとの max(probed, gross_die) の合計。
     #    分子は測ったダイだけ(NULL は条件を満たさない)。測っていないダイは母数にだけ入る。
-    YIELD, ZERO, LE_N = "yield %", "0 redun %", f"{MAX_N} redun %"
+    YIELD, ZERO, LE_N = "yield %", "0 redun %", f"PSDN≤{MAX_PSDN} & HNS≤{MAX_HNS} %"
     gd = s.q("SELECT gross_die FROM gross_die WHERE product = ?", [PRODUCT])
     GROSS = int(gd["gross_die"].iloc[0]) if not gd.empty else None
 
     flags = die.assign(
         ok=die["passed"].fillna(False).astype(bool),
         zero=(die["psdn"] == 0) & (die["hns"] == 0),
-        le_n=(die["psdn"] <= MAX_N) & (die["hns"] <= MAX_N),
+        le_n=(die["psdn"] <= MAX_PSDN) & (die["hns"] <= MAX_HNS),
     )
     probed_w = flags.groupby(["lot_id", "wafer_id"], sort=False).size()  # ウェハーごとの probed
     total_w = probed_w.clip(lower=GROSS) if GROSS else probed_w
@@ -129,7 +130,8 @@ def _(MAX_N, PRODUCT, die, mo, s):
     note = (mo.md(f"`{PRODUCT}` の gross_die が未設定なので、母数は probed。") if GROSS is None
             else mo.md(f"母数 = ウェハーごとの max(probed, gross_die = {GROSS}) の合計。"))
     mo.vstack([
-        mo.md(f"**ロット別**(yield = ハードビン pass、`{MAX_N} redun` = PSDN, HNS とも {MAX_N} 以下)"),
+        mo.md(f"**ロット別**(yield = ハードビン pass、0 redun = PSDN, HNS とも 0、"
+        f"`{LE_N}` = PSDN が {MAX_PSDN} 以下かつ HNS が {MAX_HNS} 以下)"),
         note, lot,
     ])
     return LE_N, YIELD, ZERO, lot
