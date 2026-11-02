@@ -23,9 +23,12 @@ def _(mo):
 
     直近 3 か月のロットについて、ダイごとの `PASS2_JUDGE_PSDN_CPLT` / `PASS2_JUDGE_HNS_CPLT`
     (再検は最新結果)から、次の順に進める: **ダイ表 → ロット表 → グラフ**。
+    冗長の割合は **ハードビン pass かつ 冗長条件**(fail のダイは数えない)。PSDN は
+    `PSDN_LINES` に並べたしきい値ごとに 1 本ずつ線になり、HNS は `MAX_HNS` で共通。
+    `EXCLUDE_LOTS` に書いたロットは集計から外す。
     割合の**母数は gross die**: ウェハーごとに max(probed, gross_die) を求め、ロット内で合計する
     (`config.yaml` の `products.<製品>.gross_die`。未設定の製品は probed)。測っていないダイは
-    母数に入り、yield と redun の分子には入らない。
+    母数に入り、分子には入らない。
     """)
     return
 
@@ -35,17 +38,19 @@ def _():
     PRODUCT = "SCT101B"
     SUB = "CP1"
     MONTHS = 3
-    MAX_PSDN = 6  # PSDN と HNS は別々のしきい値で判定する
-    MAX_HNS = 2
+    PSDN_LINES = [2, 4, 6]  # PSDN のしきい値。1 つにつき 1 本の線(PSDN ≤ n)
+    MAX_HNS = 2  # HNS のしきい値(全ラインで共通)
+    EXCLUDE_LOTS = []  # 除外するロット。例: ["A12345", "A12346"]
     PSDN = "PASS2_JUDGE_PSDN_CPLT"
     HNS = "PASS2_JUDGE_HNS_CPLT"
-    return HNS, MAX_HNS, MAX_PSDN, MONTHS, PRODUCT, PSDN, SUB
+    return EXCLUDE_LOTS, HNS, MAX_HNS, MONTHS, PRODUCT, PSDN, PSDN_LINES, SUB
 
 
 @app.cell
-def _(HNS, MONTHS, PRODUCT, PSDN, SUB, mo, s):
+def _(EXCLUDE_LOTS, HNS, MONTHS, PRODUCT, PSDN, SUB, mo, s):
     # 1) query: 直近 MONTHS か月のロットを先に絞り(下の集計はそのパーティションしか読まない)、
-    #    ダイごとの判定値を取る。parts_final / test_data_final は再検解決済み(最新の結果)。
+    #    除外ロットを外してから、ダイごとの判定値を取る。
+    #    parts_final / test_data_final は再検解決済み(最新の結果)。
     #    ダイは lot_id + wafer_id + die_key で結ぶ(part_id では結ばない)。
     #    ループ測定で 1 ダイに複数行あっても MAX で 1 値にする。
     recent = s.q(
@@ -58,8 +63,17 @@ def _(HNS, MONTHS, PRODUCT, PSDN, SUB, mo, s):
         """,
         [PRODUCT, SUB, MONTHS],
     )
+    skip = recent["lot_id"].isin(EXCLUDE_LOTS)
+    # 除外の指定が期間内のロットに当たったか(打ち間違いに気づけるよう、両方を表示する)
+    exclude_note = (
+        f"除外したロット: {', '.join(recent.loc[skip, 'lot_id']) or 'なし'}"
+        + (f" / 期間内に無かった指定: {', '.join(sorted(set(EXCLUDE_LOTS) - set(recent['lot_id'])))}"
+           if set(EXCLUDE_LOTS) - set(recent["lot_id"]) else "")
+    )
+    recent = recent[~skip]
     mo.stop(recent.empty, mo.callout(mo.md(
-        f"{PRODUCT} / {SUB} に、直近 {MONTHS} か月のロットがありません。"), kind="warn"))
+        f"{PRODUCT} / {SUB} に、直近 {MONTHS} か月で除外後に残るロットがありません。"
+        f"({exclude_note})"), kind="warn"))
 
     lot_ids = recent["lot_id"].tolist()
     marks = ",".join("?" * len(lot_ids))  # IN の ? だけを組み立てる(値は bind)
@@ -94,53 +108,62 @@ def _(HNS, MONTHS, PRODUCT, PSDN, SUB, mo, s):
         "ダイはありますが PSDN / HNS の測定値が 1 件もありません。テスト名を確認: "
         "`s.q(\"SELECT DISTINCT test_name FROM test_data_final "
         "WHERE sub_process = 'CP1' AND test_name LIKE '%JUDGE%'\")`"), kind="warn"))
-    return (die,)
+    return die, exclude_note
 
 
 @app.cell
-def _(die, mo):
+def _(die, exclude_note, mo):
     # 2) ダイごとの core 冗長表(psdn / hns が NULL = そのダイの判定値なし)
-    mo.vstack([mo.md(f"**ダイごとの core 冗長**({len(die):,} ダイ)"), die])
+    mo.vstack([mo.md(f"**ダイごとの core 冗長**({len(die):,} ダイ。{exclude_note})"), die])
     return
 
 
 @app.cell
-def _(MAX_HNS, MAX_PSDN, PRODUCT, die, mo, s):
-    # 3) ロット表: yield %, 0 redun %, PSDN≤MAX_PSDN & HNS≤MAX_HNS %。母数(total)= ウェハーごとの max(probed, gross_die) の合計。
-    #    分子は測ったダイだけ(NULL は条件を満たさない)。測っていないダイは母数にだけ入る。
-    YIELD, ZERO, LE_N = "yield %", "0 redun %", f"PSDN≤{MAX_PSDN} & HNS≤{MAX_HNS} %"
+def _(MAX_HNS, PRODUCT, PSDN_LINES, die, mo, s):
+    # 3) ロット表: yield %、PASS & 0 redun %、PSDN の各しきい値ごとの PASS & PSDN≤n & HNS≤MAX_HNS %。
+    #    母数(total)= ウェハーごとの max(probed, gross_die) の合計。
+    #    分子は測ったダイだけで、冗長の 2 種はハードビン pass も必須(NULL は条件を満たさない)。
+    YIELD, ZERO = "yield %", "PASS & 0 redun %"
+    LINE_NAMES = [f"PASS & PSDN≤{n} & HNS≤{MAX_HNS} %" for n in sorted(PSDN_LINES)]
     gd = s.q("SELECT gross_die FROM gross_die WHERE product = ?", [PRODUCT])
     GROSS = int(gd["gross_die"].iloc[0]) if not gd.empty else None
 
-    flags = die.assign(
-        ok=die["passed"].fillna(False).astype(bool),
-        zero=(die["psdn"] == 0) & (die["hns"] == 0),
-        le_n=(die["psdn"] <= MAX_PSDN) & (die["hns"] <= MAX_HNS),
-    )
+    passed = die["passed"].fillna(False).astype(bool)
+    hit = {YIELD: passed, ZERO: passed & (die["psdn"] == 0) & (die["hns"] == 0)}
+    for _name, _n in zip(LINE_NAMES, sorted(PSDN_LINES)):
+        hit[_name] = passed & (die["psdn"] <= _n) & (die["hns"] <= MAX_HNS)
+    flags = die[["lot_id", "wafer_id", "start_time"]].assign(**hit)
+
     probed_w = flags.groupby(["lot_id", "wafer_id"], sort=False).size()  # ウェハーごとの probed
     total_w = probed_w.clip(lower=GROSS) if GROSS else probed_w
     by_lot = flags.groupby("lot_id", sort=False)  # die は開始時刻順なので、その順を保つ
     lot = by_lot.agg(start_time=("start_time", "first"))
     lot["probed"] = by_lot.size()
     lot["total"] = total_w.groupby("lot_id", sort=False).sum()
-    for _name, _col in ((YIELD, "ok"), (ZERO, "zero"), (LE_N, "le_n")):
-        lot[_name] = (by_lot[_col].sum() / lot["total"] * 100).round(2)
+    for _name in hit:
+        lot[_name] = (by_lot[_name].sum() / lot["total"] * 100).round(2)
     lot = lot.reset_index()
 
     note = (mo.md(f"`{PRODUCT}` の gross_die が未設定なので、母数は probed。") if GROSS is None
             else mo.md(f"母数 = ウェハーごとの max(probed, gross_die = {GROSS}) の合計。"))
     mo.vstack([
-        mo.md(f"**ロット別**(yield = ハードビン pass、0 redun = PSDN, HNS とも 0、"
-        f"`{LE_N}` = PSDN が {MAX_PSDN} 以下かつ HNS が {MAX_HNS} 以下)"),
+        mo.md("**ロット別**(yield = ハードビン pass、`PASS & 0 redun` = pass かつ PSDN, HNS とも 0、"
+              f"`PASS & PSDN≤n & HNS≤{MAX_HNS}` = pass かつ PSDN が n 以下かつ HNS が {MAX_HNS} 以下)"),
         note, lot,
     ])
-    return LE_N, YIELD, ZERO, lot
+    return LINE_NAMES, YIELD, ZERO, lot
 
 
 @app.cell
-def _(LE_N, YIELD, ZERO, go, lot):
-    # 4) グラフ: 3 系列を % で 1 つに。色 + 線種の二重符号化(色だけに頼らない)。
-    style = {YIELD: ("#2a78d6", "solid"), ZERO: ("#eb6834", "dash"), LE_N: ("#1baf7a", "dot")}
+def _(LINE_NAMES, YIELD, ZERO, go, lot):
+    # 4) グラフ: 全系列を % で 1 つに。yield と 0 redun は固有の色、PSDN のしきい値は
+    #    1 色(緑)の濃淡 = しきい値が大きいほど濃く、線種も変える(色だけに頼らない)。
+    _greens = ["#8fd9b8", "#4cc596", "#1baf7a", "#12805a", "#0b5a3f"]
+    _greens = _greens[max(0, len(_greens) - len(LINE_NAMES)):]
+    _dashes = ["dot", "dashdot", "longdash", "longdashdot", "solid"]
+    style = {YIELD: ("#2a78d6", "solid"), ZERO: ("#eb6834", "dash")}
+    style.update({name: (_greens[i % len(_greens)], _dashes[i % len(_dashes)])
+                  for i, name in enumerate(LINE_NAMES)})
     fig = go.Figure([
         go.Scatter(x=lot["lot_id"], y=lot[name], name=name, mode="lines+markers",
                    line=dict(color=color, dash=dash, width=2), marker=dict(size=8),
@@ -149,8 +172,8 @@ def _(LE_N, YIELD, ZERO, go, lot):
     ])
     fig.update_layout(
         template="plotly_white", height=420, hovermode="x unified",
-        legend=dict(orientation="h", y=1.1, x=0),
-        margin=dict(l=60, r=20, t=40, b=80),
+        legend=dict(orientation="h", y=1.15, x=0),
+        margin=dict(l=60, r=20, t=60, b=80),
         xaxis=dict(title="ロット(開始順)", type="category", tickangle=-45,
                    categoryorder="array", categoryarray=lot["lot_id"].tolist()),
         yaxis=dict(title="% of 母数", rangemode="tozero"),

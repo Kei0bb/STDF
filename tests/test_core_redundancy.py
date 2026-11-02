@@ -100,12 +100,21 @@ def _load_notebook(store, tmp_path, monkeypatch, gross_die=None):
     return module
 
 
-LE = "PSDN≤6 & HNS≤2 %"  # 既定のしきい値: PSDN は 6 以下、HNS は 2 以下(別々)
+# 既定: PSDN は 2,4,6 の 3 本、HNS は 2 以下。冗長の割合は pass かつ条件(fail のダイは数えない)
+ZERO = "PASS & 0 redun %"
+LINES = ["PASS & PSDN≤2 & HNS≤2 %", "PASS & PSDN≤4 & HNS≤2 %", "PASS & PSDN≤6 & HNS≤2 %"]
+
+
+def _consts(**over):
+    # 上書きは、そのセルの定義(定数 8 つ)をすべて渡す必要がある
+    base = {"PRODUCT": "SCT101B", "SUB": "CP1", "MONTHS": 3, "PSDN_LINES": [2, 4, 6],
+            "MAX_HNS": 2, "EXCLUDE_LOTS": [], "PSDN": PSDN, "HNS": HNS}
+    return {**base, **over}
 
 
 def _rows(lot):
-    # (probed, 母数, yield %, 0 redun %, PSDN/HNS しきい値 %)
-    return {row.lot_id: (row.probed, row.total, *row[-3:]) for _, row in lot.iterrows()}
+    # (probed, 母数, yield %, PASS & 0 redun %, PSDN 2 / 4 / 6 の各 %)
+    return {row.lot_id: (row.probed, row.total, *row[-5:]) for _, row in lot.iterrows()}
 
 
 def test_notebook_counts_latest_retest_within_3_months(redundancy_store, tmp_path, monkeypatch):
@@ -123,30 +132,46 @@ def test_notebook_counts_latest_retest_within_3_months(redundancy_store, tmp_pat
     assert a.loc[4, ["psdn", "hns"]].isna().all()
 
     assert list(lot["lot_id"]) == ["LOTA", "LOTB"]
-    assert list(lot.columns[-3:]) == ["yield %", "0 redun %", LE]
+    assert list(lot.columns[-5:]) == ["yield %", ZERO, *LINES]
     # gross_die 未設定: 母数 = probed
     assert _rows(lot) == {
-        # LOTA: pass 4 / 両方 0 は d1 d3 / PSDN≤6 & HNS≤2 は d1 d3(d2 は HNS=6 で外れる、d4 は判定なし)
-        "LOTA": (4, 4, 100.0, 50.0, 50.0),
-        # LOTB: pass 2(e1 e3) / 両方 0 は e2 / e2 e3 が該当(e1 は HNS=7、e4 は PSDN=7 で外れる)
-        "LOTB": (4, 4, 50.0, 25.0, 50.0),
+        # LOTA: pass 4 / pass かつ両方 0 は d1 d3 / HNS≤2 なので d2(2,6) は PSDN をいくつにしても外れる
+        # (d4 は判定なし)ため 3 本とも d1 d3 の 50
+        "LOTA": (4, 4, 100.0, 50.0, 50.0, 50.0, 50.0),
+        # LOTB: pass 2(e1 e3)/ e2 は両方 0 だが fail なので ZERO は 0 / PSDN≤2,4 は該当なし /
+        # PSDN≤6 は e3(6,1)のみ(e1 は HNS=7、e4 は fail かつ PSDN=7)
+        "LOTB": (4, 4, 50.0, 0.0, 0.0, 0.0, 25.0),
     }
     fig = defs["fig"]
-    assert [tr.name for tr in fig.data] == ["yield %", "0 redun %", LE]
+    assert [tr.name for tr in fig.data] == ["yield %", ZERO, *LINES]
     assert list(fig.data[0].x) == ["LOTA", "LOTB"]
-    assert list(fig.data[1].y) == [50.0, 25.0]
+    assert list(fig.data[1].y) == [50.0, 0.0]
 
 
-def test_notebook_thresholds_are_separate_for_psdn_and_hns(redundancy_store, tmp_path, monkeypatch):
-    """PSDN と HNS のしきい値は別々。HNS を 6 に上げると d2(2,6) と e1 の扱いが変わる。"""
+def test_notebook_psdn_lines_and_separate_hns_threshold(redundancy_store, tmp_path, monkeypatch):
+    """PSDN のしきい値は何本でも線になり、HNS のしきい値は別。順不同で渡しても昇順に並ぶ。"""
     module = _load_notebook(redundancy_store, tmp_path, monkeypatch)
-    consts = {"PRODUCT": "SCT101B", "SUB": "CP1", "MONTHS": 3, "MAX_PSDN": 6, "MAX_HNS": 6,
-              "PSDN": PSDN, "HNS": HNS}
-    _outputs, defs = module.app.run(defs=consts)
+    _outputs, defs = module.app.run(defs=_consts(PSDN_LINES=[6, 1, 2], MAX_HNS=6))
     lot = defs["lot"]
-    assert lot.columns[-1] == "PSDN≤6 & HNS≤6 %"
-    # LOTA は d1 d2 d3 の 3 / 4。LOTB は e2 e3 の 2 / 4(e1 は HNS=7、e4 は PSDN=7)
-    assert list(lot["PSDN≤6 & HNS≤6 %"]) == [75.0, 50.0]
+    assert list(lot.columns[-5:]) == ["yield %", ZERO, "PASS & PSDN≤1 & HNS≤6 %",
+                                      "PASS & PSDN≤2 & HNS≤6 %", "PASS & PSDN≤6 & HNS≤6 %"]
+    # LOTA: PSDN≤1 は d1 d3 の 2/4、PSDN≤2 は d2(2,6) も入り 3/4。
+    # LOTB: e3(6,1)だけが PSDN≤6 に入る(e1 は HNS=7、e2 e4 は fail)
+    assert list(lot["PASS & PSDN≤1 & HNS≤6 %"]) == [50.0, 0.0]
+    assert list(lot["PASS & PSDN≤2 & HNS≤6 %"]) == [75.0, 0.0]
+    assert list(lot["PASS & PSDN≤6 & HNS≤6 %"]) == [75.0, 25.0]
+    assert len(defs["fig"].data) == 5
+
+
+def test_notebook_exclude_lots(redundancy_store, tmp_path, monkeypatch):
+    """EXCLUDE_LOTS のロットはダイ表・ロット表・グラフから外れ、期間内に無い指定は注記に出る。"""
+    module = _load_notebook(redundancy_store, tmp_path, monkeypatch)
+    _outputs, defs = module.app.run(defs=_consts(EXCLUDE_LOTS=["LOTA", "TYPO"]))
+    assert list(defs["die"]["lot_id"].unique()) == ["LOTB"]
+    assert list(defs["lot"]["lot_id"]) == ["LOTB"]
+    assert list(defs["fig"].data[0].x) == ["LOTB"]
+    note = defs["exclude_note"]
+    assert "除外したロット: LOTA" in note and "TYPO" in note
 
 
 def test_notebook_denominator_is_gross_die(redundancy_store, tmp_path, monkeypatch):
@@ -154,8 +179,8 @@ def test_notebook_denominator_is_gross_die(redundancy_store, tmp_path, monkeypat
     module = _load_notebook(redundancy_store, tmp_path, monkeypatch, gross_die=5)
     _outputs, defs = module.app.run()
     assert _rows(defs["lot"]) == {
-        "LOTA": (4, 5, 80.0, 40.0, 40.0),   # 4 ダイ中 pass 4 / 両方 0 が 2 / 該当 2、母数 5
-        "LOTB": (4, 5, 40.0, 20.0, 40.0),   # pass 2 / 両方 0 が 1 / 該当 2、母数 5
+        "LOTA": (4, 5, 80.0, 40.0, 40.0, 40.0, 40.0),  # 4 ダイ中 pass 4 / 該当 2、母数 5
+        "LOTB": (4, 5, 40.0, 0.0, 0.0, 0.0, 20.0),     # pass 2 / PSDN≤6 は e3 の 1、母数 5
     }
     assert list(defs["fig"].data[0].y) == [80.0, 40.0]
 
@@ -165,16 +190,13 @@ def test_notebook_gross_die_below_probed_keeps_probed(redundancy_store, tmp_path
     module = _load_notebook(redundancy_store, tmp_path, monkeypatch, gross_die=3)
     _outputs, defs = module.app.run()
     assert _rows(defs["lot"]) == {
-        "LOTA": (4, 4, 100.0, 50.0, 50.0),   # 4 > 3 → probed
-        "LOTB": (4, 4, 50.0, 25.0, 50.0),
+        "LOTA": (4, 4, 100.0, 50.0, 50.0, 50.0, 50.0),  # 4 > 3 → probed
+        "LOTB": (4, 4, 50.0, 0.0, 0.0, 0.0, 25.0),
     }
 
 
 def test_notebook_months_constant_widens_window(redundancy_store, tmp_path, monkeypatch):
     """MONTHS を 6 にすると 4 か月前の LOTOLD も入る(範囲を決めているのは MONTHS だけ)。"""
     module = _load_notebook(redundancy_store, tmp_path, monkeypatch)
-    # 上書きは、そのセルの定義(定数 7 つ)をすべて渡す必要がある
-    consts = {"PRODUCT": "SCT101B", "SUB": "CP1", "MONTHS": 6, "MAX_PSDN": 6, "MAX_HNS": 2,
-              "PSDN": PSDN, "HNS": HNS}
-    _outputs, defs = module.app.run(defs=consts)
+    _outputs, defs = module.app.run(defs=_consts(MONTHS=6))
     assert list(defs["lot"]["lot_id"]) == ["LOTOLD", "LOTA", "LOTB"]
