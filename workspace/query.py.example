@@ -30,7 +30,7 @@ def q(sql: str, params: list | None = None):
 def to_csv(sql: str, output="output.csv"):
     n = con.execute(
         f"COPY ({sql.rstrip('; ')}) TO '{output}' (HEADER, DELIMITER ',')"
-    ).fetchone()[0]
+    ).fetchall()[0][0]
     print(f"Exported {n:,} rows → {output}")
 
 
@@ -123,7 +123,7 @@ def use_lot(lot: str) -> None:
             [lot],
         )
         con.execute(f"CREATE OR REPLACE VIEW {name} AS SELECT * FROM {cache}")
-        n = con.execute(f"SELECT COUNT(*) FROM {cache}").fetchone()[0]
+        n = con.execute(f"SELECT COUNT(*) FROM {cache}").fetchall()[0][0]
         done.append(f"{name}={n:,}")
     print(f"use_lot({lot!r}): " + ", ".join(done) + "  (use_all() で全ロットに復元)")
 

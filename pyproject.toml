@@ -7,10 +7,10 @@ readme = "README.md"
 # 制約は消えたが、.python-version は 3.13 のまま固定しておく — 検証済みの
 # 処理系を全マシンで揃えるため。3.14 に上げたくなったら .python-version を
 # 変えて uv sync し、テストを通してから。
-requires-python = ">=3.10"
+requires-python = ">=3.11"  # duckdb 2.x が 3.11 以上を要求
 dependencies = [
     "pyarrow>=14.0.0",
-    "duckdb>=0.9.0",
+    "duckdb>=2.0,<3",
     "click>=8.1.0",
     "rich>=13.0.0",
     "pyyaml>=6.0",

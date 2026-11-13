@@ -335,7 +335,7 @@ def query(ctx, sql: str | None, output: Path | None, sql_file: Path | None):
                 n = s.conn.execute(
                     f"COPY ({sql.rstrip('; ')}) TO '{sql_literal(output.as_posix())}'"
                     f" (HEADER, DELIMITER ',')"
-                ).fetchone()[0]
+                ).fetchall()[0][0]
                 console.print(f"Exported {n:,} rows → {output}")
             else:
                 df = s.q(sql)
@@ -424,9 +424,12 @@ def shell(ctx, refresh):
     previous: list[str] | None = None
     if not refresh:
         try:
-            row = conn.execute(
+            # fetchall: DuckDB 2.0 は fetchone() で読み残した結果があると同じ
+            # 接続の次のクエリを ResourceInUse で拒否する。
+            rows = conn.execute(
                 "SELECT fingerprint, registered FROM _stdf_mount_state"
-            ).fetchone()
+            ).fetchall()
+            row = rows[0] if rows else None
             if row:
                 previous = row[1].split(",")
                 if row[0] == fingerprint:
@@ -439,9 +442,10 @@ def shell(ctx, refresh):
         # (refresh 分岐では上の try が走らない)。
         if previous is None:
             try:
-                row = conn.execute(
+                rows = conn.execute(
                     "SELECT registered FROM _stdf_mount_state"
-                ).fetchone()
+                ).fetchall()
+                row = rows[0] if rows else None
                 if row:
                     previous = row[0].split(",")
             except duckdb_mod.Error:

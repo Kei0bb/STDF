@@ -175,7 +175,7 @@ def run_query(
     out = Path(out)
     rows = conn.execute(
         f"COPY ({final}) TO '{sql_literal(out.as_posix())}' (HEADER, DELIMITER ',')"
-    ).fetchone()[0]
+    ).fetchall()[0][0]
     return rows
 
 

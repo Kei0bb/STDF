@@ -382,7 +382,7 @@ class ParquetStorage:
                             '{old_path.as_posix()}'
                         ) WHERE x_coord = -32768 AND y_coord = -32768
                           AND COALESCE(part_txt, '') = ''
-                    """).fetchone()[0]
+                    """).fetchall()[0][0]
                     if stale_ft:
                         logger.warning(
                             "%s: %d barcode-less FT rows predate part_serial; "
@@ -405,11 +405,14 @@ class ParquetStorage:
                                THEN {old_ft} ELSE '' END) = nk.ft_txt
                      AND old.test_num = nk.test_num
                      AND old.pin_num IS NOT DISTINCT FROM nk.pin_num
-                """).fetchone()[0]
+                """).fetchall()[0][0]
                 if matched == 0:
                     continue
 
-                updated = con.execute(f"""
+                # con.sql(...).to_arrow_table(): DuckDB 2.0 removed the
+                # connection-level .arrow() (and 1.4 lacks connection
+                # .to_arrow_table()); the relation API works on both.
+                updated = con.sql(f"""
                     WITH nk AS (SELECT DISTINCT * FROM new_keys)
                     SELECT old.* EXCLUDE (file_row_number) REPLACE (
                         retest_flag + CASE WHEN nk.test_num IS NOT NULL
@@ -430,7 +433,7 @@ class ParquetStorage:
                      AND old.test_num = nk.test_num
                      AND old.pin_num IS NOT DISTINCT FROM nk.pin_num
                     ORDER BY old.file_row_number
-                """).arrow().read_all()
+                """).to_arrow_table()
             finally:
                 con.close()
 
