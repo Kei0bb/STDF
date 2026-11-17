@@ -31,7 +31,8 @@ def _cpk(values, lo, hi) -> float | None:
 
 def _write_cp(data_dir: Path):
     """One CP lot, 2 wafers; W1 has a fail (soft_bin 3), plus a retest=1 of W1
-    where the failing die now passes (so parts_final must pick retest=1)."""
+    where the failing die now passes (so parts_final must pick retest=1).
+    Flags are written the way storage._recompute_flags would."""
     def parts(wafer, retest, rows):
         p = (data_dir / "parts" / "product=PROD" / "test_category=CP"
              / "sub_process=CP1" / f"lot_id=LOT1" / f"wafer_id={wafer}"
@@ -46,6 +47,7 @@ def _write_cp(data_dir: Path):
         "x_coord": [0, 1], "y_coord": [0, 0],
         "hard_bin": [2, 1], "soft_bin": [3, 1],
         "passed": [False, True], "retest_num": [0, 0],
+        "retest_flag": [1, 0],          # die (0,0) is superseded by retest 1
     })
     # W1 retest1: die (0,0) now passes
     parts("W1", 1, {
@@ -53,7 +55,7 @@ def _write_cp(data_dir: Path):
         "part_id": ["A"], "part_txt": [""],
         "x_coord": [0], "y_coord": [0],
         "hard_bin": [1], "soft_bin": [1],
-        "passed": [True], "retest_num": [1],
+        "passed": [True], "retest_num": [1], "retest_flag": [0],
     })
     # W2 retest0: both pass
     parts("W2", 0, {
@@ -61,7 +63,7 @@ def _write_cp(data_dir: Path):
         "part_id": ["C", "D"], "part_txt": ["", ""],
         "x_coord": [0, 1], "y_coord": [0, 0],
         "hard_bin": [1, 1], "soft_bin": [1, 1],
-        "passed": [True, True], "retest_num": [0, 0],
+        "passed": [True, True], "retest_num": [0, 0], "retest_flag": [0, 0],
     })
 
     # `lots` is now a VIEW derived from `runs` (see views.py) — write the MIR
@@ -81,6 +83,8 @@ def _write_cp(data_dir: Path):
         "start_time": [pa.scalar(1_700_000_000_000, pa.timestamp("ms", tz="UTC"))],
         "finish_time": [pa.scalar(1_700_003_600_000, pa.timestamp("ms", tz="UTC"))],
         "test_rev": [""], "source_file": [""],
+        # WRR counts live on runs (CP wafer)
+        "part_count": [2], "good_count": [1], "rtst_count": [0], "abrt_count": [0],
     }), runs)
 
     td = (data_dir / "test_data" / "product=PROD" / "test_category=CP"
@@ -104,7 +108,7 @@ def _write_cp(data_dir: Path):
 
 
 def _write_ft(data_dir: Path):
-    """FT lot: wafer_id='', x=y=-32768, plus a chipid table."""
+    """FT lot: wafer_id='', x=y=-32768; package U0 carries a CHIP ID (parts.c0_* / c1_*)."""
     p = (data_dir / "parts" / "product=CHIP" / "test_category=FT"
          / "sub_process=FT1" / "lot_id=FT1" / "wafer_id=" / "retest=0" / "data.parquet")
     p.parent.mkdir(parents=True, exist_ok=True)
@@ -113,7 +117,15 @@ def _write_ft(data_dir: Path):
         "part_id": ["U0", "U1"], "part_txt": ["2D-FT1-0000", "2D-FT1-0001"],
         "x_coord": [-32768, -32768], "y_coord": [-32768, -32768],
         "hard_bin": [1, 2], "soft_bin": [1, 3],
-        "passed": [True, False], "retest_num": [0, 0],
+        "passed": [True, False], "retest_num": [0, 0], "retest_flag": [0, 0],
+        "chip_key": ["EF|0000000000000001", ""],
+        "chip_status": ["complete", None], "chip_warnings": ["", None],
+        "c0_chipid_hex": ["0x0000000000000001", None],
+        "c0_origin_fab": ["TSMC1", None], "c0_origin_lot": ["HKPFJK", None],
+        "c0_origin_wafer": [11, None], "c0_origin_x": [12, None], "c0_origin_y": [22, None],
+        "c1_chipid_hex": ["0x0000000000000002", None],
+        "c1_origin_fab": ["TSMC2", None], "c1_origin_lot": ["ABCDEF", None],
+        "c1_origin_wafer": [7, None], "c1_origin_x": [102, None], "c1_origin_y": [202, None],
     }), p)
 
     # FT: wafer_id='' + retest=0 is the FT-lot-level `runs` row.
@@ -131,18 +143,3 @@ def _write_ft(data_dir: Path):
         "finish_time": [pa.scalar(1_700_003_600_000, pa.timestamp("ms", tz="UTC"))],
         "test_rev": [""], "source_file": [""],
     }), runs)
-
-    cp = (data_dir / "chipid" / "product=CHIP" / "test_category=FT"
-          / "sub_process=FT1" / "lot_id=FT1" / "wafer_id=" / "retest=0" / "data.parquet")
-    cp.parent.mkdir(parents=True, exist_ok=True)
-    pq.write_table(pa.table({
-        "lot_id": ["FT1", "FT1"], "part_id": ["U0", "U0"],
-        "part_txt": ["2D-FT1-0000", "2D-FT1-0000"],
-        "chip_occurrence_index": [0, 1],
-        "efuse_raw": ["0b" + "0" * 64, "0b" + "1" * 64],
-        "valid": [True, True],
-        "origin_fab_code": [1, 6], "origin_fab": ["TSMC1", "TSMC2"],
-        "origin_lot": ["HKPFJK", "ABCDEF"], "origin_wafer": [11, 7],
-        "origin_x": [12, 102], "origin_y": [22, 202],
-        "reserved_bits": ["00", "00"], "retest_num": [0, 0],
-    }), cp)

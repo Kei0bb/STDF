@@ -51,7 +51,8 @@ def _(EXCLUDE_LOTS, HNS, MONTHS, PRODUCT, PSDN, SUB, mo, s):
     # 1) query: 直近 MONTHS か月のロットを先に絞り(下の集計はそのパーティションしか読まない)、
     #    除外ロットを外してから、ダイごとの判定値を取る。
     #    parts_final / test_data_final は再検解決済み(最新の結果)。
-    #    ダイは lot_id + wafer_id + die_key で結ぶ(part_id では結ばない)。
+    #    ダイは lot_id + sub_process + wafer_id + die_key で結ぶ(part_id では結ばない。
+    #    CP1 / CP2 は混ぜない)。
     #    ループ測定で 1 ダイに複数行あっても MAX で 1 値にする。
     recent = s.q(
         """
@@ -81,19 +82,20 @@ def _(EXCLUDE_LOTS, HNS, MONTHS, PRODUCT, PSDN, SUB, mo, s):
     die = s.q(
         f"""
         WITH judge AS (
-            SELECT lot_id, wafer_id, die_key,
+            SELECT lot_id, sub_process, wafer_id, die_key,
                    MAX(result) FILTER (WHERE test_name = ?) AS psdn,
                    MAX(result) FILTER (WHERE test_name = ?) AS hns
             FROM test_data_final
             WHERE test_category = 'CP' AND product = ? AND sub_process = ?
               AND lot_id IN ({marks}) AND test_name IN (?, ?)
-            GROUP BY lot_id, wafer_id, die_key
+            GROUP BY lot_id, sub_process, wafer_id, die_key
         )
         SELECT p.lot_id, p.wafer_id, p.x_coord AS x, p.y_coord AS y,
                p.hard_bin, p.passed, j.psdn, j.hns
         FROM parts_final p
         LEFT JOIN judge j
-          ON p.lot_id = j.lot_id AND p.wafer_id = j.wafer_id AND p.die_key = j.die_key
+          ON p.lot_id = j.lot_id AND p.sub_process = j.sub_process
+         AND p.wafer_id = j.wafer_id AND p.die_key = j.die_key
         WHERE p.test_category = 'CP' AND p.product = ? AND p.sub_process = ?
           AND p.lot_id IN ({marks})
         """,

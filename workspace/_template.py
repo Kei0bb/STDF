@@ -66,7 +66,7 @@ def _(mo):
     # s.run() か s.q("... WHERE x = ?", [値]) を使う。
     mo.sql(
         """
-        SELECT lot_id, product, test_category, start_time
+        SELECT lot_id, product, test_category, sub_process, start_time
         FROM lots
         ORDER BY start_time DESC
         LIMIT 10

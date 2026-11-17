@@ -98,7 +98,7 @@ def partial_retest_subset_store(tmp_path):
              [res("LOT_W1_0", 100, 0.1), res("LOT_W1_0", 101, 0.2),
               res("LOT_W1_1", 100, 0.9), res("LOT_W1_1", 101, 0.8)]),
         product="PROD", test_category="CP", sub_process="CP1", source_file="r0.stdf")
-    # (1,0) の T100 のみ再測定。T101 は古い run に残る
+    # (1,0) の T100 のみ再測定。最終は新しい run の行だけ（T101 は古い run から補わない）
     storage.save_stdf_data(
         data([_part("LOT_W1_0", 1, 0, True, 1)], [res("LOT_W1_0", 100, 0.95)]),
         product="PROD", test_category="CP", sub_process="CP1", source_file="r1.stdf")
@@ -133,9 +133,9 @@ def test_export_lot_keeps_one_row_per_die(partial_retest_subset_store, pivot):
         assert "part_id" not in df.columns
         row = df[(df.x_coord == 1) & (df.y_coord == 0)].iloc[0]
         assert row["T100"] == pytest.approx(0.95)   # 再測定された値
-        assert row["T101"] == pytest.approx(0.8)    # 古い run に残った値が同じ行に
+        assert pd.isna(row["T101"])                 # 新しい run で測っていない → 空
     else:
-        assert len(df) == 4, df           # 2 dies x 2 tests, no stale T100 row
+        assert len(df) == 3, df           # die (0,0): 2 tests, die (1,0): only the new T100
         die = df[(df.x_coord == 1) & (df.y_coord == 0)].set_index("test_name")
+        assert list(die.index) == ["T100"]
         assert die.loc["T100", "result"] == pytest.approx(0.95)
-        assert die.loc["T101", "result"] == pytest.approx(0.8)

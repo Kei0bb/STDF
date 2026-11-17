@@ -5,6 +5,7 @@ State is persisted to {data_dir}/ingest_history.json.
 """
 
 import json
+import threading
 from datetime import datetime
 from pathlib import Path
 
@@ -18,6 +19,7 @@ class IngestHistory:
         self.history_file = history_file
         # key: str(resolved path) → {"ingested_at": ISO datetime}
         self._done: dict[str, str] = {}
+        self._lock = threading.Lock()
         self._load()
 
     def _load(self) -> None:
@@ -34,8 +36,14 @@ class IngestHistory:
     def is_done(self, path: Path) -> bool:
         return str(path.resolve()) in self._done
 
+    def mark_done(self, path: Path) -> None:
+        """Record one file as ingested and persist immediately (atomic), so a
+        crash mid-batch keeps the progress made so far."""
+        self.mark_done_batch([path])
+
     def mark_done_batch(self, paths: list[Path]) -> None:
         now = datetime.now().isoformat()
-        for p in paths:
-            self._done[str(p.resolve())] = now
-        self._save()
+        with self._lock:
+            for p in paths:
+                self._done[str(p.resolve())] = now
+            self._save()

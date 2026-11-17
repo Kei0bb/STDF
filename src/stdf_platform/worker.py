@@ -48,6 +48,8 @@ def _run_single(
     compression: str,
     timeout: int,
     log_path: Optional[Path],
+    allow_truncated: bool = False,
+    sub_process: str | None = None,
 ) -> IngestResult:
     """Run one ingest worker subprocess. Called from a thread pool worker.
 
@@ -62,6 +64,10 @@ def _run_single(
         str(data_dir),
         compression,
     ]
+    if allow_truncated:
+        cmd.append("--allow-truncated")
+    if sub_process:
+        cmd.append(f"--sub-process={sub_process}")
 
     try:
         proc = subprocess.Popen(
@@ -149,8 +155,11 @@ def _ts_key(local_path: Path) -> str:
     "202604050254"). Falls back to the full filename if there is no '#'.
     Plain string comparison is fine — these are zero-padded timestamps.
     """
-    stem = local_path.stem
-    return stem.rsplit("#", 1)[-1] if "#" in stem else local_path.name
+    name = local_path.name
+    if name.lower().endswith(".gz"):
+        name = name[:-3]
+    stem = Path(name).stem
+    return stem.rsplit("#", 1)[-1] if "#" in stem else name
 
 
 def run_ingest_pool(
@@ -160,6 +169,8 @@ def run_ingest_pool(
     max_workers: int = 4,
     timeout: int = 300,
     on_success: Optional[Callable[[IngestResult], None]] = None,
+    allow_truncated: bool = False,
+    sub_process: str | None = None,
 ) -> tuple[list[IngestResult], list[IngestResult]]:
     """Ingest files concurrently using a subprocess worker pool.
 
@@ -169,13 +180,12 @@ def run_ingest_pool(
     files from the same lot share mutable on-disk state that a
     read-then-write race would corrupt:
 
-      1. `_get_next_retest_num` is a read-then-write directory scan — two
+      1. `_retest_num_for` is a read-then-write directory scan — two
          workers processing the same wafer concurrently can both read the
          same "next" retest number and both claim it.
-      2. `_demote_superseded` reads and rewrites OLDER retest files when a
-         die/test key is re-measured — a second worker's os.replace on the
-         same file races the first (WinError 5 on Windows) and can corrupt
-         retest_flag ranks.
+      2. `_recompute_flags` reads and rewrites every retest file of the
+         lot/wafer group — a second worker's os.replace on the same file
+         races the first (WinError 5 on Windows).
 
     Grouping and ordering rely on the FTP filename convention: the lot
     prefix is the text before the first '_', and the measurement timestamp
@@ -183,7 +193,7 @@ def run_ingest_pool(
     a prefix) only costs parallelism and is safe. Under-grouping is NOT
     impossible: if files of the same MIR lot have different filename prefixes
     (or no '_'), they land in different groups and run concurrently, racing on
-    `_get_next_retest_num` / `_demote_superseded`. The fallback to the literal
+    `_retest_num_for` / `_recompute_flags`. The fallback to the literal
     filename only keeps a single oddly-named file from merging with unrelated
     lots; it does not detect same-lot files. Treat the prefix as a heuristic
     and keep the store single-writer per lot.
@@ -201,6 +211,9 @@ def run_ingest_pool(
             (remote_path already set), so callers can persist progress
             incrementally — an aborted run (Ctrl+C mid-batch) does not lose
             track of files that were already ingested.
+        sub_process: Override MIR.TEST_COD as the sub_process of every file.
+        allow_truncated: Pass --allow-truncated to the worker (keep the
+            complete records of a file that ends inside a record).
 
     Returns:
         (successes, failures) — lists of IngestResult.
@@ -235,6 +248,7 @@ def run_ingest_pool(
             for remote_path, local_path, product, _ttype in group_files:
                 result = _run_single(
                     local_path, product, data_dir, compression, timeout, log_path,
+                    allow_truncated, sub_process,
                 )
                 result.remote_path = remote_path
 

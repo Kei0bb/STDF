@@ -1,11 +1,15 @@
--- Fail テストランキング(ワースト順)
+-- Fail テストランキング(ワースト順)。サブプロセス(CP1/CP2…)ごとに別行。
+-- total は実行されて合否が付いた測定数(未実行・合否無効は数えない)。
+SET VARIABLE sub_process = NULL;
 
-SELECT test_num, test_name,
+SELECT test_category, sub_process, test_num, test_name,
        COUNT(*) AS total,
        SUM(CASE WHEN passed = 'F' THEN 1 ELSE 0 END) AS fail_cnt,
        ROUND(100.0 * SUM(CASE WHEN passed = 'F' THEN 1 ELSE 0 END) / COUNT(*), 2) AS fail_pct
 FROM test_data_final
 WHERE lot_id = getvariable('lot')
-GROUP BY test_num, test_name
+  AND opt_eq(sub_process, getvariable('sub_process'))
+  AND passed IS NOT NULL
+GROUP BY test_category, sub_process, test_num, test_name
 HAVING SUM(CASE WHEN passed = 'F' THEN 1 ELSE 0 END) > 0
 ORDER BY fail_pct DESC

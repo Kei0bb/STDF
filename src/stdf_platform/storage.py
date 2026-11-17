@@ -5,6 +5,7 @@ import os
 import re
 import tempfile
 import time
+from contextlib import contextmanager
 from pathlib import Path
 from datetime import datetime, timezone
 
@@ -12,7 +13,7 @@ import duckdb
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from .parser import STDFData
+from .parser import SDR_FIELDS, STDFData
 from .config import StorageConfig
 from .chipid import decode_chipid
 
@@ -38,7 +39,7 @@ def _unix_to_datetime(unix_ts: int) -> datetime:
 # `lots` is NOT written to Parquet — it used to be one row per lot, rewritten
 # in place on every file (`data/lots/.../lot_id={lot}/data.parquet`), which
 # meant only the LAST ingested file's MIR survived for a lot. That info now
-# lives in `runs` at (file x wafer identity) granularity; `views.py` derives
+# lives in `runs` at (file x wafer identity) granularity; `mounts.py` derives
 # a `lots` VIEW from it by aggregation. See docs/schema.md (runs / lots)
 # for the full column reference and the changed `lots` semantics.
 RUNS_SCHEMA = pa.schema([
@@ -68,28 +69,23 @@ RUNS_SCHEMA = pa.schema([
     ("loadboard_id", pa.string()),     # SDR.LOAD_ID
     ("socket_type", pa.string()),      # SDR.CONT_TYP
     ("socket_id", pa.string()),        # SDR.CONT_ID
-    ("test_rev", pa.string()),       # Rev04 等（ファイル名から）
-    ("source_file", pa.string()),    # 元ファイル名
-])
-
-WAFERS_SCHEMA = pa.schema([
-    ("wafer_id", pa.string()),
-    ("lot_id", pa.string()),
-    ("head_num", pa.int64()),
-    ("start_time", pa.timestamp("ms", tz="UTC")),
-    ("finish_time", pa.timestamp("ms", tz="UTC")),
+    # WRR (CP wafers; NULL for FT) — tester-reported counts, summed over heads
+    ("wafer_start_time", pa.timestamp("ms", tz="UTC")),
+    ("wafer_finish_time", pa.timestamp("ms", tz="UTC")),
     ("part_count", pa.int64()),
     ("good_count", pa.int64()),
     ("rtst_count", pa.int64()),
     ("abrt_count", pa.int64()),
-    # Retest tracking (test_rev / source_file moved to `runs` — see RUNS_SCHEMA)
-    ("retest_num", pa.int64()),     # リテスト番号（0=初回, 1,2...=リテスト）
+    ("test_rev", pa.string()),       # Rev04 等（ファイル名から）
+    ("source_file", pa.string()),    # 元ファイル名
 ])
 
 PARTS_SCHEMA = pa.schema([
-    ("part_id", pa.string()),
-    ("part_txt", pa.string()),   # PRR.PART_TXT (2D barcode) — unique FT package key
-    ("part_serial", pa.string()),  # PRR.PART_ID — FT の barcode 欠損時フォールバック
+    ("part_id", pa.string()),    # per-file synthetic id — never join on it
+    ("part_seq", pa.int64()),    # PIR order within the file
+    ("part_txt", pa.string()),   # PRR.PART_TXT
+    ("part_serial", pa.string()),  # PRR.PART_ID
+    ("chip_key", pa.string()),   # FT package identity from eFuse (C0, else C1); '' = none
     ("lot_id", pa.string()),
     ("wafer_id", pa.string()),
     ("head_num", pa.int64()),
@@ -98,10 +94,27 @@ PARTS_SCHEMA = pa.schema([
     ("y_coord", pa.int64()),
     ("hard_bin", pa.int64()),
     ("soft_bin", pa.int64()),
-    ("passed", pa.bool_()),
+    ("passed", pa.bool_()),      # NULL when PART_FLG says pass/fail is invalid
+    ("part_flg", pa.int64()),    # raw PRR.PART_FLG
     ("test_count", pa.int64()),
     ("test_time", pa.int64()),
     ("retest_num", pa.int64()),
+    ("retest_flag", pa.int64()),  # 0 = newest occurrence of this die (see _recompute_flags)
+    # 2-die package CHIP ID (EN-S0-CHIPID_R + CHIPID NRD0 C0/C1 suite GDRs)
+    ("c0_chipid_hex", pa.string()),
+    ("c0_origin_fab", pa.string()),
+    ("c0_origin_lot", pa.string()),
+    ("c0_origin_wafer", pa.int64()),
+    ("c0_origin_x", pa.int64()),
+    ("c0_origin_y", pa.int64()),
+    ("c1_chipid_hex", pa.string()),
+    ("c1_origin_fab", pa.string()),
+    ("c1_origin_lot", pa.string()),
+    ("c1_origin_wafer", pa.int64()),
+    ("c1_origin_x", pa.int64()),
+    ("c1_origin_y", pa.int64()),
+    ("chip_status", pa.string()),    # NULL (no CHIP ID) / complete / ambiguous / missing C0|C1
+    ("chip_warnings", pa.string()),  # '; '-joined, '' when clean
 ])
 
 # Unified test data schema (merged tests + test_results)
@@ -110,8 +123,10 @@ TEST_DATA_SCHEMA = pa.schema([
     ("lot_id", pa.string()),
     ("wafer_id", pa.string()),
     ("part_id", pa.string()),
-    ("part_txt", pa.string()),   # PRR.PART_TXT (2D barcode) — unique FT package key
-    ("part_serial", pa.string()),  # PRR.PART_ID — FT の barcode 欠損時フォールバック
+    ("part_seq", pa.int64()),    # = parts.part_seq (flag ordering within a file)
+    ("part_txt", pa.string()),   # PRR.PART_TXT
+    ("part_serial", pa.string()),  # PRR.PART_ID
+    ("chip_key", pa.string()),   # FT package identity from eFuse — see PARTS_SCHEMA
     ("x_coord", pa.int64()),
     ("y_coord", pa.int64()),
     # Test identification
@@ -124,33 +139,17 @@ TEST_DATA_SCHEMA = pa.schema([
     ("units", pa.string()),
     # Test result
     ("result", pa.float64()),
-    ("passed", pa.string()),      # "P" or "F"
+    ("passed", pa.string()),      # "P" / "F"; NULL = not executed or pass/fail invalid
+    ("test_flg", pa.int64()),     # raw TEST_FLG (0x02 result invalid, 0x10 not run, 0x20 aborted)
     ("retest_num", pa.int64()),
     # MPR per-pin fields (NULL for PTR/FTR)
     ("pin_num", pa.int64()),
     ("pin_name", pa.string()),
-    # Ingest-time dedup metadata (see views.py _DEDUP_UNIT for the flag key)
+    # Ingest-time dedup metadata (flag = rank of the die occurrence, see _recompute_flags)
     ("exec_seq", pa.int64()),     # 0-based occurrence order of the key within this run
     ("retest_flag", pa.int64()),  # recency rank across retest runs; 0 = newest
 ])
 
-# Decoded EN-SO-CHIPID_R ChipID schema (one row per die occurrence)
-CHIPID_SCHEMA = pa.schema([
-    ("lot_id", pa.string()),
-    ("part_id", pa.string()),          # synthesized FT part id (stream order)
-    ("part_txt", pa.string()),         # 2D barcode — unique package key
-    ("chip_occurrence_index", pa.int64()),  # 0,1,... per DUT (2-die chiplet -> 0/1)
-    ("efuse_raw", pa.string()),        # normalized 64-bit binary string (or original if invalid)
-    ("valid", pa.bool_()),
-    ("origin_fab_code", pa.int64()),
-    ("origin_fab", pa.string()),       # TSMC1 / TSMC2 / UNSUPPORTED
-    ("origin_lot", pa.string()),
-    ("origin_wafer", pa.int64()),
-    ("origin_x", pa.int64()),
-    ("origin_y", pa.int64()),
-    ("reserved_bits", pa.string()),
-    ("retest_num", pa.int64()),
-])
 
 
 def _get_test_category(test_type: str) -> str:
@@ -279,172 +278,230 @@ class ParquetStorage:
                 pass
             raise
 
-    def _get_next_retest_num(
-        self, product: str, test_category: str, sub_process: str, lot_id: str, wafer_id: str
-    ) -> int:
+    # ── retest numbering ────────────────────────────────────────────────
+    def _group_dir(self, table: str, product: str, test_category: str,
+                   sub_process: str, lot_id: str, wafer_id: str) -> Path:
+        """Directory of one lot/wafer group (holds its retest=N/ subdirs)."""
+        return (self._get_table_path(table, product, test_category, sub_process)
+                / f"lot_id={self._sanitize(lot_id)}"
+                / f"wafer_id={self._sanitize(wafer_id)}")
+
+    @staticmethod
+    def _retest_dirs(group: Path) -> dict[int, Path]:
+        out: dict[int, Path] = {}
+        if group.exists():
+            for child in group.iterdir():
+                if child.is_dir() and child.name.startswith("retest="):
+                    try:
+                        out[int(child.name.split("=", 1)[1])] = child
+                    except ValueError:
+                        pass
+        return out
+
+    def _retest_num_for(self, product: str, test_category: str, sub_process: str,
+                        lot_id: str, wafer_id: str, source_file: str) -> int:
+        """Retest number for this file's run in a lot/wafer group.
+
+        Re-ingesting the same source file reuses its own retest number (its
+        files are overwritten), so a retry after a crash or timeout replaces
+        the partial run instead of adding a duplicate. Otherwise max + 1 over
+        every table's retest dirs (an aborted write may have left a dir in
+        only some tables).
         """
-        Get the next retest number for a wafer (or, for FT, the empty wafer_id).
+        if source_file:
+            runs = self._group_dir("runs", product, test_category, sub_process,
+                                   lot_id, wafer_id)
+            for k, d in sorted(self._retest_dirs(runs).items()):
+                f = d / "data.parquet"
+                if f.exists():
+                    col = pq.ParquetFile(f).read(columns=["source_file"]).column(0).to_pylist()
+                    if source_file in col:
+                        return k
+        nums = [k for t in ("runs", "parts", "test_data")
+                for k in self._retest_dirs(self._group_dir(
+                    t, product, test_category, sub_process, lot_id, wafer_id))]
+        return max(nums, default=-1) + 1
 
-        Scans existing retest directories under the *parts* table and returns
-        max + 1. parts is written for both CP and FT, whereas wafers is empty
-        for FT — scanning parts is what makes FT re-ingests increment instead of
-        silently overwriting retest=0. Returns 0 if no existing data.
+    # ── retest flags ────────────────────────────────────────────────────
+    def _pending_path(self, group: tuple) -> Path:
+        import hashlib
+        h = hashlib.sha1("\x1f".join(group).encode()).hexdigest()[:16]
+        return self.data_dir / "_pending" / f"{h}.json"
+
+    def _recompute_flags(self, product: str, test_category: str, sub_process: str,
+                         lot_id: str, wafer_id: str) -> None:
+        """Rewrite retest_flag of parts and test_data for one lot/wafer group.
+
+        Every occurrence of a die (one part of one run) is ordered
+        newest-first by (run MIR start time, retest_num, part_seq) —
+        measurement time, not ingest order, and a die measured twice in one
+        file keeps only its later part. retest_flag = rank of the occurrence
+        among the die's occurrences (0 = newest), written to its parts row
+        AND all of its test_data rows: the final view holds only the winning
+        occurrence's measurements (tests it did not run are absent, never
+        filled in from an older run). The die identity is
+        mounts.die_key_expr().
+
+        The flags are a pure function of the files, so this is idempotent:
+        rerunning it after an interruption converges (see recover_pending).
+        Only files whose flags change are rewritten.
         """
-        # re is imported at module level
-        wafer_base = (
-            self._get_table_path("parts", product, test_category, sub_process)
-            / f"lot_id={self._sanitize(lot_id)}"
-            / f"wafer_id={self._sanitize(wafer_id)}"
-        )
+        from .mounts import die_key_expr
 
-        if not wafer_base.exists():
-            return 0
-        
-        max_retest = -1
-        for child in wafer_base.iterdir():
-            if child.is_dir() and child.name.startswith("retest="):
-                try:
-                    retest_num = int(child.name.split("=")[1])
-                    max_retest = max(max_retest, retest_num)
-                except (ValueError, IndexError):
-                    pass
+        runs = self._group_dir("runs", product, test_category, sub_process, lot_id, wafer_id)
+        run_files = [d / "data.parquet" for d in self._retest_dirs(runs).values()
+                     if (d / "data.parquet").exists()]
+        con = duckdb.connect()
+        try:
+            if run_files:
+                con.execute(
+                    "CREATE TEMP TABLE ord AS SELECT retest_num AS k, "
+                    "MAX(NULLIF(start_time, TIMESTAMPTZ '1970-01-01 00:00:00+00')) AS t "
+                    "FROM read_parquet(?, union_by_name=true) GROUP BY ALL",
+                    [[f.as_posix() for f in run_files]])
+            else:
+                con.execute("CREATE TEMP TABLE ord (k BIGINT, t TIMESTAMPTZ)")
 
-        return max_retest + 1
-
-    def _demote_superseded(
-        self, wafer_dir: Path, new_keys: set[tuple], up_to_retest: int
-    ) -> None:
-        """
-        Bump retest_flag on earlier test_data retest files for keys re-measured
-        by the run just written at wafer_dir/retest={up_to_retest}.
-
-        `new_keys` is the DISTINCT set of flag keys
-        (wafer_id, x_coord, y_coord, ft_txt, test_num, pin_num) from that run
-        (see views._DEDUP_UNIT). Every sibling retest=k directory with k <
-        up_to_retest gets rows matching those keys incremented by 1 — the
-        newest run containing a key always reads as retest_flag=0, and a die
-        never re-measured keeps flag 0 forever.
-
-        Files without a retest_flag column (pre-migration schema) are left
-        untouched — flags become authoritative only after the migration
-        command (a later phase).
-
-        Assumes a single writer per (lot, wafer): concurrent ingest of two
-        retest files for the same wafer is not supported (pre-existing
-        constraint of _get_next_retest_num too).
-        """
-        if not new_keys:
-            return
-
-        new_keys_table = pa.table({
-            "wafer_id": [k[0] for k in new_keys],
-            "x_coord": [k[1] for k in new_keys],
-            "y_coord": [k[2] for k in new_keys],
-            "ft_txt": [k[3] for k in new_keys],
-            "test_num": [k[4] for k in new_keys],
-            "pin_num": [k[5] for k in new_keys],
-        })
-
-        for retest_num in range(up_to_retest):
-            old_path = wafer_dir / f"retest={retest_num}" / "data.parquet"
-            if not old_path.exists():
-                continue
-
-            existing_schema = pq.ParquetFile(old_path).schema_arrow
-            if "retest_flag" not in existing_schema.names:
-                continue  # store not yet migrated; skip per docstring
-
-            # The old file may predate part_serial; build the same identity
-            # expression the new run used (part_txt → part_serial → part_id),
-            # referencing only the columns that file actually has.
-            has_serial = "part_serial" in existing_schema.names
-            ft_parts = ["NULLIF(old.part_txt, '')"]
-            if has_serial:
-                ft_parts.append("NULLIF(old.part_serial, '')")
-            if "part_id" in existing_schema.names:
-                ft_parts.append("old.part_id")
-            old_ft = f"COALESCE({', '.join(ft_parts)})"
-
-            con = duckdb.connect()
-            try:
-                con.register("new_keys", new_keys_table)
-                if not has_serial:
-                    # A pre-part_serial file cannot express the identity the new
-                    # run uses for a barcode-less FT package: its own part_serial
-                    # was never stored and its part_id is a per-file counter. The
-                    # join below can then never match, and the superseded rows
-                    # keep retest_flag = 0 — test_data_final would return both the
-                    # old and the new measurement for one package. Nothing here
-                    # can recover it, so say so loudly instead of silently
-                    # producing duplicates.
-                    stale_ft = con.execute(f"""
-                        SELECT COUNT(*) FROM read_parquet(
-                            '{old_path.as_posix()}'
-                        ) WHERE x_coord = -32768 AND y_coord = -32768
-                          AND COALESCE(part_txt, '') = ''
-                    """).fetchall()[0][0]
-                    if stale_ft:
-                        logger.warning(
-                            "%s: %d barcode-less FT rows predate part_serial; "
-                            "their retest_flag cannot be reconciled with the new "
-                            "run. This lot must be wiped and re-ingested "
-                            "(test_data_final will otherwise return both runs).",
-                            old_path, stale_ft,
-                        )
-                # Skip the rewrite entirely when no key matches this file:
-                # without this, every new retest rewrote every older retest
-                # file (O(K^2) I/O) even when nothing was re-measured there.
-                matched = con.execute(f"""
-                    SELECT COUNT(*)
-                    FROM (SELECT * FROM read_parquet('{old_path.as_posix()}')) old
-                    JOIN (SELECT DISTINCT * FROM new_keys) nk
-                      ON old.wafer_id = nk.wafer_id
-                     AND old.x_coord = nk.x_coord
-                     AND old.y_coord = nk.y_coord
-                     AND (CASE WHEN old.x_coord = -32768 AND old.y_coord = -32768
-                               THEN {old_ft} ELSE '' END) = nk.ft_txt
-                     AND old.test_num = nk.test_num
-                     AND old.pin_num IS NOT DISTINCT FROM nk.pin_num
-                """).fetchall()[0][0]
-                if matched == 0:
+            # Every occurrence of a die (one part of one run) is ranked once,
+            # over the occurrences found in parts AND test_data, and both
+            # tables take their flag from that ranking: test_data_final is
+            # exactly the winning occurrence's rows, never a mix of runs.
+            src = ("read_parquet(?, filename=true, file_row_number=true, "
+                   "hive_partitioning=false, union_by_name=true)")
+            tables = []
+            for table, schema in (("parts", PARTS_SCHEMA), ("test_data", TEST_DATA_SCHEMA)):
+                group = self._group_dir(table, product, test_category, sub_process,
+                                        lot_id, wafer_id)
+                files = [d / "data.parquet" for _, d in sorted(self._retest_dirs(group).items())
+                         if (d / "data.parquet").exists()]
+                if not files:
                     continue
-
-                # con.sql(...).to_arrow_table(): DuckDB 2.0 removed the
-                # connection-level .arrow() (and 1.4 lacks connection
-                # .to_arrow_table()); the relation API works on both.
-                updated = con.sql(f"""
-                    WITH nk AS (SELECT DISTINCT * FROM new_keys)
-                    SELECT old.* EXCLUDE (file_row_number) REPLACE (
-                        retest_flag + CASE WHEN nk.test_num IS NOT NULL
-                                           THEN 1 ELSE 0 END AS retest_flag
+                # Older files may lack part_seq / chip_key: typed NULL arm.
+                con.execute(f"""
+                    CREATE OR REPLACE TEMP TABLE src_{table} AS
+                    WITH s AS (
+                        SELECT * FROM {src}
+                        UNION ALL BY NAME
+                        SELECT CAST(NULL AS BIGINT) AS part_seq,
+                               CAST(NULL AS VARCHAR) AS chip_key,
+                               CAST(NULL AS BIGINT) AS retest_flag WHERE FALSE
                     )
-                    FROM (
-                        SELECT * FROM read_parquet(
-                            '{old_path.as_posix()}',
-                            file_row_number=true, hive_partitioning=false
-                        )
-                    ) old
-                    LEFT JOIN nk
-                      ON old.wafer_id = nk.wafer_id
-                     AND old.x_coord = nk.x_coord
-                     AND old.y_coord = nk.y_coord
-                     AND (CASE WHEN old.x_coord = -32768 AND old.y_coord = -32768
-                               THEN {old_ft} ELSE '' END) = nk.ft_txt
-                     AND old.test_num = nk.test_num
-                     AND old.pin_num IS NOT DISTINCT FROM nk.pin_num
-                    ORDER BY old.file_row_number
-                """).to_arrow_table()
+                    SELECT filename, file_row_number, retest_flag AS old_flag,
+                           {die_key_expr()} AS die, retest_num AS k,
+                           COALESCE(part_seq, 0) AS seq
+                    FROM s
+                """, [[f.as_posix() for f in files]])
+                tables.append((table, schema))
+            if not tables:
+                return
+            con.execute(f"""
+                CREATE TEMP TABLE rk AS
+                SELECT die, k, seq,
+                       DENSE_RANK() OVER (PARTITION BY die
+                           ORDER BY ord.t DESC NULLS LAST, k DESC, seq DESC) - 1 AS flag
+                FROM ({" UNION ".join(f"SELECT die, k, seq FROM src_{t}" for t, _ in tables)}) o
+                LEFT JOIN ord USING (k)
+            """)
+
+            for table, schema in tables:
+                con.execute(f"""
+                    CREATE OR REPLACE TEMP TABLE fl AS
+                    SELECT s.filename, s.file_row_number, s.old_flag, rk.flag
+                    FROM src_{table} s JOIN rk USING (die, k, seq)
+                """)
+                changed = [r[0] for r in con.execute(
+                    "SELECT DISTINCT filename FROM fl "
+                    "WHERE flag IS DISTINCT FROM old_flag ORDER BY 1").fetchall()]
+                for fname in changed:
+                    # con.sql(...).to_arrow_table(): DuckDB 2.0 removed the
+                    # connection-level .arrow(); the relation API works on 1.4+.
+                    con.execute("SET VARIABLE f = ?", [fname])
+                    updated = con.sql(f"""
+                        SELECT src.* EXCLUDE (file_row_number, retest_flag),
+                               fl.flag AS retest_flag
+                        FROM read_parquet(getvariable('f'), file_row_number=true,
+                                          hive_partitioning=false) src
+                        JOIN (SELECT file_row_number, flag FROM fl
+                              WHERE filename = getvariable('f')) fl
+                          USING (file_row_number)
+                        ORDER BY file_row_number
+                    """).to_arrow_table()
+                    for col in schema.names:
+                        if col not in updated.column_names:
+                            updated = updated.append_column(
+                                col, pa.nulls(updated.num_rows, schema.field(col).type))
+                    self._write_parquet(updated.select(schema.names).cast(schema), Path(fname))
+        finally:
+            con.close()
+
+    def pending_count(self) -> int:
+        """Lot groups whose flags an interrupted ingest left stale."""
+        pend = self.data_dir / "_pending"
+        return sum(1 for _ in pend.glob("*.json")) if pend.exists() else 0
+
+    @contextmanager
+    def ingest_lock(self, on_wait=None):
+        """Exclusive ingest lock on data_dir, across processes.
+
+        Flag recomputation, retest numbering and pending recovery
+        read-then-write a lot's files, so only one ingest batch may run on a
+        store at a time. An OS lock (released when the process dies, so a
+        killed run never leaves it stuck); a second batch waits.
+        `on_wait()` is called once if the lock is busy.
+        """
+        self.data_dir.mkdir(parents=True, exist_ok=True)
+        fh = open(self.data_dir / ".ingest.lock", "a+b")
+        try:
+            waited = False
+            while True:
+                try:
+                    if os.name == "nt":
+                        import msvcrt
+                        fh.seek(0)
+                        msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
+                    else:
+                        import fcntl
+                        fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except OSError:
+                    if not waited and on_wait is not None:
+                        on_wait()
+                    waited = True
+                    time.sleep(1.0)
+            try:
+                yield
             finally:
-                con.close()
+                if os.name == "nt":
+                    import msvcrt
+                    fh.seek(0)
+                    msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
+                else:
+                    import fcntl
+                    fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+        finally:
+            fh.close()
 
-            # A file lacking part_serial (pre-migration) must still be written
-            # back in the current schema; append NULL and reorder.
-            if "part_serial" not in updated.column_names:
-                updated = updated.append_column(
-                    "part_serial", pa.nulls(updated.num_rows, pa.string()))
-            updated = updated.select(TEST_DATA_SCHEMA.names).cast(TEST_DATA_SCHEMA)
-            self._write_parquet(updated, old_path)
+    def recover_pending(self) -> int:
+        """Finish flag recomputation left over by an interrupted ingest.
 
+        save_stdf_data records each lot/wafer group in data_dir/_pending/
+        before writing and removes it after the flags are recomputed, so a
+        group still listed there may have stale flags. Returns the number of
+        groups repaired; cheap when nothing is pending.
+        """
+        import json
+        pend = self.data_dir / "_pending"
+        if not pend.exists():
+            return 0
+        n = 0
+        for marker in sorted(pend.glob("*.json")):
+            group = json.loads(marker.read_text(encoding="utf-8"))
+            self._recompute_flags(*group)
+            marker.unlink(missing_ok=True)
+            n += 1
+        return n
+
+    # ── write ───────────────────────────────────────────────────────────
     def save_stdf_data(
         self,
         data: STDFData,
@@ -454,334 +511,200 @@ class ParquetStorage:
         source_file: str = "",
         compression: str = "zstd",
     ) -> dict[str, int]:
-        """
-        Save STDF data to Parquet files.
+        """Save one parsed STDF file to Parquet: runs, parts, test_data.
 
-        Returns:
-            {table_name: row_count}
+        Per lot/wafer group (CP: each wafer; FT: wafer_id=''): pick the retest
+        number, write runs FIRST (it records source_file, which is what lets a
+        retry reuse the same retest number), then parts and test_data, then
+        recompute the group's retest flags. The group is listed in
+        data_dir/_pending/ for the whole write so recover_pending() can finish
+        an interrupted one.
+
+        Returns {table_name: row_count}.
         """
-        counts = {}
-        # Extract test_rev from filename
+        from .atomic import atomic_write_json
+
+        sub_process = sub_process or ""
         test_rev = extract_test_rev_from_filename(source_file)
 
-        # Pre-calculate retest_num for every identity (wafer_id) BEFORE writing
-        # any table. _get_next_retest_num scans the parts directory; calling it
-        # after parts are written would return n+1 instead of n.
-        #
-        # FT files have no WIR (data.wafers is empty) and all parts share an
-        # empty wafer_id, so we derive the identity set from BOTH wafers and
-        # parts. That empty-wafer_id entry is what gives FT a real retest number
-        # on re-ingest instead of overwriting retest=0.
-        identity_wafer_ids: set[str] = set()
-        for wafer in data.wafers:
-            identity_wafer_ids.add(wafer.get("wafer_id", ""))
+        # FT has no WIR: parts carry wafer_id '' and that is its group. A file
+        # with a MIR but no WIR/PRR still gets a runs row under ''.
+        wafer_ids: list[str] = []
+        for w in data.wafers:
+            if w.get("wafer_id", "") not in wafer_ids:
+                wafer_ids.append(w.get("wafer_id", ""))
         for part in data.parts:
-            identity_wafer_ids.add(part.get("wafer_id", ""))
+            if part.get("wafer_id", "") not in wafer_ids:
+                wafer_ids.append(part.get("wafer_id", ""))
+        if not wafer_ids:
+            wafer_ids.append("")
 
-        # A file carrying a MIR but neither WIR nor PRR (an aborted run) would
-        # otherwise produce no identity at all and lose its MIR entirely — the
-        # old unconditional `lots` write always kept it. Fall back to the
-        # FT-shaped empty identity so `runs` still records the file.
-        if not identity_wafer_ids:
-            identity_wafer_ids.add("")
+        parts_by_w: dict[str, list[dict]] = {}
+        for part in data.parts:
+            parts_by_w.setdefault(part.get("wafer_id", ""), []).append(part)
+        results_by_w: dict[str, list[dict]] = {}
+        for r in data.test_results:
+            results_by_w.setdefault(r.get("wafer_id", ""), []).append(r)
+        chip_cols = _chip_columns(data.chip_ids)
 
-        wafer_retest_map: dict[str, int] = {
-            wid: self._get_next_retest_num(
-                product, test_category, sub_process, data.lot_id, wid
-            )
-            for wid in identity_wafer_ids
-        }
+        counts = {"runs": 0, "parts": 0, "test_data": 0}
+        for wafer_id in wafer_ids:
+            key = (product, test_category, sub_process, data.lot_id, wafer_id)
+            retest_num = self._retest_num_for(*key, source_file)
+            marker = self._pending_path(key)
+            atomic_write_json(marker, list(key))
 
-        # Save runs: one row per (file x wafer identity) — CP gets one row
-        # per wafer, FT gets one row for wafer_id='' (= FT lot unit). This is
-        # the per-run MIR/MRR record that `lots` is now derived from (see
-        # views.py); it reuses wafer_retest_map so runs/parts/test_data agree
-        # on (lot_id, wafer_id, retest_num).
-        for wafer_id in identity_wafer_ids:
-            retest_num = wafer_retest_map[wafer_id]
-            run_path = (
-                self._get_table_path("runs", product, test_category, sub_process)
-                / f"lot_id={self._sanitize(data.lot_id)}"
-                / f"wafer_id={self._sanitize(wafer_id)}"
-                / f"retest={retest_num}"
-            )
-            run_path.mkdir(parents=True, exist_ok=True)
+            def path(table: str) -> Path:
+                return (self._group_dir(table, *key) / f"retest={retest_num}"
+                        / "data.parquet")
 
-            run_table = pa.table({
-                "lot_id": [data.lot_id],
-                "wafer_id": [wafer_id],
-                "product": [product],
-                "test_category": [test_category],
-                "sub_process": [sub_process or ""],
-                "retest_num": [retest_num],
-                "part_type": [data.part_type],
-                "job_name": [data.job_name],
-                "job_rev": [data.job_rev],
-                "start_time": [_unix_to_datetime(data.start_time)],
-                "finish_time": [_unix_to_datetime(data.finish_time)],
-                "tester_type": [data.tester_type],
-                "operator": [data.operator],
-                "node_name": [data.node_name],
-                "handler_type": [data.handler_type],
-                "handler_id": [data.handler_id],
-                "probe_card_type": [data.probe_card_type],
-                "probe_card_id": [data.probe_card_id],
-                "loadboard_type": [data.loadboard_type],
-                "loadboard_id": [data.loadboard_id],
-                "socket_type": [data.socket_type],
-                "socket_id": [data.socket_id],
-                "test_rev": [test_rev],
-                "source_file": [source_file],
-            }, schema=RUNS_SCHEMA)
-            self._write_parquet(run_table, run_path / "data.parquet", compression)
+            wrr = [w for w in data.wafers if w.get("wafer_id", "") == wafer_id]
+            self._write_parquet(self._runs_table(
+                data, product, test_category, sub_process, wafer_id, retest_num,
+                test_rev, source_file, wrr), path("runs"), compression)
+            counts["runs"] += 1
 
-        counts["runs"] = len(identity_wafer_ids)
+            parts = parts_by_w.get(wafer_id, [])
+            if parts:
+                self._write_parquet(
+                    _parts_table(parts, retest_num, chip_cols), path("parts"), compression)
+                counts["parts"] += len(parts)
 
-        # Save wafers with retest tracking
-        if data.wafers:
-            wafer_groups: dict[str, list] = {}
-            for wafer in data.wafers:
-                wafer_id = wafer.get("wafer_id", "")
-                if wafer_id not in wafer_groups:
-                    wafer_groups[wafer_id] = []
-                wafer_groups[wafer_id].append(wafer)
+            results = results_by_w.get(wafer_id, [])
+            if results:
+                self._write_parquet(
+                    _test_data_table(data, results, parts, retest_num),
+                    path("test_data"), compression)
+                counts["test_data"] += len(results)
 
-            for wafer_id, wafers in wafer_groups.items():
-                retest_num = wafer_retest_map[wafer_id]
-                wafer_path = (
-                    self._get_table_path("wafers", product, test_category, sub_process)
-                    / f"lot_id={self._sanitize(data.lot_id)}"
-                    / f"wafer_id={self._sanitize(wafer_id)}"
-                    / f"retest={retest_num}"
-                )
-                wafer_path.mkdir(parents=True, exist_ok=True)
+            self._recompute_flags(*key)
+            marker.unlink(missing_ok=True)
 
-                wafer_table = pa.table({
-                    "wafer_id": [w.get("wafer_id", "") for w in wafers],
-                    "lot_id": [data.lot_id for _ in wafers],
-                    "head_num": [w.get("head_num", 0) for w in wafers],
-                    "start_time": [_unix_to_datetime(w.get("start_time", 0)) for w in wafers],
-                    "finish_time": [_unix_to_datetime(w.get("finish_time", 0)) for w in wafers],
-                    "part_count": [w.get("part_count", 0) for w in wafers],
-                    "good_count": [w.get("good_count", 0) for w in wafers],
-                    "rtst_count": [w.get("rtst_count", 0) for w in wafers],
-                    "abrt_count": [w.get("abrt_count", 0) for w in wafers],
-                    "retest_num": [retest_num for _ in wafers],
-                }, schema=WAFERS_SCHEMA)
-                self._write_parquet(wafer_table, wafer_path / "data.parquet", compression)
-
-            counts["wafers"] = len(data.wafers)
-
-        # Save parts (partitioned by lot_id, wafer_id, retest_num)
-        if data.parts:
-            part_groups: dict[tuple, list] = {}
-            for part in data.parts:
-                key = (part.get("lot_id", ""), part.get("wafer_id", ""))
-                if key not in part_groups:
-                    part_groups[key] = []
-                part_groups[key].append(part)
-
-            for (lot_id, wafer_id), parts in part_groups.items():
-                retest_num = wafer_retest_map.get(wafer_id, 0)
-
-                part_path = (
-                    self._get_table_path("parts", product, test_category, sub_process)
-                    / f"lot_id={self._sanitize(lot_id)}"
-                    / f"wafer_id={self._sanitize(wafer_id)}"
-                    / f"retest={retest_num}"
-                )
-                part_path.mkdir(parents=True, exist_ok=True)
-
-                part_table = pa.table({
-                    "part_id": [p.get("part_id", "") for p in parts],
-                    "part_txt": [p.get("part_txt", "") for p in parts],
-                    "part_serial": [p.get("part_serial", "") for p in parts],
-                    "lot_id": [p.get("lot_id", "") for p in parts],
-                    "wafer_id": [p.get("wafer_id", "") for p in parts],
-                    "head_num": [p.get("head_num", 0) for p in parts],
-                    "site_num": [p.get("site_num", 0) for p in parts],
-                    "x_coord": [p.get("x_coord", -32768) for p in parts],
-                    "y_coord": [p.get("y_coord", -32768) for p in parts],
-                    "hard_bin": [p.get("hard_bin", 0) for p in parts],
-                    "soft_bin": [p.get("soft_bin", 0) for p in parts],
-                    "passed": [p.get("passed", False) for p in parts],
-                    "test_count": [p.get("test_count", 0) for p in parts],
-                    "test_time": [p.get("test_time", 0) for p in parts],
-                    "retest_num": [retest_num for _ in parts],
-                }, schema=PARTS_SCHEMA)
-                self._write_parquet(part_table, part_path / "data.parquet", compression)
-
-            counts["parts"] = len(data.parts)
-
-        # Save unified test data (merged tests + test_results)
-        if data.test_results:
-            part_coords = {}
-            part_txt_map = {}
-            part_serial_map = {}
-            for part in data.parts:
-                part_id = part.get("part_id", "")
-                part_coords[part_id] = (
-                    part.get("x_coord", -32768),
-                    part.get("y_coord", -32768),
-                )
-                part_txt_map[part_id] = part.get("part_txt", "")
-                part_serial_map[part_id] = part.get("part_serial", "")
-
-            result_groups: dict[tuple, list] = {}
-            for result in data.test_results:
-                key = (result.get("lot_id", ""), result.get("wafer_id", ""))
-                if key not in result_groups:
-                    result_groups[key] = []
-                result_groups[key].append(result)
-
-            for (lot_id, wafer_id), results in result_groups.items():
-                retest_num = wafer_retest_map.get(wafer_id, 0)
-                result_path = (
-                    self._get_table_path("test_data", product, test_category, sub_process)
-                    / f"lot_id={self._sanitize(lot_id)}"
-                    / f"wafer_id={self._sanitize(wafer_id)}"
-                    / f"retest={retest_num}"
-                )
-                result_path.mkdir(parents=True, exist_ok=True)
-
-                enriched = []
-                # exec_seq = 0-based occurrence order of the flag key within
-                # this run (file record order). The counter dict mirrors the
-                # flag key in views._DEDUP_UNIT (plus test_num/pin_num) so loop
-                # measurements (e.g. an OTP dump writing 512 PTRs under one
-                # test_num) get distinct 0,1,2... instead of colliding.
-                seq_counters: dict[tuple, int] = {}
-                for r in results:
-                    test_num = r.get("test_num", 0)
-                    test_info = data.tests.get(test_num, {})
-                    part_id = r.get("part_id", "")
-                    x_coord, y_coord = part_coords.get(part_id, (-32768, -32768))
-                    part_txt = part_txt_map.get(part_id, "")
-                    part_serial = part_serial_map.get(part_id, "")
-                    # Same identity as mounts.ft_identity(): barcode → PRR PART_ID
-                    # → synthetic part_id. Without the fallback an empty barcode
-                    # makes every FT package share one flag key.
-                    ft_txt = ((part_txt or part_serial or part_id)
-                              if x_coord == -32768 and y_coord == -32768 else "")
-                    pin_num = r.get("pin_num")
-                    flag_key = (wafer_id, x_coord, y_coord, ft_txt, test_num, pin_num)
-                    exec_seq = seq_counters.get(flag_key, 0)
-                    seq_counters[flag_key] = exec_seq + 1
-                    enriched.append({
-                        "lot_id": r.get("lot_id", ""),
-                        "wafer_id": r.get("wafer_id", ""),
-                        "part_id": part_id,
-                        "part_txt": part_txt,
-                        "part_serial": part_serial,
-                        "x_coord": x_coord,
-                        "y_coord": y_coord,
-                        "test_num": test_num,
-                        "test_name": test_info.get("test_name", ""),
-                        "rec_type": test_info.get("rec_type", "PTR"),
-                        "lo_limit": test_info.get("lo_limit"),
-                        "hi_limit": test_info.get("hi_limit"),
-                        "units": test_info.get("units", ""),
-                        "result": r.get("result"),
-                        "passed": "P" if r.get("passed", False) else "F",
-                        "retest_num": retest_num,
-                        "pin_num": pin_num,
-                        "pin_name": r.get("pin_name"),
-                        "exec_seq": exec_seq,
-                        "retest_flag": 0,
-                    })
-
-                new_keys = set(seq_counters.keys())
-
-                result_table = pa.table({
-                    "lot_id": [r["lot_id"] for r in enriched],
-                    "wafer_id": [r["wafer_id"] for r in enriched],
-                    "part_id": [r["part_id"] for r in enriched],
-                    "part_txt": [r["part_txt"] for r in enriched],
-                    "part_serial": [r["part_serial"] for r in enriched],
-                    "x_coord": [r["x_coord"] for r in enriched],
-                    "y_coord": [r["y_coord"] for r in enriched],
-                    "test_num": [r["test_num"] for r in enriched],
-                    "test_name": [r["test_name"] for r in enriched],
-                    "rec_type": [r["rec_type"] for r in enriched],
-                    "lo_limit": [r["lo_limit"] for r in enriched],
-                    "hi_limit": [r["hi_limit"] for r in enriched],
-                    "units": [r["units"] for r in enriched],
-                    "result": [r["result"] for r in enriched],
-                    "passed": [r["passed"] for r in enriched],
-                    "retest_num": [r["retest_num"] for r in enriched],
-                    "pin_num": [r["pin_num"] for r in enriched],
-                    "pin_name": [r["pin_name"] for r in enriched],
-                    "exec_seq": [r["exec_seq"] for r in enriched],
-                    "retest_flag": [r["retest_flag"] for r in enriched],
-                }, schema=TEST_DATA_SCHEMA)
-                self._write_parquet(result_table, result_path / "data.parquet", compression)
-
-                if retest_num > 0 and new_keys:
-                    self._demote_superseded(
-                        self._get_table_path("test_data", product, test_category, sub_process)
-                        / f"lot_id={self._sanitize(lot_id)}"
-                        / f"wafer_id={self._sanitize(wafer_id)}",
-                        new_keys,
-                        retest_num,
-                    )
-
-            counts["test_data"] = len(data.test_results)
-
-        # Save decoded ChipID occurrences (EN-SO-CHIPID_R), partitioned like
-        # test_data (lot_id / wafer_id / retest). The decoded origin wafer/x/y
-        # are columns, not partitions.
-        #
-        # FT-only: at CP the decoded origin (wafer/x/y) just duplicates the
-        # native probe coordinates already in `parts`, so the ChipID table adds
-        # no information there. The value of ChipID is FT chiplet traceability
-        # (recovering each die's CP origin after packaging). We therefore skip
-        # writing the table for non-FT categories even if GDRs are present.
-        if data.chip_ids and test_category == "FT":
-            chip_groups: dict[tuple, list] = {}
-            for chip in data.chip_ids:
-                key = (chip.get("lot_id", ""), chip.get("wafer_id", ""))
-                chip_groups.setdefault(key, []).append(chip)
-
-            for (lot_id, wafer_id), chips in chip_groups.items():
-                retest_num = wafer_retest_map.get(wafer_id, 0)
-                chip_path = (
-                    self._get_table_path("chipid", product, test_category, sub_process)
-                    / f"lot_id={self._sanitize(lot_id)}"
-                    / f"wafer_id={self._sanitize(wafer_id)}"
-                    / f"retest={retest_num}"
-                )
-                chip_path.mkdir(parents=True, exist_ok=True)
-
-                rows = []
-                for chip in chips:
-                    decoded = decode_chipid(chip.get("efuse_raw", ""))
-                    rows.append({
-                        "lot_id": chip.get("lot_id", ""),
-                        "part_id": chip.get("part_id", ""),
-                        "part_txt": chip.get("part_txt", ""),
-                        "chip_occurrence_index": chip.get("chip_occurrence_index", 0),
-                        "retest_num": retest_num,
-                        **decoded,
-                    })
-
-                chip_table = pa.table({
-                    "lot_id": [r["lot_id"] for r in rows],
-                    "part_id": [r["part_id"] for r in rows],
-                    "part_txt": [r["part_txt"] for r in rows],
-                    "chip_occurrence_index": [r["chip_occurrence_index"] for r in rows],
-                    "efuse_raw": [r["efuse_raw"] for r in rows],
-                    "valid": [r["valid"] for r in rows],
-                    "origin_fab_code": [r["origin_fab_code"] for r in rows],
-                    "origin_fab": [r["origin_fab"] for r in rows],
-                    "origin_lot": [r["origin_lot"] for r in rows],
-                    "origin_wafer": [r["origin_wafer"] for r in rows],
-                    "origin_x": [r["origin_x"] for r in rows],
-                    "origin_y": [r["origin_y"] for r in rows],
-                    "reserved_bits": [r["reserved_bits"] for r in rows],
-                    "retest_num": [r["retest_num"] for r in rows],
-                }, schema=CHIPID_SCHEMA)
-                self._write_parquet(chip_table, chip_path / "data.parquet", compression)
-
-            counts["chipid"] = len(data.chip_ids)
-
+        orphans = sum(1 for c in data.chip_ids if not c.get("part_id"))
+        if orphans:
+            logger.warning("%s: %d CHIP ID values outside any part were dropped",
+                           source_file, orphans)
         return counts
+
+    @staticmethod
+    def _runs_table(data: STDFData, product: str, test_category: str, sub_process: str,
+                    wafer_id: str, retest_num: int, test_rev: str, source_file: str,
+                    wrr: list[dict]) -> pa.Table:
+        def total(name: str):
+            return sum(w.get(name, 0) or 0 for w in wrr) if wrr else None
+
+        starts = [w.get("start_time", 0) for w in wrr if w.get("start_time")]
+        finishes = [w.get("finish_time", 0) for w in wrr if w.get("finish_time")]
+        row = {
+            "lot_id": data.lot_id, "wafer_id": wafer_id, "product": product,
+            "test_category": test_category, "sub_process": sub_process,
+            "retest_num": retest_num, "part_type": data.part_type,
+            "job_name": data.job_name, "job_rev": data.job_rev,
+            "start_time": _unix_to_datetime(data.start_time),
+            "finish_time": _unix_to_datetime(data.finish_time),
+            "tester_type": data.tester_type, "operator": data.operator,
+            "node_name": data.node_name,
+            **{name: getattr(data, name) for name in SDR_FIELDS},
+            "wafer_start_time": _unix_to_datetime(min(starts)) if starts else None,
+            "wafer_finish_time": _unix_to_datetime(max(finishes)) if finishes else None,
+            "part_count": total("part_count"), "good_count": total("good_count"),
+            "rtst_count": total("rtst_count"), "abrt_count": total("abrt_count"),
+            "test_rev": test_rev, "source_file": source_file,
+        }
+        return pa.Table.from_pylist([row], schema=RUNS_SCHEMA)
+
+
+_CHIP_FIELDS = ("chipid_hex", "origin_fab", "origin_lot", "origin_wafer",
+                "origin_x", "origin_y")
+
+
+def _chip_columns(chip_ids: list[dict]) -> dict[str, dict]:
+    """part_id -> c0_*/c1_* CHIP ID columns plus chip_status / chip_warnings.
+
+    Duplicates keep the first candidate's values and read 'ambiguous'; the
+    per-candidate detail is in scripts/diag_chipid.py, not in the store.
+    """
+    by_part: dict[str, list[dict]] = {}
+    for c in chip_ids:
+        if c.get("part_id"):
+            by_part.setdefault(c["part_id"], []).append(c)
+    out: dict[str, dict] = {}
+    for part_id, chips in by_part.items():
+        cols: dict = {}
+        warnings: list[str] = []
+        n = {"C0": 0, "C1": 0}
+        for c in chips:
+            dec = decode_chipid(c.get("efuse_raw", ""))
+            warnings += [f"{c['die_id']}: {w}" for w in c.get("warnings", []) + dec["warnings"]]
+            die = c["die_id"]
+            if die in n:
+                n[die] += 1
+                if n[die] == 1:
+                    for f in _CHIP_FIELDS:
+                        cols[f"{die.lower()}_{f}"] = dec[f]
+        if n["C0"] > 1 or n["C1"] > 1:
+            status = "ambiguous"
+        elif n["C0"] and n["C1"]:
+            status = "complete"
+            if cols.get("c0_chipid_hex") == cols.get("c1_chipid_hex"):
+                warnings.append("C0 and C1 CHIP IDs are identical")
+        else:
+            status = "missing " + ", ".join(d for d in ("C0", "C1") if not n[d])
+        cols["chip_status"] = status
+        cols["chip_warnings"] = "; ".join(dict.fromkeys(warnings))
+        out[part_id] = cols
+    return out
+
+
+def _parts_table(parts: list[dict], retest_num: int, chip_cols: dict[str, dict]) -> pa.Table:
+    rows = []
+    for p in parts:
+        row = {name: p.get(name) for name in PARTS_SCHEMA.names}
+        row.update(chip_cols.get(p.get("part_id", ""), {}))
+        row["retest_num"] = retest_num
+        row["retest_flag"] = 0  # set by _recompute_flags
+        rows.append(row)
+    return pa.Table.from_pylist(rows, schema=PARTS_SCHEMA)
+
+
+def _test_data_table(data: STDFData, results: list[dict], parts: list[dict],
+                     retest_num: int) -> pa.Table:
+    by_id = {p.get("part_id", ""): p for p in parts}
+    cols: dict[str, list] = {name: [] for name in TEST_DATA_SCHEMA.names}
+    # exec_seq = 0-based occurrence order of (part, test, pin) within this run,
+    # so loop measurements (e.g. an OTP dump logging 512 PTRs under one
+    # test_num) stay distinguishable.
+    seq: dict[tuple, int] = {}
+    empty: dict = {}
+    for r in results:
+        part_id = r.get("part_id", "")
+        p = by_id.get(part_id, empty)
+        test_num = r.get("test_num", 0)
+        info = data.tests.get(test_num, empty)
+        pin_num = r.get("pin_num")
+        k = (part_id, test_num, pin_num)
+        n = seq.get(k, 0)
+        seq[k] = n + 1
+        row = (
+            r.get("lot_id", ""), r.get("wafer_id", ""), part_id, p.get("part_seq"),
+            p.get("part_txt", ""), p.get("part_serial", ""), p.get("chip_key", ""),
+            p.get("x_coord", -32768), p.get("y_coord", -32768), test_num,
+            info.get("test_name", ""), info.get("rec_type", "PTR"),
+            info.get("lo_limit"), info.get("hi_limit"), info.get("units", ""),
+            r.get("result"), _PF.get(r.get("passed")), r.get("test_flg"),
+            retest_num, pin_num, r.get("pin_name"), n, 0,
+        )
+        for name, v in zip(_TD_ORDER, row):
+            cols[name].append(v)
+    return pa.table(cols, schema=TEST_DATA_SCHEMA)
+
+
+_PF = {True: "P", False: "F"}
+
+_TD_ORDER = (
+    "lot_id", "wafer_id", "part_id", "part_seq", "part_txt", "part_serial", "chip_key",
+    "x_coord", "y_coord", "test_num", "test_name", "rec_type", "lo_limit", "hi_limit",
+    "units", "result", "passed", "test_flg", "retest_num", "pin_num", "pin_name", "exec_seq",
+    "retest_flag",
+)
+assert set(_TD_ORDER) == set(TEST_DATA_SCHEMA.names)

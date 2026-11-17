@@ -62,18 +62,35 @@ def test_ft_wafer_yield_reflects_latest_retest(tmp_path):
     _ingest_ft(storage, ft)
 
     ft_rt = tmp_path / "ft_rt.stdf"
-    make_ft_stdf(ft_rt, "FTY", parts=4)  # retest run: all pass
+    make_ft_stdf(ft_rt, "FTY", parts=4)  # retest run: all pass, same eFuses
     _ingest_ft(storage, ft_rt)
 
     with _session(tmp_path) as s:
         rows = _wafer_yield(s, "FTY")
 
-    # FT has no wafer concept -> single group; final yield is 100% after retest,
-    # NOT the run0 50% nor an empty result.
+    # FT has no wafer concept -> single group; the eFuse chip_key overlays the
+    # retest on run0, so final yield is 100% after retest, NOT the run0 50%,
+    # NOT an empty result and NOT 8 packages.
     assert len(rows) == 1
     assert rows[0]["total"] == 4
     assert rows[0]["good"] == 4
     assert rows[0]["yield_pct"] == 100.0
+
+
+def test_ft_wafer_yield_without_chip_key_counts_both_runs(tmp_path):
+    """No eFuse -> no identity across files (barcodes are not used): both runs count."""
+    storage = _storage(tmp_path)
+    for name, fails in (("ft.stdf", {0, 1}), ("ft_rt.stdf", set())):
+        ft = tmp_path / name
+        make_ft_stdf(ft, "FTN", parts=4, fail_part_ids=fails, with_chipid=False)
+        _ingest_ft(storage, ft)
+
+    with _session(tmp_path) as s:
+        rows = _wafer_yield(s, "FTN")
+
+    assert len(rows) == 1
+    assert rows[0]["total"] == 8
+    assert rows[0]["good"] == 6
 
 
 # ── CP: re-ingest must not double count ─────────────────────────────────────

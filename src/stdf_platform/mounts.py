@@ -4,26 +4,26 @@ Imported by analysis/session.py (AnalysisSession) and workspace/query.py so
 the dedup key and the base/final view SQL exist in exactly one place. Paths use
 .as_posix() so the generated SQL is valid on Windows as well as POSIX hosts.
 
-test_data dedup happens at ingest time (storage.py writes retest_flag/
-exec_seq per row), so test_data_final below is a plain predicate filter, not
-a window — see that view's comments for why. parts_final and chipid_final
-are small enough that the ROW_NUMBER() window cost is negligible, and are
-left as-is: collapsing to one row per die there is exactly the desired
-semantics (unlike test_data, where a die/test pair can legitimately have
-many rows — loop measurements).
+Retest dedup happens at ingest time: storage._recompute_flags writes
+retest_flag (0 = newest occurrence, by run start time) on parts and
+test_data, so parts_final / test_data_final are plain predicate filters that
+push into the Parquet scan — never a window.
 """
 
+import hashlib
 from pathlib import Path
 
 import duckdb
 
 
-# FT identity = 2D barcode (part_txt) → PRR.PART_ID (part_serial) → 合成 part_id。
-# 空 part_txt で全パッケージが 1 キーに潰れると、parts_final がロット全体を
-# 1 ダイに畳み、_demote_superseded が他パッケージの測定値まで demote する。
-# CP (座標あり) では CASE が '' を返す。
+# FT identity = eFuse の chip_key（C0、なければ C1。parser._part_chip_key）。
+# eFuse が無いパッケージはその run 固有のキー（retest_num + 連番 part_id）に
+# して、リテスト間で重ねない。連番は「ファイル内の何個目か」でしかなく、
+# 重ねると別パッケージを上書きする。バーコード (part_txt / part_serial) は
+# 使わない（運用判断）。CP (座標あり) では CASE が '' を返す。
 _FT_IDENTITY = (
-    "COALESCE(NULLIF({p}part_txt, ''), NULLIF({p}part_serial, ''), {p}part_id)"
+    "COALESCE(NULLIF({p}chip_key, ''), "
+    "'NOEF|' || CAST({p}retest_num AS VARCHAR) || '|' || {p}part_id)"
 )
 
 
@@ -48,19 +48,35 @@ def die_key_expr(prefix: str = "") -> str:
             f"|| CAST({p}y_coord AS VARCHAR) END")
 
 
-# Dedup identity within a (lot, retest) group, expressed as native partition
-# columns.
-#
-#   CP die identity = (wafer_id, x_coord, y_coord) — the probe location. CP
-#   testers MAY populate PRR.PART_TXT with a per-part serial / 2D barcode, so
-#   part_txt is NOT safe to include in the CP key: the same physical die would
-#   carry a different part_txt across retests and fail to dedup, inflating
-#   counts by summing every retest.
-#
+# Die identity within a lot/wafer group (storage._recompute_flags):
+#   CP = (x_coord, y_coord) — the probe location. CP testers MAY populate
+#   PRR.PART_TXT with a per-part serial, so part_txt is NOT part of the CP key.
 #   FT has no wafer/probe coordinates (wafer_id='', x=y=-32768); its identity
-#   is the package barcode, falling back to PRR.PART_ID then the synthetic
-#   per-file part_id (see ft_identity / die_key_expr above).
-_DEDUP_UNIT = f"wafer_id, x_coord, y_coord, {ft_identity()}"
+#   is the eFuse chip_key, else a per-run key that never overlays (see
+#   _FT_IDENTITY above).
+
+
+# Columns added after a table's first release that views reference: always
+# present (NULL on older files) so a not-yet-wiped store still mounts.
+# Partition dirs are omitted when empty (storage._get_table_path), so the
+# partition columns are listed too.
+_PARTITION_COLS = [("product", "VARCHAR"), ("test_category", "VARCHAR"),
+                   ("sub_process", "VARCHAR")]
+_LATE_COLUMNS = {
+    "runs": _PARTITION_COLS,
+    "parts": [("part_serial", "VARCHAR"), ("chip_key", "VARCHAR"),
+              ("retest_flag", "BIGINT"), *_PARTITION_COLS],
+    "test_data": [("part_serial", "VARCHAR"), ("chip_key", "VARCHAR"),
+                  *_PARTITION_COLS],
+}
+
+# The Parquet tables. A store may still hold legacy wafers/ and chipid/ dirs
+# (folded into runs / parts); they are ignored until the wipe.
+_CORE = ["runs", "parts", "test_data"]
+
+# Any change to this module (view SQL, identity) changes the fingerprint, so a
+# persisted `db shell` catalog re-registers instead of keeping old views.
+_SOURCE_HASH = hashlib.sha1(Path(__file__).read_bytes()).hexdigest()[:12]
 
 
 def store_fingerprint(data_dir: Path,
@@ -78,11 +94,12 @@ def store_fingerprint(data_dir: Path,
     picked up with no re-registration — only a change in WHICH views should
     exist matters. That is what this fingerprint captures: the set of core
     table directories present, and the gross-die map (which changes the
-    gross_die table and wafer_yield_final). It is a handful of stat calls,
-    not a tree walk.
+    gross_die table and wafer_yield_final), plus a hash of this module so a
+    change to the view definitions re-registers too. It is a handful of stat
+    calls, not a tree walk.
     """
-    parts = [t for t in ["runs", "wafers", "parts", "test_data", "chipid"]
-             if (data_dir / t).exists()]
+    parts = [f"v:{_SOURCE_HASH}"]
+    parts += [t for t in _CORE if (data_dir / t).exists()]
     for prod, (gd, fb) in sorted((gross_die_map or {}).items()):
         parts.append(f"gd:{prod}={gd}/{fb}")
     return "|".join(parts)
@@ -115,6 +132,13 @@ def setup_views(
             "(MIR moved to data/runs/). Wipe the data directory and "
             "re-ingest — there is no migration path."
         )
+    pend = data_dir / "_pending"
+    if pend.exists() and any(pend.glob("*.json")):
+        import warnings
+        warnings.warn(
+            f"{data_dir}: an ingest is running or was interrupted — some lot "
+            "groups may count a retested die twice in *_final until the next "
+            "ingest batch repairs them (data/_pending/).", stacklevel=2)
 
     # Fail loudly on a data_dir that holds no store. Every table below is
     # registered only `if path.exists()`, so a data_dir pointing at the wrong
@@ -123,7 +147,6 @@ def setup_views(
     # on some view name, many steps removed from the actual mistake. The
     # resolved path is in the message because that path is exactly what the
     # caller got wrong.
-    _CORE = ["runs", "wafers", "parts", "test_data", "chipid"]
     if not any((data_dir / t).exists() for t in _CORE):
         raise RuntimeError(
             f"No STDF store found at {data_dir.resolve()} — none of "
@@ -137,26 +160,24 @@ def setup_views(
     for table in _CORE:
         path = data_dir / table
         if path.exists():
-            # parts/test_data/runs can mix pre-migration files with new ones
-            # (parts/test_data: no part_serial; test_data: no exec_seq/retest_flag;
-            # runs: no SDR equipment columns); union_by_name fills the missing
-            # columns with NULL instead of erroring on schema mismatch.
-            union = (
-                ", union_by_name=true" if table in ("parts", "test_data", "runs") else ""
-            )
+            # Files written by older code lack later columns; union_by_name
+            # fills them with NULL instead of erroring on schema mismatch.
             rel = (
                 f"read_parquet('{path.as_posix()}/**/*.parquet', "
-                f"hive_partitioning=true{union})"
+                f"hive_partitioning=true, union_by_name=true)"
             )
-            if table in ("parts", "test_data"):
+            late_cols = _LATE_COLUMNS.get(table)
+            if late_cols:
                 # part_serial は後から追加した列。旧ファイルしかないストアでは
                 # union_by_name でも列が現れないため、型付きゼロ行アームで常に
                 # 存在させる。DuckDB は空アームを planning 時に除去する
                 # (EXPLAIN 確認済み) ので predicate pushdown も損なわない。
+                # chip_key / retest_flag / パーティション列も同様。
+                nulls = ", ".join(f"CAST(NULL AS {t}) AS {c}" for c, t in late_cols)
                 rel = (
                     f"(SELECT * FROM {rel}\n"
                     f"UNION ALL BY NAME\n"
-                    f"SELECT CAST(NULL AS VARCHAR) AS part_serial WHERE FALSE)"
+                    f"SELECT {nulls} WHERE FALSE)"
                 )
             conn.execute(f"CREATE OR REPLACE VIEW {table} AS SELECT * FROM {rel}")
             registered.append(table)
@@ -164,8 +185,8 @@ def setup_views(
     if "runs" in registered:
         # `lots` is now a derived VIEW, one row per lot, aggregated from the
         # per-run `runs` rows (one per file x wafer identity). Column order
-        # matches the old LOTS_SCHEMA so existing consumers (get_lot_summary,
-        # trend.py, analysis/session.py `lots()`, `lot_product` below) need no
+        # matches the old LOTS_SCHEMA so existing consumers (analysis/session.py
+        # `lots()`, `lot_product` below) need no
         # changes; job_variant_count / job_mixed are new, additive columns.
         #
         # Semantics vs the old overwritten-per-file table:
@@ -196,67 +217,26 @@ def setup_views(
         registered.append("lots")
 
     if "parts" in registered:
+        # Same flag mechanism as test_data_final (storage._recompute_flags).
         conn.execute(f"""
             CREATE OR REPLACE VIEW parts_final AS
-            SELECT * EXCLUDE (rn) FROM (
-                SELECT *, {die_key_expr()} AS die_key, ROW_NUMBER() OVER (
-                    PARTITION BY lot_id, {_DEDUP_UNIT}
-                    ORDER BY retest_num DESC
-                ) AS rn FROM parts
-            ) WHERE rn = 1
+            SELECT *, {die_key_expr()} AS die_key
+            FROM parts WHERE retest_flag = 0
         """)
         registered.append("parts_final")
 
     if "test_data" in registered:
-        # test_data is large enough that the old ROW_NUMBER()-per-key window
-        # (still used below for parts_final/chipid_final) was a real cost:
-        # a window's PARTITION BY is not a predicate, so a WHERE on a
-        # non-PARTITION-BY column (e.g. `test_name LIKE ...` scoped to one
-        # lot) can never be pushed below the window — DuckDB had to
-        # materialize the *entire* windowed relation before filtering,
-        # turning a lot-scoped query into a full-table scan (12+ minutes on
-        # the real store). Dedup is now precomputed at ingest time instead
-        # (storage.py writes `retest_flag`; 0 = the newest run containing a
-        # key — see _DEDUP_UNIT above for the key and _demote_superseded for
-        # how older runs get bumped). `retest_flag = 0` is a plain predicate,
-        # so DuckDB pushes it into the Parquet scan same as any other filter
-        # — a lot-scoped test_name query is now a cheap scan again.
-        #
-        # Row-semantics change vs the old window view: the window kept
-        # exactly ONE arbitrary row per (die, test, pin) per lot, silently
-        # discarding loop measurements (e.g. an OTP dump logging 512 PTRs
-        # under one test_num — 511 of 512 rows were dropped) and potentially
-        # hiding a failing iteration. The flag-based view keeps ALL rows of
-        # the latest run, including every loop iteration; use `exec_seq`
-        # (0-based occurrence order within the run) to distinguish them when
-        # one-value-per-test is wanted.
-        #
-        # Rows with retest_flag IS NULL (test_data files written by
-        # pre-flag/pre-migration code — see union_by_name above) are
-        # EXCLUDED here, not treated as "current": there is no reliable
-        # per-key recency signal for them, so silently including them risks
-        # mixing stale and current measurements. A store in this state must
-        # be wiped and re-ingested.
+        # retest_flag = 0 is a plain predicate, so it pushes into the Parquet
+        # scan (a ROW_NUMBER window here once made lot-scoped queries full
+        # scans). All rows of the winning occurrence are kept, including loop
+        # measurements — use exec_seq to tell them apart. NULL flags (files
+        # from pre-flag code) are excluded: wipe and re-ingest such a store.
         conn.execute(f"""
             CREATE OR REPLACE VIEW test_data_final AS
             SELECT *, {die_key_expr()} AS die_key
             FROM test_data WHERE retest_flag = 0
         """)
         registered.append("test_data_final")
-
-    if "chipid" in registered:
-        # die identity = decoded ChipID (efuse_raw), NOT positional
-        # chip_occurrence_index (which can swap die0/die1 across retests).
-        conn.execute("""
-            CREATE OR REPLACE VIEW chipid_final AS
-            SELECT * EXCLUDE (rn) FROM (
-                SELECT *, ROW_NUMBER() OVER (
-                    PARTITION BY lot_id, efuse_raw
-                    ORDER BY retest_num DESC
-                ) AS rn FROM chipid
-            ) WHERE rn = 1
-        """)
-        registered.append("chipid_final")
 
     # Gross-die table (config-derived; created empty when unset so downstream
     # LEFT JOINs work uniformly). Applied at query time only — never written to
@@ -283,40 +263,28 @@ def setup_views(
     # Every yield consumer (CLI, analysis) reads this view so the gross-die
     # definition lives in exactly one place.
     if "parts_final" in registered:
-        if "lots" in registered:
-            lot_product = (
-                "SELECT lot_id, ANY_VALUE(product) AS product FROM lots GROUP BY lot_id"
-            )
-        else:
-            # No lots table (rare; some unit tests write only parts) → product
-            # unknown → GD cannot be resolved → fall back to probed counts.
-            # CAST 必須: NULL 単体は INT32 になり、VARCHAR の lot_id 比較が
-            # ConversionException になる。
-            lot_product = (
-                "SELECT CAST(NULL AS VARCHAR) AS lot_id, "
-                "CAST(NULL AS VARCHAR) AS product WHERE FALSE"
-            )
-        conn.execute(f"""
+        # One row per (product, test_category, sub_process, lot, wafer): CP1
+        # and CP2 of one lot are separate yields, never mixed.
+        conn.execute("""
             CREATE OR REPLACE VIEW wafer_yield_final AS
             WITH probed AS (
-                SELECT lot_id, wafer_id,
+                SELECT product, test_category, sub_process, lot_id, wafer_id,
                        COUNT(*)                                 AS probed,
                        SUM(CASE WHEN passed THEN 1 ELSE 0 END)  AS good
                 FROM parts_final
-                GROUP BY lot_id, wafer_id
+                GROUP BY ALL
             ),
-            lp AS ({lot_product}),
             joined AS (
-                SELECT pr.lot_id, pr.wafer_id, pr.probed, pr.good,
+                SELECT pr.*,
                        CASE WHEN pr.wafer_id <> '' AND gd.gross_die IS NOT NULL
                             THEN GREATEST(pr.probed, gd.gross_die)
                             ELSE pr.probed END                  AS total,
                        gd.gd_fail_bin                           AS gd_fail_bin
                 FROM probed pr
-                LEFT JOIN lp ON pr.lot_id = lp.lot_id
-                LEFT JOIN gross_die gd ON lp.product = gd.product
+                LEFT JOIN gross_die gd ON pr.product = gd.product
             )
-            SELECT lot_id, wafer_id, probed, good, total,
+            SELECT product, test_category, sub_process, lot_id, wafer_id,
+                   probed, good, total,
                    total - probed                               AS unprobed,
                    gd_fail_bin,
                    ROUND(100.0 * good / NULLIF(total, 0), 2)     AS yield_pct
