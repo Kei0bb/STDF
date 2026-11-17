@@ -1,4 +1,4 @@
--- ロット別 歩留まりサマリ(gross die 適用、FT ロットも含む)
+-- ロット別 歩留まりサマリ(gross die 適用、FT ロットも含む)。サブプロセス(CP1/CP2…)ごとに別行。
 -- 条件はすべて任意: 渡さなければ絞らない。s.run("lot_yield", product="P1")
 SET VARIABLE product       = NULL;
 SET VARIABLE test_category = NULL;
@@ -12,7 +12,11 @@ SELECT l.lot_id, l.product, l.test_category, l.sub_process,
        ROUND(100.0 * SUM(w.good) / NULLIF(SUM(w.total), 0), 2) AS yield_pct,
        l.start_time
 FROM lots l
-LEFT JOIN wafer_yield_final w USING (lot_id)
+LEFT JOIN wafer_yield_final w
+  ON  w.product       = l.product
+  AND w.test_category = l.test_category
+  AND w.sub_process   IS NOT DISTINCT FROM l.sub_process
+  AND w.lot_id        = l.lot_id
 WHERE opt_eq(l.product,       getvariable('product'))
   AND opt_eq(l.test_category, getvariable('test_category'))
   AND opt_eq(l.sub_process,   getvariable('sub_process'))

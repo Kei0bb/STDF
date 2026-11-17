@@ -76,39 +76,71 @@ def encode_chipid(fab_code: int, lot6: str, wafer: int, x: int, y: int) -> str:
     return "0b" + bits
 
 
-def gdr_chipid(efuse: str, key: str = CHIPID_KEY) -> bytes:
-    """Build a GDR record carrying one ChipID key/value pair (Cn, Cn).
+SUITE_TAIL = ":IP_FN_0_OTP_CID_NR_FRC_FT_12_05::"
+
+
+def gdr_chipid(efuse: str, key: str = CHIPID_KEY, site: int = 1, pad: bool = True) -> bytes:
+    """Build a CHIP ID GDR: [pad], I4 site, Cn key, Cn eFuse value.
 
     Defaults to the canonical digit-zero key ("EN-S0-CHIPID_R") that real STDF
-    files use.
+    files use. The site is the last integer field before the first Cn.
     """
-    body = struct.pack("<H", 2)                  # FLD_CNT
-    body += struct.pack("B", 10) + cn(key)       # C*n key
-    body += struct.pack("B", 10) + cn(efuse)     # C*n value
+    body = struct.pack("<H", 4 if pad else 3)    # FLD_CNT
+    if pad:
+        body += bytes([0])                       # B*0 pad field
+    body += bytes([6]) + struct.pack("<i", site)  # I*4 site
+    body += bytes([10]) + cn(key)                # C*n key
+    body += bytes([10]) + cn(efuse)              # C*n value
     return record(50, 10, body)
 
 
-def make_ft_stdf(path: Path, lot_id: str, parts: int = 8, fail_part_ids=None):
-    """Generate an FT (Final Test) STDF with 2-die chiplet ChipID GDRs.
+def gdr_suite(die: str, site: int = 1, text: str | None = None) -> bytes:
+    """Test-time GDR naming the die suite: I4 site, "EN-ZZ-TESTTIME", suite name."""
+    text = text if text is not None else f"CHIPID_NRD0_{die}{SUITE_TAIL}"
+    body = struct.pack("<H", 3) + bytes([6]) + struct.pack("<i", site)
+    body += bytes([10]) + cn("EN-ZZ-TESTTIME") + bytes([10]) + cn(text)
+    return record(50, 10, body)
 
-    No WIR (FT has no wafer). Each part (package) emits two EN-SO-CHIPID_R GDRs
-    (die0/die1) and a PRR carrying a unique PART_TXT 2D barcode. Returns the list
-    of expected ChipID dicts so tests can assert against the parsed/stored output.
+
+def package_efuses(pkg: int) -> tuple[str, str]:
+    """Deterministic C0/C1 eFuse values of package `pkg` (same in every retest file)."""
+    return (
+        encode_chipid(1, "HKPFJK", wafer=11, x=10 + pkg, y=20 + pkg),   # TSMC1
+        encode_chipid(6, "ABCDEF", wafer=7, x=100 + pkg, y=200 + pkg),  # TSMC2
+    )
+
+
+def ft_mir(lot_id: str, start_t: int = 1700000000) -> bytes:
+    """MIR of the FT generator (TEST_COD FT1 -> sub_process FT1)."""
+    return record(1, 10, (
+        struct.pack("<IIB", start_t, start_t, 1)
+        + struct.pack("<BBBHB", ord(" "), ord(" "), ord(" "), 0, ord(" "))
+        + cn(lot_id) + cn("CHIPLET2D") + cn("TESTER01") + cn("J750")
+        + cn("FT_TEST") + cn("Rev01") + cn("") + cn("OPE01") + cn("") + cn("")
+        + cn("FT1")
+    ))
+
+
+def make_ft_stdf(path: Path, lot_id: str, parts: int = 8, fail_part_ids=None,
+                 pkgs=None, with_chipid: bool = True):
+    """Generate an FT (Final Test) STDF with 2-die chiplet CHIP ID GDRs.
+
+    No WIR (FT has no wafer). Each package gets a PIR, one PTR, per die a
+    CHIP ID GDR followed by a test-time suite GDR (C0, then C1), and a PRR with
+    a PART_TXT barcode. Package `n` always carries the same eFuses, so a retest
+    file overlays the first run by chip_key whatever its position is. `pkgs`
+    picks/reorders the packages (default range(parts)); `fail_part_ids` are
+    package numbers; `with_chipid=False` omits the GDRs. Returns the expected
+    CHIP ID dicts so tests can assert against the parsed/stored output.
     """
     fail_part_ids = set(fail_part_ids or [])
+    pkgs = list(range(parts)) if pkgs is None else list(pkgs)
     buf = bytearray()
     start_t = 1700000000
 
     buf += record(0, 10, struct.pack("BB", 2, 4))  # FAR
 
-    mir_data = (
-        struct.pack("<IIB", start_t, start_t, 1)
-        + struct.pack("<BBBHB", ord(" "), ord(" "), ord(" "), 0, ord(" "))
-        + cn(lot_id) + cn("CHIPLET2D") + cn("TESTER01") + cn("J750")
-        + cn("FT_TEST") + cn("Rev01") + cn("") + cn("OPE01") + cn("") + cn("")
-        + cn("FT1")  # TEST_COD -> sub_process FT1
-    )
-    buf += record(1, 10, mir_data)
+    buf += ft_mir(lot_id, start_t)
 
     # Two site groups sharing one handler/loadboard but wired to different
     # sockets — exercises the multi-SDR collapse (see parser.SDR_FIELDS).
@@ -122,7 +154,7 @@ def make_ft_stdf(path: Path, lot_id: str, parts: int = 8, fail_part_ids=None):
                cont_typ="SKT-FT-MODEL", cont_id="SKT-A")
 
     expected = []
-    for i in range(parts):
+    for pos, i in enumerate(pkgs):
         buf += record(5, 10, struct.pack("BB", 1, 1))  # PIR
 
         # One PTR so test_data is populated for the package
@@ -137,27 +169,25 @@ def make_ft_stdf(path: Path, lot_id: str, parts: int = 8, fail_part_ids=None):
         )
         buf += record(15, 10, ptr)
 
-        # Two dies per package, each from a different origin location
         barcode = f"2D-{lot_id}-{i:04d}"
-        efuse0 = encode_chipid(1, "HKPFJK", wafer=11, x=10 + i, y=20 + i)   # TSMC1
-        efuse1 = encode_chipid(6, "ABCDEF", wafer=7, x=100 + i, y=200 + i)  # TSMC2
-        buf += gdr_chipid(efuse0)
-        buf += gdr_chipid(efuse1)
-        expected.append({"part_txt": barcode, "occ": 0, "efuse": efuse0})
-        expected.append({"part_txt": barcode, "occ": 1, "efuse": efuse1})
+        if with_chipid:
+            for occ, (die, efuse) in enumerate(zip(("C0", "C1"), package_efuses(i))):
+                buf += gdr_chipid(efuse)
+                buf += gdr_suite(die)
+                expected.append({"part_txt": barcode, "occ": occ, "die": die, "efuse": efuse})
 
         # PRR with PART_ID + PART_TXT (2D barcode), no wafer coords
         part_flg = 0x00 if passed else 0x08
         hard_bin = 1 if passed else 2
         soft_bin = 1 if passed else 3
         prr = struct.pack("<BBBHHHhhI", 1, 1, part_flg, 1, hard_bin, soft_bin, -32768, -32768, 0)
-        prr += cn(f"UNIT{i:04d}") + cn(barcode)
+        prr += cn(f"UNIT{pos:04d}") + cn(barcode)
         buf += record(5, 20, prr)
 
     buf += record(1, 20, struct.pack("<I", start_t + 3600))  # MRR
 
     path.write_bytes(bytes(buf))
-    print(f"Created {path} ({len(buf):,} bytes, FT {parts} packages × 2 dies)")
+    print(f"Created {path} ({len(buf):,} bytes, FT {len(pkgs)} packages × 2 dies)")
     return expected
 
 
@@ -292,5 +322,5 @@ if __name__ == "__main__":
     make_stdf(out / "LOT004.stdf", "LOT004", num_wafers=5, parts_per_wafer=200)
     make_stdf(out / "LOT005.stdf", "LOT005", num_wafers=5, parts_per_wafer=200)
 
-    # FT chiplet file with EN-SO-CHIPID_R GDRs
+    # FT chiplet file with EN-S0-CHIPID_R GDRs + C0/C1 suite GDRs
     make_ft_stdf(out / "FTLOT01.stdf", "FTLOT01", parts=8)

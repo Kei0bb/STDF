@@ -10,7 +10,7 @@ Pure Python パーサー × ThreadPoolExecutor による並列処理で、1000 �
 ## クイックスタート
 
 > **Python は `.python-version` の 3.13 に固定**（`uv sync` が自動で用意する）。
-> 全マシンで検証済みの処理系を揃えるための固定で、`requires-python` は 3.10 以上。
+> 全マシンで検証済みの処理系を揃えるための固定で、`requires-python` は 3.11 以上（DuckDB 2.x の要件）。
 
 ```bash
 # 1. 依存インストール
@@ -49,8 +49,8 @@ var/downloads/
      ↓   └── Thread N → subprocess(_ingest_worker) ─┘     var/data/{table}/product={P}/
      ↓                    ↑                                 test_category={CP|FT}/
      ↓               parser.py                              sub_process={CP11|FT2}/
-     ↓               storage.py                             lot_id={L}/
-     ↓                                                      data.parquet
+     ↓               storage.py                             lot_id={L}/wafer_id={W}/
+     ↓                                                      retest={n}/data.parquet
      ↓
 DuckDB glob ビュー（クエリごとに fs スキャン、mounts.py）
      ↓
@@ -96,8 +96,8 @@ var/                 ランタイム生成物（.gitignore で丸ごと除外）
 | `cli.py` | Click CLI — `ingest` / `ingest-all` / `fetch` / `db` / `export` コマンド |
 | `worker.py` | `ThreadPoolExecutor` でファイルごとに subprocess を起動・タイムアウト管理 |
 | `_ingest_worker.py` | 独立 subprocess — 1ファイルを parse → Parquet 書き込みして JSON を stdout に出力 |
-| `parser.py` | Pure Python STDF V4 パーサー（`struct.Struct` 最適化、FAR/MIR/WIR/PIR/PRR/PTR/MPR/FTR/PMR対応） |
-| `storage.py` | PyArrow で Hive パーティション Parquet に書き込み、リテスト番号の自動採番 |
+| `parser.py` | Pure Python STDF V4 パーサー（`struct.Struct` 最適化、FAR/MIR/SDR/WIR/WRR/PIR/PRR/PTR/MPR/FTR/PMR/GDR）。part はマルチサイトの (head, site) ごとに管理。FAR/MIR の無いファイル・途中で切れたファイルは `STDFFormatError` |
+| `storage.py` | PyArrow で Hive パーティション Parquet に書き込み、リテスト番号の採番と `retest_flag` の再計算 |
 | `ftp_client.py` | `ftplib` FTP 差分ダウンロード（`.stdf.gz` 自動展開） |
 | `sync_manager.py` | `sync_history.json` で FTP 取得済み・ingest 済みを追跡 |
 | `ingest_history.py` | `ingest_history.json` でローカル ingest 済みファイルを追跡（`ingest-all` の再開用） |
@@ -108,8 +108,9 @@ var/                 ランタイム生成物（.gitignore で丸ごと除外）
 
 | モジュール | 役割 |
 |---|---|
-| `storage.py` | Parquet Hive パーティション書き込み（5テーブル） |
-| `mounts.py`（旧 `views.py`） | `_DEDUP_UNIT` / `store_fingerprint()` / `setup_views(conn, data_dir, gross_die_map)` の単一ソース。ビューは glob なので、登録後に ingest したデータも再登録なしで見える |
+| `storage.py` | Parquet Hive パーティション書き込み（`runs` / `parts` / `test_data` の 3 テーブル） |
+| `chipid.py` | FT 2-die パッケージの CHIP ID（eFuse 64bit）デコードと検査 |
+| `mounts.py`（旧 `views.py`） | `die_key_expr()` / `store_fingerprint()` / `setup_views(conn, data_dir, gross_die_map)` の単一ソース。ビューは glob なので、登録後に ingest したデータも再登録なしで見える |
 | `config.py` | `config.yaml` 読み込み（FTP / Storage / Server 設定、`${ENV_VAR}` 展開対応） |
 
 #### 名前付きクエリ層
@@ -139,6 +140,8 @@ var/                 ランタイム生成物（.gitignore で丸ごと除外）
 
 | モジュール | 役割 |
 |---|---|
+| `analysis/session.py` | `AnalysisSession.for_notebook()` — 共有 marimo カーネル用セッション（DuckDB の default 接続 = `mo.sql` と同じ、`notebook:` 設定の上限を適用） |
+| `scripts/start_marimo.bat` | 専用 venv（`var/venv-notebook`）で共有 marimo サーバを起動。運用は `docs/marimo-server.md` |
 
 ---
 
@@ -154,8 +157,12 @@ ThreadPoolExecutor (max_workers=N)
 ```
 
 - 各 subprocess はメモリ分離（クラッシュしても他のワーカーに影響しない）
-- 成功済みファイルを `var/data/ingest_history.json` に記録 → 中断後の再実行で自動スキップ
-- タイムアウト超過時は SIGKILL → 次ファイルへ継続
+- 同じロットのファイルは並列にせず、ファイル名のタイムスタンプ順に直列で処理する
+- 成功したファイルは1件ごとに `var/data/ingest_history.json` に記録 → 中断後の再実行で自動スキップ
+- 失敗（STDF でない・途中で切れている・壊れた .gz・タイムアウトで SIGKILL）は記録せず次ファイルへ継続し、最後に終了コード 1
+- 書き込み中のロット/ウェーハは `var/data/_pending/` に記録し、中断で `retest_flag` が古いまま残ったものはバッチの最初と最後に再計算して直す（残っている間はビュー登録時に警告）
+- ingest バッチはデータディレクトリごとに1つずつ（`var/data/.ingest.lock`）。夜間バッチ中に手動 ingest すると終わるまで待つ
+- 同じファイルを再 ingest すると、そのファイル自身の `retest` 番号を上書きする（重複しない。`X.stdf.gz` と `X.stdf` は同じファイル扱い）
 
 ---
 
@@ -178,10 +185,26 @@ stdf ingest sample.stdf --product SCT101A
 # パスから product 自動推定（.../SCT101A/CP/... 構造）
 stdf ingest ./var/downloads/SCT101A/CP/lot001.stdf --from-path
 
+# sub_process を MIR.TEST_COD ではなく指定値にする
+stdf ingest sample.stdf -p SCT101A -s CP2
+
 # ディレクトリ一括（推奨）— 中断後の再実行は自動で続きから
 stdf ingest-all ./var/downloads -p SCT101A
+stdf ingest-all ./var/downloads -p SCT101A -r        # 下位フォルダも（_ で始まるフォルダは除外）
 stdf ingest-all ./var/downloads -p SCT101A --workers 8 --timeout 600
 stdf ingest-all ./var/downloads -p SCT101A --force   # 全ファイル強制再取り込み
+stdf ingest-all ./var/downloads -p SCT101A --allow-truncated  # 途中で切れたファイルも完全なレコードまで取り込む
+```
+
+- 対象は `*.stdf` / `*.std` / `*.stdf.gz` / `*.std.gz`（大文字小文字を区別しない。`--glob` で上書き可）。
+  `.gz` は一時ファイルに展開して読み、`runs.source_file` には `.gz` を外した名前が入る（fetch と同じ）。
+- 失敗が1件でもあれば終了コード 1（単ファイルの `ingest` も同じ）。
+
+**FT の CHIP ID を ingest 前に確かめる**（読むだけ。実データ機で、suite 名のバイト列・site 番号の
+振り方・C0/C1 の取れ方を確認する）:
+
+```bash
+uv run python scripts/diag_chipid.py <FTファイル.stdf.gz> --part 1
 ```
 
 ### SQL クエリ（VS Code）
@@ -241,7 +264,7 @@ stdf db lots                                 # ロット一覧（TP 混在ロッ
 stdf db programs --lot LOT001                # wafer / retest ごとのテストプログラム履歴
 stdf db query "SELECT * FROM lots"               # SQL 直接実行
 stdf db query -f path/to/query.sql               # ファイルから SQL を読む（単一 SELECT）
-stdf db query "SELECT * FROM wafers" -o out.csv  # 結果を CSV に書き出す
+stdf db query "SELECT * FROM wafer_yield_final" -o out.csv  # 結果を CSV に書き出す
 stdf db shell                                # DuckDB シェル（2回目以降はカタログ再利用で即起動 / --refresh で再登録）
 ```
 
@@ -293,15 +316,14 @@ scripts\unregister_task.bat
 
 | テーブル | 説明 |
 |---------|------|
-| `runs` | STDF ファイル × wafer 単位の MIR/MRR メタデータ。CP は wafer ごと、FT は FT ロットの実行ごと（`wafer_id=''`）に 1 行。テストプログラム（`job_name` / `job_rev`）がロット内で変わってもここに残る |
+| `runs` | STDF ファイル × wafer 単位の MIR/MRR メタデータと WRR 値（CP のみ）。CP は wafer ごと、FT は FT ロットの実行ごと（`wafer_id=''`）に 1 行。テストプログラム（`job_name` / `job_rev`）がロット内で変わってもここに残る |
 | `lots` | ロット情報（product, test_category, sub_process）。Parquet ではなく **`runs` から集約した DuckDB ビュー**（1 ロット 1 行）。`job_mixed` / `job_variant_count` でロット内の TP 混在を判定できる |
-| `wafers` | ウェハー歩留まり（リテスト追跡含む）。**CP 専用**（FT は WIR/WRR が無く生成されない） |
-| `parts` | 個片結果（Bin, X/Y 座標）。CP=ダイ / FT=パッケージ |
+| `parts` | 個片結果（Bin, X/Y 座標）。CP=ダイ / FT=パッケージ。FT の CHIP ID（GDR `EN-S0-CHIPID_R` をデコード）は `c0_*` / `c1_*` / `chip_status` 列 |
 | `test_data` | テスト測定値（PTR/MPR/FTR 統合）。MPR は 1 レコードをピン数分の行に展開し `pin_num` / `pin_name` 列に PMR のピン情報を格納。PTR/FTR 行ではこれらは NULL。 |
-| `chipid` | FT chiplet の die 出自トレース（GDR `EN-S0-CHIPID_R` をデコード）。**FT 専用** |
 
-> 解析・歩留りは重複排除済みの `parts_final` / `test_data_final` / `chipid_final`
-> ビューを使う（詳細は `docs/schema.md` / `docs/sample_queries.md`）。
+> 解析・歩留りは重複排除済みの `parts_final` / `test_data_final` / `wafer_yield_final`
+> ビューを使う（詳細は `docs/schema.md` / `docs/sample_queries.md`）。同じロットの CP1 / CP2
+> （FT1 / FT2）は別の測定なので混ぜない（dedup・歩留りとも sub_process ごと）。
 
 ### Parquet パーティション構造
 
@@ -312,12 +334,28 @@ var/data/          ← storage.data_dir（config.yaml で変更可）
         └── test_category={CP|FT}/
             └── sub_process={CP11|FT2}/
                 └── lot_id={lot_id}/
-                    └── (wafer_id={id}/retest={n}/)  ← runs/wafers/parts/test_data/chipid
+                    └── wafer_id={id}/retest={n}/     ← runs / parts / test_data
                         └── data.parquet
 ```
 
 > `lots` は Parquet を持たない（`runs` 由来のビュー）。旧ストアの `data/lots/`（= data_dir 直下の `lots/`）が
 > 残っていると `setup_views()` がエラーで停止するので、wipe して再 ingest する。
+> 旧ストアの `wafers/` / `chipid/` ディレクトリは無視される。
+
+### wipe と再 ingest
+
+移行コードは持たない。ingest 時に書く列が変わったら、ストアを作り直す。
+`fetch` は ingest に成功したファイルを既定で削除する（`--cleanup`）ので、元ファイルは FTP から取り直す:
+
+```cmd
+schtasks /Change /TN STDF_DailyFetch /DISABLE   REM 夜間バッチを止める
+rmdir /s /q var\data                            REM Parquet と sync_history / ingest_history をまとめて消す
+uv run stdf fetch --verbose                     REM 全ファイルを取り直して ingest（ロット内は時刻順）
+schtasks /Change /TN STDF_DailyFetch /ENABLE
+```
+
+`sync_history.json` も `var/data` にあるので一緒に消える（＝全ファイルが未取得扱いになり、取り直しになる）。
+手元に元ファイルが残っているなら、`var/data` を消してから `stdf ingest-all <dir> -p <製品> -r` でもよい。
 
 ---
 
@@ -327,8 +365,9 @@ var/data/          ← storage.data_dir（config.yaml で変更可）
 |-----------|--------|
 | `sub_process` | STDF MIR.TEST_COD / CLI `-s` |
 | `test_rev` | ファイル名（Rev04等） |
-| `retest_num` | 既存データから自動計算（0=初回, 1,2…=リテスト） |
-| `test_data.retest_flag` | ingest 時に自動算出（0=そのキーの最新 run）。`test_data_final` は `retest_flag = 0` の単純フィルタ |
+| `retest_num` | 既存データから自動計算（0=初回, 1,2…=リテスト）。同じ `source_file` の再 ingest は自分の番号を上書き |
+| `parts.retest_flag` / `test_data.retest_flag` | ingest 時に自動算出（0=そのダイの最新の測定）。run の MIR 開始時刻 → `retest_num` → ファイル内 PIR 順で決まり、ingest 順に依存しない。`parts_final` / `test_data_final` は `retest_flag = 0` の単純フィルタ。`test_data_final` は勝った run の行だけ（古い run で補わない） |
+| ダイの同一性（`die_key`） | CP = ウェーハ + X/Y。FT = eFuse の CHIP ID（C0、なければ C1。同じファイルに同じ C0+C1 が 2 回あれば再挿入として後の part）。eFuse の無い FT パッケージはリテスト間で重ねない（初回・リテストの両方が残る）。バーコード（`part_txt`）は使わない |
 | `test_data.exec_seq` | ingest 時に自動算出（run 内 0 始まり出現順）。ループ計測（OTP ダンプ等）の各回を区別 |
 
 ---

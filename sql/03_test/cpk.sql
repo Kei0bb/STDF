@@ -1,7 +1,9 @@
--- Cp / Cpk (test_name を '%' にすると全テスト)
-SET VARIABLE test_name = '%';
+-- Cp / Cpk (test_name を '%' にすると全テスト)。サブプロセス(CP1/CP2…)ごとに別行。
+SET VARIABLE test_name   = '%';
+SET VARIABLE sub_process = NULL;
 
-SELECT test_num, test_name, units, lo_limit, hi_limit,
+SELECT test_category, sub_process,
+       test_num, test_name, units, lo_limit, hi_limit,
        COUNT(*)                 AS n,
        ROUND(AVG(result), 4)    AS mean,
        ROUND(STDDEV(result), 4) AS sigma,
@@ -14,7 +16,9 @@ SELECT test_num, test_name, units, lo_limit, hi_limit,
 FROM test_data_final
 WHERE lot_id = getvariable('lot')
   AND test_name LIKE getvariable('test_name')
+  AND opt_eq(sub_process, getvariable('sub_process'))
   AND lo_limit IS NOT NULL AND hi_limit IS NOT NULL
+  AND result IS NOT NULL
   AND rec_type IN ('PTR', 'MPR')
-GROUP BY test_num, test_name, units, lo_limit, hi_limit
-ORDER BY cpk NULLS LAST
+GROUP BY test_category, sub_process, test_num, test_name, units, lo_limit, hi_limit
+ORDER BY test_category, sub_process, cpk NULLS LAST

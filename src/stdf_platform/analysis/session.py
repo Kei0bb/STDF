@@ -175,7 +175,8 @@ class AnalysisSession:
         ).fetchdf()
 
     def lot_summary(self, lot_id: str | None = None) -> pd.DataFrame:
-        """Per-lot yield summary (gross-die aware), ex-Database.get_lot_summary."""
+        """Yield summary per (product, test_category, sub_process, lot), gross-die
+        aware. Sub-processes of one lot (CP1/CP2, FT1/FT2) are separate rows."""
         where = "WHERE l.lot_id = ?" if lot_id else ""
         params = [lot_id] if lot_id else []
         return self.conn.execute(f"""
@@ -187,12 +188,15 @@ class AnalysisSession:
                    MAX(p.yield_pct)   AS yield_pct
             FROM lots l
             LEFT JOIN (
-                SELECT lot_id,
+                SELECT product, test_category, sub_process, lot_id,
                        COUNT(*) FILTER (WHERE wafer_id <> '') AS wafer_count,
                        SUM(total) AS total_parts, SUM(good) AS good_parts,
                        ROUND(100.0 * SUM(good) / NULLIF(SUM(total), 0), 2) AS yield_pct
-                FROM wafer_yield_final GROUP BY lot_id
-            ) p ON l.lot_id = p.lot_id
+                FROM wafer_yield_final GROUP BY ALL
+            ) p ON  l.product       = p.product
+               AND l.test_category = p.test_category
+               AND l.sub_process   IS NOT DISTINCT FROM p.sub_process
+               AND l.lot_id        = p.lot_id
             {where}
             GROUP BY ALL
             ORDER BY l.product, l.test_category, l.sub_process, l.lot_id

@@ -10,13 +10,11 @@ that storage.py itself computes.
 
 from pathlib import Path
 
-import pyarrow as pa
-import pyarrow.parquet as pq
 import pytest
 
 from stdf_platform.config import StorageConfig
 from stdf_platform.parser import STDFData
-from stdf_platform.storage import CHIPID_SCHEMA, ParquetStorage
+from stdf_platform.storage import ParquetStorage
 
 
 def _cp_run(lot_id, wafer_id, job_name, job_rev, start_time, finish_time, parts, test_results, tests=None):
@@ -37,7 +35,7 @@ def _cp_run(lot_id, wafer_id, job_name, job_rev, start_time, finish_time, parts,
         "good_count": sum(1 for p in parts if p["passed"]),
         "rtst_count": 0, "abrt_count": 0,
     }]
-    data.parts = parts
+    data.parts = [{"part_seq": i, **p} for i, p in enumerate(parts)]
     data.tests = tests or {
         1: {"test_name": "VCC", "rec_type": "PTR", "lo_limit": 0.9, "hi_limit": 1.1, "units": "V"},
     }
@@ -45,7 +43,8 @@ def _cp_run(lot_id, wafer_id, job_name, job_rev, start_time, finish_time, parts,
     return data
 
 
-def _ft_run(lot_id, job_name, job_rev, start_time, finish_time, parts, test_results=None):
+def _ft_run(lot_id, job_name, job_rev, start_time, finish_time, parts, test_results=None,
+            chip_ids=None):
     """One FT STDF file (no WIR -> wafer_id='' package identity)."""
     data = STDFData()
     data.lot_id = lot_id
@@ -57,9 +56,10 @@ def _ft_run(lot_id, job_name, job_rev, start_time, finish_time, parts, test_resu
     data.tester_type = "TESTER"
     data.operator = "OP"
     data.wafers = []  # FT: no WIR, so no wafer identity to derive from wafers
-    data.parts = parts
+    data.parts = [{"part_seq": i, **p} for i, p in enumerate(parts)]
     data.tests = {1: {"test_name": "VCC", "rec_type": "PTR", "lo_limit": 0.9, "hi_limit": 1.1, "units": "V"}}
     data.test_results = test_results or []
+    data.chip_ids = chip_ids or []
     return data
 
 
@@ -84,7 +84,9 @@ def synth_store(tmp_path) -> Path:
         run0, never re-measured in run1, so both dies' rows keep
         retest_flag=0 from run0 regardless of the run1 retest on test_num=1
         -> isolated, hand-computable fail-rate / Cpk cases.
-      - FT lot (FTLOT1, wafer_id='', x=y=-32768, part_txt=package barcode):
+      - FT lot (FTLOT1, wafer_id='', x=y=-32768, no eFuse chip_key, so each
+        package is its own die): package 0 also carries a C0 CHIP ID
+        (parts.c0_* / chip_status):
         lot-yield's wafer_count=0 (FT has no wafer) while total/good
         are still probed-based (2 packages, 1 pass) -> yield 50.0.
     """
@@ -170,31 +172,10 @@ def synth_store(tmp_path) -> Path:
              "head_num": 1, "site_num": 1, "x_coord": -32768, "y_coord": -32768,
              "hard_bin": 0, "soft_bin": 0, "passed": False, "test_count": 1, "test_time": 50},
         ],
+        # CHIP ID of package 0 (C0 only) -> parts.c0_* / chip_status='missing C1'
+        chip_ids=[{"part_id": "FTLOT1_0", "die_id": "C0", "efuse_raw": "0b" + "0" * 64,
+                   "warnings": []}],
     )
     storage.save_stdf_data(ft_run, product="PROD", test_category="FT", sub_process="FT2", source_file="ft_run0.stdf")
-
-    # storage.py only writes the chipid table for FT files with decoded
-    # EN-SO-CHIPID_R data (see storage.py's `if data.chip_ids and
-    # test_category == "FT"`), which the FT run above never triggers (it
-    # carries no chip_ids). A missing chipid/ directory makes any glob over
-    # zero matching files (unlike setup_views(), which just skips
-    # registering the view when the table dir is absent), so write one
-    # minimal chipid row directly so the fixture exercises chipid_final.
-    # Reuses FTLOT1/FTLOT1_0/PKG0001 to line up with the FT parts row above.
-    chipid_path = (
-        tmp_path / "chipid" / "product=PROD" / "test_category=FT"
-        / "lot_id=FTLOT1" / "wafer_id=" / "retest=0" / "data.parquet"
-    )
-    chipid_path.parent.mkdir(parents=True, exist_ok=True)
-    pq.write_table(
-        pa.table({
-            "lot_id": ["FTLOT1"], "part_id": ["FTLOT1_0"], "part_txt": ["PKG0001"],
-            "chip_occurrence_index": [0], "efuse_raw": ["0" * 64], "valid": [True],
-            "origin_fab_code": [1], "origin_fab": ["TSMC1"], "origin_lot": ["LOT1"],
-            "origin_wafer": [1], "origin_x": [1], "origin_y": [1],
-            "reserved_bits": [""], "retest_num": [0],
-        }, schema=CHIPID_SCHEMA),
-        chipid_path,
-    )
 
     return tmp_path

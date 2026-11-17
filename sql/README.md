@@ -27,6 +27,7 @@ print(s.show("cpk"))                                      # SQL を表示(改造
 ```
 
 名前は `03_test/fail_ranking` でも、重複がなければ `fail_ranking` だけでも引けます。
+ロット単位のクエリは `sub_process` 列を出力し（CP1 / CP2 は別行）、`sub_process=` で絞れます。
 
 ## 変数（条件）の書き方
 
@@ -65,12 +66,27 @@ WHERE opt_eq(product,       getvariable('product'))
 
 ## どのビューを使うか
 
-歩留まりは `wafer_yield_final`（gross die 適用済み・FT ロットも含む）を使ってください。
-`wafers` テーブルを自前で集計すると FT ロットが落ち、gross die も効きません。
-測定値は `test_data_final`、ダイは `parts_final` — いずれも retest 解決済みです。
+歩留りは `wafer_yield_final`（gross die 適用済み・FT ロットも含む）を使ってください。
+WRR 値（`runs.part_count` / `good_count`）は CP のみ・リテストは部分母集団なので歩留りには使いません。
+測定値は `test_data_final`、ダイは `parts_final` — いずれも retest 解決済み（`retest_flag = 0`）です。
+FT の CHIP ID は `parts_final` の `c0_*` / `c1_*` / `chip_status` 列（別テーブルは無い）。
+
+**sub_process を混ぜない。** 同じロットの CP1 / CP2（FT1 / FT2）は別の測定で、dedup も
+`wafer_yield_final` も `(product, test_category, sub_process, lot_id, wafer_id)` ごとです。
+ロット単位に集計・結合するクエリは `sub_process`（必要なら `test_category` / `product`）を
+出力列・GROUP BY・JOIN キーに含めてください。同梱クエリは `sub_process` を出力列に持ち、
+`SET VARIABLE sub_process = NULL;` + `opt_eq()` の任意条件で 1 つに絞れます
+（例: `s.run("wafer_yield", lot="LOT002", sub_process="CP1")`）。
 
 `parts_final` / `test_data_final` を結合するときは `part_id` を使わない
 （ファイル内連番で、部分リテストでは別ダイに振り直される）。両ビューの
-`die_key`（CP=座標 / FT=バーコード→PART_ID→合成ID）で結合する:
+`die_key`（CP=座標 / FT=eFuse の `chip_key`、無ければ run 固有 ID）で結合する。
+`sub_process` が空のストアでも結ばれるよう `IS NOT DISTINCT FROM` を使う:
 
+    ON  p.product = td.product AND p.test_category = td.test_category
+    AND p.sub_process IS NOT DISTINCT FROM td.sub_process
     AND p.lot_id = td.lot_id AND p.wafer_id = td.wafer_id AND p.die_key = td.die_key
+
+合否は NULL があり得る（`parts.passed`: PART_FLG 0x10、`test_data.passed`: 未実行 / 合否無効、
+`test_data.result`: 値無効、リミット: 「なし」指定）。`= FALSE` / `= 'F'` で数える側は NULL を
+自然に除外するが、母数に含めたくない行は `IS NOT NULL` で明示する。

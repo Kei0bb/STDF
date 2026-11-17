@@ -3,6 +3,9 @@
 STDFファイルをParquet形式に変換した際のテーブル定義。  
 DuckDBビュー経由でSQLクエリ可能。
 
+Parquet テーブルは `runs` / `parts` / `test_data` の 3 つだけ。`lots` と `*_final` /
+`wafer_yield_final` は DuckDB VIEW。
+
 ---
 
 ## パーティション構造
@@ -14,37 +17,43 @@ data/
         └── test_category={CP|FT}/
             └── sub_process={CP1|FT2|...}/
                 └── lot_id={lot_id}/
-                    └── (wafer_id={id}/retest={n}/)  ← runs / wafers / parts / test_data / chipid
+                    └── wafer_id={id}/retest={n}/     ← runs / parts / test_data
                         └── data.parquet
 ```
 
-> `lots` は Parquet を持たず `runs` から派生する DuckDB VIEW。`runs` / `wafers` /
-> `parts` / `test_data` / `chipid` は `lot_id` の下にさらに `wafer_id` / `retest`
-> まで切る（FT はウェーハ概念が無いため `wafer_id=`（空）になる。`runs` は FT では
-> lot 単位 = `wafer_id=''` ごとに 1 行）。`product` / `test_category` /
-> `sub_process` / `lot_id` / `wafer_id` / `retest` は Hive パーティション列として
-> SELECT 可能。
+> `lots` は Parquet を持たず `runs` から派生する DuckDB VIEW。3 テーブルとも `lot_id`
+> の下に `wafer_id` / `retest` まで切る（FT はウェーハ概念が無いため `wafer_id=`（空）
+> になる。`runs` は FT では lot 単位 = `wafer_id=''` ごとに 1 行）。`product` /
+> `test_category` / `sub_process` / `lot_id` / `wafer_id` / `retest` は Hive パーティション
+> 列として SELECT 可能。`retest_num` は同じ lot + wafer（+ sub_process）の何本目の
+> ファイルかで、別ファイルを ingest するたびに増える。**同じ `source_file` を再 ingest
+> すると自分の `retest_num` を上書き**する（行は増えない）。`.gz` は外した名前で記録するので、
+> `X.stdf.gz` と展開済みの `X.stdf` は同じファイル扱い。
+>
+> ingest 中断はデータ直下の `_pending/` マーカーで検出し、ingest バッチの冒頭と末尾で
+> `retest_flag` を再計算して復旧する（`ParquetStorage.recover_pending()`）。マーカーが
+> 残っている間は `setup_views()` が警告を出す（`*_final` がリテスト分を二重に数えている可能性）。
+> ingest バッチはデータディレクトリごとに 1 つずつ（OS ロック `.ingest.lock`。2 つ目は待つ）。
 
 ---
 
 ## 適用範囲（CP / FT）
 
-テーブルは工程によって生成有無・意味が変わります。**特に `wafers` は CP 専用**です。
-
 | テーブル | CP | FT | 単位 / 備考 |
 |---------|:--:|:--:|------|
-| `runs` | ✓ | ✓ | CP は 1 wafer = 1 行、FT は 1 FT lot run（`wafer_id=''`）= 1 行。MIR メタデータの実体（Parquet） |
-| `lots` | ✓ | ✓ | 1 lot = 1 行。`runs` から集約した VIEW（Parquet ではない） |
-| `wafers` | ✓ | **✗** | **CP 専用**。FT は WIR/WRR が無いため **1 行も生成されない** |
-| `parts` | ✓ | ✓ | CP = ダイ / FT = パッケージ（1 PRR）。真の単位 |
+| `runs` | ✓ | ✓ | CP は 1 wafer = 1 行、FT は 1 FT lot run（`wafer_id=''`）= 1 行。MIR / SDR メタデータと WRR 値（CP のみ） |
+| `lots` | ✓ | ✓ | 1 lot（× sub_process）= 1 行。`runs` から集約した VIEW |
+| `parts` | ✓ | ✓ | CP = ダイ / FT = パッケージ（1 PRR）。CHIP ID 列（`c0_*` / `c1_*`）は FT の 2-die パッケージで入る |
 | `test_data` | ✓ | ✓ | パラメトリック測定（PTR/MPR/FTR） |
-| `chipid` | ✗ | ✓ | **FT 専用**。die 出自トレース（CP は出自＝プローブ座標で冗長） |
 
-> **歩留りの算出元**: `wafers.part_count` / `good_count` は WRR の**報告値**で、
-> リテスト実行時は再測定した部分母集団しか含まず、FT には存在しません。
-> このため **歩留りは `parts_final`（ダイ/パッケージ単位・最新リテスト）から
-> 算出**します（名前付きクエリ `01_lots/lot_yield` / `AnalysisSession.lot_summary()` も同様）。
-> `wafers` は時刻・`rtst_count` 等の WRR メタ情報用と位置づけます。
+> **歩留りの算出元**: `runs.part_count` / `good_count` は WRR の報告値でリテスト時は部分
+> 母集団、FT には無い。歩留りは **`parts_final`（最新の測定）から算出**する
+> （`wafer_yield_final` / 名前付きクエリ `lot_yield` / `AnalysisSession.lot_summary()`）。
+>
+> **sub_process を混ぜない**: 同じロットの CP1 / CP2（FT1 / FT2）は別の測定。dedup も
+> yield も `(product, test_category, sub_process, lot_id, wafer_id)` ごとに閉じており、
+> ロット単位に集計・結合するクエリは `sub_process`（必要なら `test_category` /
+> `product`）を GROUP BY / JOIN キーに含めること。
 
 ---
 
@@ -54,7 +63,7 @@ data/
 wafer ごとに 1 行（1 ファイルに複数 wafer が入っていれば同じ `source_file` の複数行に
 なる）、FT は `wafer_id=''` として **FT lot run 単位**（= ファイル単位）に 1 行。
 `lots` はこのテーブルから集約した VIEW（下記参照）で、Parquet として書かれる実体は
-`runs` だけ。
+`runs` だけ。WRR のウェーハ別カウンタ・時刻も `runs` の列（旧 `wafers` テーブルは無い）。
 
 | 列名 | 型 | ソース | 説明 |
 |------|----|--------|------|
@@ -80,6 +89,12 @@ wafer ごとに 1 行（1 ファイルに複数 wafer が入っていれば同�
 | loadboard_id | STRING | SDR.LOAD_ID | ロードボード ID |
 | socket_type | STRING | SDR.CONT_TYP | ソケット（コンタクタ）機種 |
 | socket_id | STRING | SDR.CONT_ID | ソケット（コンタクタ）ID |
+| wafer_start_time | TIMESTAMP(ms, UTC) | WIR.START_T | ウェーハのテスト開始時刻（CP のみ。FT は NULL） |
+| wafer_finish_time | TIMESTAMP(ms, UTC) | WRR.FINISH_T | ウェーハのテスト終了時刻（CP のみ） |
+| part_count | INT64 | WRR.PART_CNT | テスタ報告の総ダイ数（CP のみ。複数ヘッドは合算） |
+| good_count | INT64 | WRR.GOOD_CNT | テスタ報告の良品数（CP のみ） |
+| rtst_count | INT64 | WRR.RTST_CNT | テスタ報告のリテスト数（CP のみ） |
+| abrt_count | INT64 | WRR.ABRT_CNT | テスタ報告のアボート数（CP のみ） |
 | test_rev | STRING | ファイル名 (Rev04等) | テストプログラムリビジョン（ファイル名由来。TP 判定には使わない） |
 | source_file | STRING | CLI | 元STDFファイル名 |
 
@@ -95,6 +110,9 @@ wafer ごとに 1 行（1 ファイルに複数 wafer が入っていれば同�
 > SDR が無いファイルや途中で切れた SDR では、取れなかった列は空文字 `''`。
 > CP ではハンドラ欄にプローバ、カード欄にプローブカードが入り、
 > `loadboard_*` / `socket_*` は空になるのが一般的（設備側の出力次第）。
+
+> **WRR 列は報告値**: リテスト実行時は再測定した部分母集団しか含まず、FT には存在しない
+> （NULL）。歩留りには使わず、`wafer_yield_final`（`parts_final` から算出）を使う。
 
 ---
 
@@ -136,7 +154,7 @@ GROUP BY lot_id, product, test_category, sub_process
 
 > **意味が変わった点**（旧: 1 STDF ファイル = 1 行を上書きしていた頃との違い）:
 > - `start_time` / `finish_time` は「lot 内の最初の run 〜 最後の run」になった
->   （旧: 最後に ingest したファイルの値という不定値）。`trend.py` のロット並び順に影響する。
+>   （旧: 最後に ingest したファイルの値という不定値）。
 > - `job_name` / `job_rev` / `part_type` / `tester_type` / `operator` は
 >   **「最新 run（`start_time` が最も新しい run）の値」**に定義が固定される
 >   （旧: ingest した順序に依存する不定値）。lot 内で TP が変わったかどうかは
@@ -147,34 +165,6 @@ GROUP BY lot_id, product, test_category, sub_process
 
 ---
 
-## wafers
-
-ウェーハ単位のサマリ。リテスト履歴を保持。**CP 専用**（FT は WIR/WRR が無く生成
-されない）。`part_count` / `good_count` は WRR の報告値のため、歩留りは
-`parts_final` から算出する（[適用範囲](#適用範囲cp--ft) 参照）。
-
-> 旧スキーマにあった `test_rev` / `source_file` は書き込み専用の死に列だった
-> （読んでいるコードが無かった）ため削除。同じ内容は `runs.test_rev` /
-> `runs.source_file` で取得できる。
-
-| 列名 | 型 | ソース | 説明 |
-|------|----|--------|------|
-| wafer_id | STRING | WIR.WAFER_ID | ウェーハID |
-| lot_id | STRING | MIR.LOT_ID | ロットID |
-| head_num | INT64 | WIR.HEAD_NUM | ヘッド番号 |
-| start_time | TIMESTAMP(ms, UTC) | WIR.START_T | テスト開始時刻 |
-| finish_time | TIMESTAMP(ms, UTC) | WRR.FINISH_T | テスト終了時刻 |
-| part_count | INT64 | WRR.PART_CNT | 総ダイ数 |
-| good_count | INT64 | WRR.GOOD_CNT | 良品数 |
-| rtst_count | INT64 | WRR.RTST_CNT | リテスト数 |
-| abrt_count | INT64 | WRR.ABRT_CNT | アボート数 |
-| retest_num | INT64 | 自動算出 | リテスト番号（0=初回, 1,2...=リテスト） |
-
-> **リテスト**: 同一 lot_id + wafer_id で再 ingest すると `retest_num` がインクリメント。  
-> 分析クエリでは最新 `retest_num` のみを使用（`ROW_NUMBER() OVER(PARTITION BY lot_id, wafer_id ORDER BY retest_num DESC)`）。
-
----
-
 ## parts
 
 ダイ（チップ）単位の結果。
@@ -182,8 +172,10 @@ GROUP BY lot_id, product, test_category, sub_process
 | 列名 | 型 | ソース | 説明 |
 |------|----|--------|------|
 | part_id | STRING | 自動生成 | `{lot_id}_{wafer_id}_{連番}`（ストリーム順。**ファイルごとに 0 から振り直されるため結合キーに使わない**） |
-| part_txt | STRING | PRR.PART_TXT | 2D バーコード（FT パッケージの一意キー。CP は通常空） |
-| part_serial | STRING | PRR.PART_ID | テスタが書くユニットシリアル。part_txt が空の FT の identity フォールバック |
+| part_seq | INT64 | PIR 順 | ファイル内の PIR の出現順。同じダイがファイル内に 2 回あれば大きい方が新しい |
+| part_txt | STRING | PRR.PART_TXT | 2D バーコード（表示用。identity には使わない） |
+| part_serial | STRING | PRR.PART_ID | テスタが書くユニットシリアル（表示用） |
+| chip_key | STRING | eFuse（C0、無ければ C1） | FT パッケージの identity。`EF|<16 桁 hex>`。eFuse が無い、または同一ファイル内の複数 part が同じ値で C0/C1 の組が食い違うなら `''`（C0 と C1 が両方一致すれば同じパッケージの再挿入とみなし、key を残して後の part が勝つ） |
 | lot_id | STRING | MIR.LOT_ID | ロットID |
 | wafer_id | STRING | WIR.WAFER_ID | ウェーハID（FT は空） |
 | head_num | INT64 | PIR.HEAD_NUM | ヘッド番号 |
@@ -192,10 +184,29 @@ GROUP BY lot_id, product, test_category, sub_process
 | y_coord | INT64 | PRR.Y_COORD | Y座標（FT は -32768） |
 | hard_bin | INT64 | PRR.HARD_BIN | ハードビン |
 | soft_bin | INT64 | PRR.SOFT_BIN | ソフトビン |
-| passed | BOOL | PRR.PART_FLG | 合否 |
+| passed | BOOL | PRR.PART_FLG | 合否。PART_FLG 0x10（合否無効）のとき **NULL** |
+| part_flg | INT64 | PRR.PART_FLG | 生のフラグ値 |
 | test_count | INT64 | PRR.NUM_TEST | テスト実行数 |
 | test_time | INT64 | PRR.TEST_T | テスト時間 (ms) |
 | retest_num | INT64 | 自動算出 | リテスト番号（0=初回, 1,2...） |
+| retest_flag | INT64 | 自動算出（ingest 時） | そのダイの出現順位。0 = 最新。`parts_final` は `retest_flag = 0` |
+| c0_chipid_hex | STRING | GDR `EN-S0-CHIPID_R`（C0） | 64bit CHIP ID（`0x…`） |
+| c0_origin_fab | STRING | デコード | `TSMC1` / `TSMC2` / … / `UNKNOWN` |
+| c0_origin_lot | STRING | デコード | 出自 CP ロット（TSMC のみ 6 文字） |
+| c0_origin_wafer | INT64 | デコード | 出自ウェーハ番号 |
+| c0_origin_x / c0_origin_y | INT64 | デコード | 出自 X / Y 座標 |
+| c1_chipid_hex, c1_origin_fab, c1_origin_lot, c1_origin_wafer, c1_origin_x, c1_origin_y | | GDR（C1） | C0 と同じ（2 つ目の die） |
+| chip_status | STRING | 自動判定 | NULL = CHIP ID 無し / `complete` / `ambiguous`（C0 または C1 が複数）/ `missing C0` / `missing C1` / `missing C0, C1` |
+| chip_warnings | STRING | 自動判定 | `; ` 区切りの警告（デコード不能・C0 と C1 が同値など）。問題なければ `''` |
+
+> **CHIP ID は別テーブルではなく `parts` の列**（`chipid` テーブル / `chipid_final` /
+> `chipid_package` は無い）。C0 / C1 は CHIP ID の GDR の後ろに来る suite GDR
+> （`CHIPID_NRD0_C0` / `…_C1`、同じ part・同じ site、次の CHIP ID・PRR・64 GDR まで）で
+> 判別する（出現順ではない。tester の site と die は別物）。見つからない候補は
+> `chip_status` / `chip_warnings` に出る。`ambiguous` のときは最初の候補の値が入る。
+> 候補ごとの詳細は `scripts/diag_chipid.py`。
+> ビット配置: `EFUSE[0:4]`=fab, `[4:13]`=Y(9bit), `[13:22]`=X(9bit),
+> `[22:27]`=wafer(5bit, 値-3), `[27:62]`=lot(CHAR1×1 + CHAR2×5), `[62:64]`=予備。
 
 ---
 
@@ -208,97 +219,77 @@ GROUP BY lot_id, product, test_category, sub_process
 | lot_id | STRING | MIR.LOT_ID | ロットID |
 | wafer_id | STRING | WIR.WAFER_ID | ウェーハID |
 | part_id | STRING | 自動生成 | ダイID（ファイル内連番。結合には `die_key` を使う） |
-| part_txt | STRING | PRR.PART_TXT | 2D バーコード（FT パッケージキー。CP は通常空） |
-| part_serial | STRING | PRR.PART_ID | テスタが書くユニットシリアル（FT の identity フォールバック） |
+| part_seq | INT64 | `parts.part_seq` | ファイル内の PIR 順 |
+| part_txt | STRING | PRR.PART_TXT | 2D バーコード（表示用） |
+| part_serial | STRING | PRR.PART_ID | ユニットシリアル（表示用） |
+| chip_key | STRING | `parts.chip_key` | FT パッケージ identity |
 | x_coord | INT64 | PRR.X_COORD | X座標 |
 | y_coord | INT64 | PRR.Y_COORD | Y座標 |
 | test_num | INT64 | PTR/MPR/FTR.TEST_NUM | テスト番号 |
 | test_name | STRING | PTR/MPR/FTR.TEST_TXT | テスト名 |
 | rec_type | STRING | レコード種別 | `PTR` / `MPR` / `FTR` |
-| lo_limit | FLOAT64 | PTR/MPR.LO_LIMIT | 下限規格値 |
-| hi_limit | FLOAT64 | PTR/MPR.HI_LIMIT | 上限規格値 |
+| lo_limit | FLOAT64 | PTR/MPR.LO_LIMIT | 下限規格値。OPT_FLAG が「下限なし/無効」なら **NULL**（以降のレコードに有効値があればそれで補完） |
+| hi_limit | FLOAT64 | PTR/MPR.HI_LIMIT | 上限規格値（同上） |
 | units | STRING | PTR/MPR.UNITS | 単位 |
-| result | FLOAT64 | PTR/MPR.RESULT | 測定値 |
-| passed | STRING | PTR/MPR/FTR.TEST_FLG | 合否（`P` / `F`） |
+| result | FLOAT64 | PTR/MPR.RESULT | 測定値。TEST_FLG 0x02（値無効）のとき **NULL** |
+| passed | STRING | PTR/MPR/FTR.TEST_FLG | `P` / `F`。未実行（0x10）・合否無効（0x40）は **NULL** |
+| test_flg | INT64 | PTR/MPR/FTR.TEST_FLG | 生のフラグ値 |
 | retest_num | INT64 | 自動算出 | リテスト番号 |
 | pin_num | INT64 | MPR.PMR_INDX | ピン番号（MPR のみ。PTR/FTR は NULL） |
 | pin_name | STRING | PMR から解決 | ピン名（MPR のみ） |
 | exec_seq | INT64 | 自動算出（ingest 時） | 同一 run 内でのキー出現順（0始まり）。ループ計測（例: OTP ダンプが 1 test_num に 512 PTR を書く）の各回を区別 |
-| retest_flag | INT64 | 自動算出（ingest 時） | キーごとの新しさ順位。0 = そのキーを含む最新 run。`test_data_final` は `retest_flag = 0` で絞り込み |
+| retest_flag | INT64 | 自動算出（ingest 時） | ダイの出現（run × part）の新しさ順位。`parts` と同じ値。0 = 最新。`test_data_final` は `retest_flag = 0` |
 
 ---
 
-## chipid
+## 派生 VIEW
 
-FT chiplet 製品の die トレーサビリティ。GDR の `EN-S0-CHIPID_R`（**digit zero**）
-をデコードした eFuse の出自情報。**FT のみ生成**（CP は出自＝プローブ座標で冗長な
-ため書き込まない）。1 パッケージ（1 PRR）が 2 die を含むため 1 部品あたり複数行。
+| VIEW | 定義 | 用途 |
+|------|------|------|
+| `lots` | `runs` の集約（上記） | ロット（× sub_process）一覧・TP 混在検出 |
+| `parts_final` | `SELECT *, die_key FROM parts WHERE retest_flag = 0` | 最新測定のダイ/パッケージ |
+| `test_data_final` | `SELECT *, die_key FROM test_data WHERE retest_flag = 0` | 最新測定の値（ループ計測は全行保持） |
+| `wafer_yield_final` | `parts_final` の集計 + gross die（クエリ時） | 歩留り。`(product, test_category, sub_process, lot_id, wafer_id)` ごとに 1 行 |
 
-| 列名 | 型 | ソース | 説明 |
-|------|----|--------|------|
-| lot_id | STRING | MIR.LOT_ID | FT ロットID |
-| part_id | STRING | 自動生成 | 部品ID（ストリーム順） |
-| part_txt | STRING | PRR.PART_TXT | 2D バーコード（パッケージの一意キー） |
-| chip_occurrence_index | INT64 | 出現順 | DUT 内の die 区別（0, 1, ...） |
-| efuse_raw | STRING | GDR 値 | 正規化済み 64bit 文字列（**die の恒久ID**） |
-| valid | BOOL | デコード結果 | 64bit デコード成功なら true |
-| origin_fab_code | INT64 | EFUSE[0:4] | fab コード |
-| origin_fab | STRING | デコード | `TSMC1` / `TSMC2` / `UNSUPPORTED` |
-| origin_lot | STRING | デコード | CP ロット（6 文字） |
-| origin_wafer | INT64 | デコード | 出自ウェーハ番号 |
-| origin_x | INT64 | デコード | 出自 X 座標 |
-| origin_y | INT64 | デコード | 出自 Y 座標 |
-| reserved_bits | STRING | EFUSE[62:64] | 予備ビット |
-| retest_num | INT64 | 自動算出 | リテスト番号 |
+`wafer_yield_final` の列: `product, test_category, sub_process, lot_id, wafer_id, probed, good,
+total, unprobed, gd_fail_bin, yield_pct`。CP の `total = max(probed, products.<P>.gross_die)`、
+`unprobed = total - probed`（`gd_fail_bin` に計上。config 未設定・FT は `total = probed`）。
+`passed` が NULL（合否無効）のダイは `good` に数えない。
 
-> ビット配置: `EFUSE[0:4]`=fab, `[4:13]`=Y(9bit), `[13:22]`=X(9bit),
-> `[22:27]`=wafer(5bit, 値-3), `[27:62]`=lot(CHAR1×1 + CHAR2×5), `[62:64]`=予備。
+### retest 解決（ingest 時）
 
----
+`storage._recompute_flags` が lot/wafer グループ（`product, test_category, sub_process,
+lot_id, wafer_id`）ごとに `retest_flag` を `parts` と `test_data` の両方へ書く。
+`*_final` はウィンドウ関数を使わない単純な述語なので Parquet スキャンまで押し込まれる
+（ロット絞り込みが速い）。
 
-## 派生 VIEW（`*_final`）
+- 同じダイの出現を **(run の MIR `start_time`, `retest_num`, `part_seq`) の新しい順**に並べる。
+  測定時刻で決まり、ingest の順序には依存しない（古いファイルが後から来ても勝たない）。
+  同一ファイル内で同じダイが 2 回出たら後の part が勝つ（FT は同じ C0+C1 の再挿入）。
+- 順位は出現ごとに 1 つで、その part の `parts` 行と `test_data` 全行に同じ値が入る。
+  **`test_data_final` は勝った出現の測定だけ**で、古い run の行で補わない（stop-on-fail で
+  リテストが途中までしか測っていなければ、残りのテストはそのダイに無い）。1 出現のループ
+  測定行は同じフラグを共有する（全行残る。区別は `exec_seq`）。
+- ダイ identity（`mounts.die_key_expr()`）: CP は `(x_coord, y_coord)`。FT は eFuse の
+  `chip_key`、無ければその run 固有の `NOEF|<retest_num>|<part_id>`（run をまたいで重ねない）。
+  **バーコード（`part_txt` / `part_serial`）は identity に使わない。**
+- `retest_flag IS NULL`（フラグ導入前のファイル）の行は `*_final` から除外される。
+  ストアの wipe + 再 ingest が必要（移行パスは無い）。
 
-リテストの最新のみを残す重複排除ビュー。dedup の単位（identity）は工程で分岐：
+### die_key
 
-| VIEW | dedup 方式 | 用途 |
-|------|------------|------|
-| `parts_final` | `ROW_NUMBER() OVER (PARTITION BY lot_id, <dedup 単位> ORDER BY retest_num DESC)` | 最新リテストのダイ/パッケージ |
-| `test_data_final` | `WHERE retest_flag = 0`（ingest 時に付与済み。下記参照） | 最新リテストの測定値（ループ計測は全行保持） |
-| `chipid_final` | `ROW_NUMBER() OVER (PARTITION BY lot_id, efuse_raw ORDER BY retest_num DESC)` | die（eFuse）単位の最新。occurrence 順入替えに堅牢 |
+`parts_final` / `test_data_final` には **`die_key`** 列が付く（Parquet には保存せず、
+ビューが計算する）。CP は `CP|{x}|{y}`、FT は `FT|{chip_key}`（eFuse が無ければ
+`FT|NOEF|{retest_num}|{part_id}`）。**両ビューを結合するときは `part_id` ではなく**
 
-`parts_final` / `chipid_final` は小テーブルなのでウィンドウ計算コストが無視できる範囲。
-CP は従来どおりウェーハ座標、FT は座標が無いため 2D バーコード（`part_txt`）/ eFuse を
-identity に使う。FT で `part_txt` が空の場合は `part_serial`（PRR.PART_ID）、それも
-無ければ合成 `part_id` にフォールバックする（空キーで全パッケージが1つに潰れるのを防ぐ）。
+```sql
+p.product = td.product AND p.test_category = td.test_category
+AND p.sub_process IS NOT DISTINCT FROM td.sub_process
+AND p.lot_id = td.lot_id AND p.wafer_id = td.wafer_id AND p.die_key = td.die_key
+```
 
-> **旧ストア（`part_serial` 導入前）の FT で `part_txt` が空の場合は再 ingest が必要。**
-> 旧ファイルには `part_serial` が記録されていないため identity が
-> 合成 `part_id`（ファイル内連番）まで落ちる。部分リテストではリテスト側の
-> パッケージ #n が元 run のパッケージ #n に化けるので、`parts_final` の dedup も
-> `retest_flag` の demote も成立しない（ingest 時に警告が出る）。
-> CP と、バーコードのある FT は再 ingest 不要。
-
-`parts_final` / `test_data_final` には **`die_key`** 列が付く（Parquet には保存しない、
-ビューが計算する）。CP は `CP|{x}|{y}`、FT は `FT|{part_txt}`（空なら part_serial →
-合成 part_id）。**両ビューを結合するときは `part_id` ではなく
-`p.lot_id = td.lot_id AND p.wafer_id = td.wafer_id AND p.die_key = td.die_key` を使う**
-— `part_id` はファイル内連番で、部分リテストでは別ダイに振り直されるため
-（全 SDR の畳み込みと同じく、identity 式の単一ソースは `mounts.py`）。
-
-`test_data_final` は `retest_num` 順のウィンドウではなく、ingest 時に `storage.py` が
-書き込む `retest_flag`（キーごとの新しさ順位。0 = 最新 run）を使った単純な述語フィルタ。
-ウィンドウの `PARTITION BY` は述語ではないため、非パーティション列（`test_name` など）
-への絞り込みがウィンドウの下までプッシュダウンされず、ロット絞り込みの `test_name LIKE`
-検索が実データで 12 分以上かかる原因になっていた。`retest_flag = 0` は通常の述語なので
-Parquet スキャンまでプッシュダウンされ、高速。
-
-また、旧ウィンドウ版は (die, test, pin) ごとに 1 行だけを残す仕様だったため、ループ計測
-（例: OTP ダンプが 1 test_num の下に 512 個の PTR を書く場合）の 511/512 行が無条件に
-捨てられ、Fail した回だけが消えることもあった。フラグ方式は最新 run の全行を保持する
-ため、ループ回を区別するには `exec_seq`（run 内 0 始まり出現順）を使う。
-
-`retest_flag IS NULL`（旧スキーマ／フラグ未対応でストアされたファイル）の行は
-`test_data_final` から除外される — そのストアは再取り込みが必要。
+を使う。`part_id` はファイル内連番で、部分リテストでは別ダイに振り直されるため。
+identity 式の単一ソースは `mounts.py`。
 
 ---
 
@@ -306,11 +297,9 @@ Parquet スキャンまでプッシュダウンされ、高速。
 
 ```mermaid
 erDiagram
-    lots ||--o{ wafers : "lot_id"
-    lots ||--o{ parts : "lot_id"
-    wafers ||--o{ parts : "lot_id, wafer_id"
+    lots ||--o{ runs : "product, test_category, sub_process, lot_id"
+    runs ||--o{ parts : "lot_id, wafer_id, retest_num"
     parts ||--o{ test_data : "lot_id, wafer_id, die_key"
-    parts ||--o{ chipid : "lot_id, part_txt (FT)"
 
     lots {
         string lot_id PK
@@ -320,15 +309,20 @@ erDiagram
         string part_type
         string job_name
     }
-    wafers {
-        string wafer_id PK
+    runs {
         string lot_id FK
-        int part_count
-        int good_count
+        string wafer_id
+        string sub_process
         int retest_num
+        string job_name
+        string job_rev
+        int part_count "WRR (CP only)"
+        int good_count "WRR (CP only)"
+        string source_file
     }
     parts {
         string part_id "per-file counter"
+        int part_seq
         string lot_id FK
         string wafer_id FK
         int x_coord
@@ -336,25 +330,20 @@ erDiagram
         int hard_bin
         int soft_bin
         bool passed
+        string chip_key "FT identity"
+        string chip_status "CHIP ID"
+        string c0_chipid_hex
+        string c1_chipid_hex
+        int retest_flag "0 = newest"
     }
     test_data {
         string die_key "computed in *_final"
-        string part_txt
         int test_num
         string test_name
         string rec_type
         float result
         string passed
-    }
-    chipid {
-        string lot_id FK
-        string part_txt
-        int chip_occurrence_index
-        string efuse_raw
-        string origin_fab
-        string origin_lot
-        int origin_wafer
-        int origin_x
-        int origin_y
+        int test_flg
+        int retest_flag "0 = newest"
     }
 ```

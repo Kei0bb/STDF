@@ -216,3 +216,23 @@ def test_run_ingest_pool_timeout(tmp_path, monkeypatch):
     assert not successes
     assert len(failures) == 1
     assert "timed out" in failures[0].error
+
+
+def test_allow_truncated_is_passed_in_argv_and_gz_ts_key(tmp_path, monkeypatch):
+    from pathlib import Path
+
+    seen = []
+
+    def fake_popen(cmd, **kwargs):
+        seen.append(cmd)
+        return _FakeProc(stdout="{}")
+
+    monkeypatch.setattr(worker.subprocess, "Popen", fake_popen)
+    f = tmp_path / "L_x#202601010000.std.gz"
+    for flag in (False, True):
+        worker.run_ingest_pool(files=[(None, f, "P", "")], data_dir=tmp_path,
+                               compression="zstd", max_workers=1, timeout=5,
+                               allow_truncated=flag)
+    assert "--allow-truncated" not in seen[0]
+    assert seen[1][-1] == "--allow-truncated"
+    assert worker._ts_key(Path("L_x#202601010000.std.gz")) == "202601010000"

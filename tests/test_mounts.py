@@ -21,26 +21,29 @@ def _write_parts(data_dir: Path):
         ("lot_id", pa.string()), ("wafer_id", pa.string()), ("part_txt", pa.string()),
         ("x_coord", pa.int64()), ("y_coord", pa.int64()),
         ("soft_bin", pa.int64()), ("passed", pa.bool_()), ("retest_num", pa.int64()),
+        ("retest_flag", pa.int64()),
     ])
     table = pa.table({
         "part_id": ["P0", "P1"],
         "lot_id": ["LOT1", "LOT1"], "wafer_id": ["W1", "W1"], "part_txt": ["", ""],
         "x_coord": [1, 2], "y_coord": [1, 2], "soft_bin": [1, 0],
-        "passed": [True, False], "retest_num": [0, 0],
+        "passed": [True, False], "retest_num": [0, 0], "retest_flag": [0, 0],
     }, schema=schema)
     pq.write_table(table, path)
 
 
 def _write_two_retests_same_die(data_dir: Path):
     """Same physical CP die (W1, x=1, y=1) probed twice with DIFFERENT part_txt
-    serials — must collapse to one row in parts_final."""
+    serials, flags as storage writes them (older run demoted) — must collapse
+    to one row in parts_final."""
     schema = pa.schema([
         ("part_id", pa.string()),
         ("lot_id", pa.string()), ("wafer_id", pa.string()), ("part_txt", pa.string()),
         ("x_coord", pa.int64()), ("y_coord", pa.int64()),
         ("soft_bin", pa.int64()), ("passed", pa.bool_()), ("retest_num", pa.int64()),
+        ("retest_flag", pa.int64()),
     ])
-    for retest, sn, passed in [(0, "SN-A", False), (1, "SN-B", True)]:
+    for retest, sn, passed, flag in [(0, "SN-A", False, 1), (1, "SN-B", True, 0)]:
         path = (
             data_dir / "parts" / "product=PROD" / "test_category=CP"
             / "sub_process=" / "lot_id=LOT1" / "wafer_id=W1"
@@ -51,7 +54,7 @@ def _write_two_retests_same_die(data_dir: Path):
             "part_id": [f"P{retest}"],
             "lot_id": ["LOT1"], "wafer_id": ["W1"], "part_txt": [sn],
             "x_coord": [1], "y_coord": [1], "soft_bin": [1],
-            "passed": [passed], "retest_num": [retest],
+            "passed": [passed], "retest_num": [retest], "retest_flag": [flag],
         }, schema=schema), path)
 
 
@@ -64,7 +67,7 @@ def _write_parts_parquet(path: Path, rows: list[dict]):
         ("x_coord", pa.int64()), ("y_coord", pa.int64()),
         ("hard_bin", pa.int64()), ("soft_bin", pa.int64()),
         ("passed", pa.bool_()), ("test_count", pa.int64()), ("test_time", pa.int64()),
-        ("retest_num", pa.int64()),
+        ("retest_num", pa.int64()), ("retest_flag", pa.int64()),
     ])
     table = pa.table({k: [r[k] for r in rows] for k in schema.names}, schema=schema)
     pq.write_table(table, path)
@@ -82,8 +85,8 @@ def _setup_conn(data_dir: Path) -> duckdb.DuckDBPyConnection:
 
 
 def test_dedup_ignores_part_txt_for_cp_dies(tmp_path):
-    """CP die identity is (wafer, x, y); a per-part part_txt must not defeat
-    retest dedup. The latest retest (retest_num DESC) wins."""
+    """parts_final keeps the rows with retest_flag = 0 (the newest occurrence of
+    the die) whatever their part_txt."""
     _write_two_retests_same_die(tmp_path)
     conn = duckdb.connect(":memory:")
     setup_views(conn, tmp_path)
@@ -103,10 +106,10 @@ def test_parts_final_takes_latest_retest(tmp_path):
         [
             {"part_id": "L_W_0", "part_txt": "", "lot_id": "LOT1", "wafer_id": "W1", "head_num": 1, "site_num": 1,
              "x_coord": 1, "y_coord": 1, "hard_bin": 0, "soft_bin": 0, "passed": False,
-             "test_count": 1, "test_time": 100, "retest_num": 0},
+             "test_count": 1, "test_time": 100, "retest_num": 0, "retest_flag": 1},
             {"part_id": "L_W_1", "part_txt": "", "lot_id": "LOT1", "wafer_id": "W1", "head_num": 1, "site_num": 1,
              "x_coord": 2, "y_coord": 2, "hard_bin": 1, "soft_bin": 1, "passed": True,
-             "test_count": 1, "test_time": 100, "retest_num": 0},
+             "test_count": 1, "test_time": 100, "retest_num": 0, "retest_flag": 0},
         ]
     )
     # retest=1: only die (1,1) retested — now passed=True
@@ -116,7 +119,7 @@ def test_parts_final_takes_latest_retest(tmp_path):
         [
             {"part_id": "L_W_0", "part_txt": "", "lot_id": "LOT1", "wafer_id": "W1", "head_num": 1, "site_num": 1,
              "x_coord": 1, "y_coord": 1, "hard_bin": 1, "soft_bin": 1, "passed": True,
-             "test_count": 1, "test_time": 100, "retest_num": 1},
+             "test_count": 1, "test_time": 100, "retest_num": 1, "retest_flag": 0},
         ]
     )
     conn = _setup_conn(tmp_path)
@@ -148,3 +151,35 @@ def test_setup_views_raises_on_empty_dir_naming_the_resolved_path(tmp_path):
     conn = duckdb.connect(":memory:")
     with pytest.raises(RuntimeError, match=re.escape(str(tmp_path.resolve()))):
         setup_views(conn, tmp_path)
+
+
+def test_parts_final_excludes_null_retest_flag(tmp_path):
+    """Files written without flags (NULL) never reach the final views."""
+    _write_parts_parquet(
+        tmp_path / "parts" / "product=PROD" / "test_category=CP" / "sub_process=" /
+        "lot_id=LOT1" / "wafer_id=W1" / "retest=0" / "data.parquet",
+        [{"part_id": "P0", "part_txt": "", "lot_id": "LOT1", "wafer_id": "W1",
+          "head_num": 1, "site_num": 1, "x_coord": 1, "y_coord": 1, "hard_bin": 1,
+          "soft_bin": 1, "passed": True, "test_count": 1, "test_time": 1,
+          "retest_num": 0, "retest_flag": None}])
+    conn = _setup_conn(tmp_path)
+    assert conn.execute("SELECT COUNT(*) FROM parts").fetchone()[0] == 1
+    assert conn.execute("SELECT COUNT(*) FROM parts_final").fetchone()[0] == 0
+
+
+def test_removed_tables_and_views_are_not_registered(tmp_path):
+    _write_parts(tmp_path)
+    registered = setup_views(duckdb.connect(":memory:"), tmp_path)
+    assert not {"wafers", "chipid", "chipid_final", "chipid_package"} & set(registered)
+
+
+def test_workspace_example_mirrors_mounts():
+    """query.py.example's materialize specs must not reference removed pieces."""
+    ws = Path(__file__).resolve().parents[1] / "workspace"
+    text = (ws / "query.py.example").read_text(encoding="utf-8")
+    for gone in ("_DEDUP_UNIT", "_FT_IDENTITY", "chipid", "FROM wafers", "ROW_NUMBER"):
+        assert gone not in text, gone
+    assert text.count("WHERE retest_flag = 0") == 2   # parts_final + test_data_final
+    for f in ws.glob("*.py"):
+        if f.name != "query.py":                # query.py is the user's own copy
+            assert "chipid" not in f.read_text(encoding="utf-8"), f.name

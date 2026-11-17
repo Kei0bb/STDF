@@ -10,7 +10,7 @@ import pyarrow.parquet as pq
 
 from stdf_platform.config import StorageConfig
 from stdf_platform.parser import STDFData
-from stdf_platform.storage import ParquetStorage, TEST_DATA_SCHEMA
+from stdf_platform.storage import ParquetStorage
 from stdf_platform.mounts import setup_views
 
 
@@ -104,71 +104,51 @@ def test_second_retest_demotes_again(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# FT keying: x=y=-32768, identity is part_txt (falling back to part_serial
-# when the barcode is empty). Demote must not cross package boundaries.
+# FT keying: x=y=-32768, package identity is the eFuse chip_key ONLY. Barcodes
+# (part_txt / part_serial) and the per-file part_id are never identity; a
+# package without chip_key is unique to its run and is never demoted later.
 # ---------------------------------------------------------------------------
 
-def test_ft_keying_distinct_part_txt(tmp_path):
+def _ft_data(chip_keys, lot_id="LOTFT", part_txt="SAME"):
+    """One FT run; one package per entry of chip_keys ('' = no eFuse). Every
+    package shares part_txt / part_serial / part_id numbering on purpose."""
+    parts = [
+        {"part_id": f"P{i}", "lot_id": lot_id, "wafer_id": "", "part_txt": part_txt,
+         "part_serial": "SER", "chip_key": key,
+         "head_num": 1, "site_num": 1, "x_coord": -32768, "y_coord": -32768,
+         "hard_bin": 1, "soft_bin": 1, "passed": True, "test_count": 1, "test_time": 100}
+        for i, key in enumerate(chip_keys)
+    ]
+    test_results = [
+        {"lot_id": lot_id, "wafer_id": "", "part_id": f"P{i}",
+         "test_num": 1, "head_num": 1, "site_num": 1, "result": 1.0, "passed": True}
+        for i in range(len(chip_keys))
+    ]
+    return _make_stdf_data(lot_id, "", parts=parts, test_results=test_results)
+
+
+def _ft_run0_flags(tmp_path, runs):
+    """Ingest `runs` (lists of chip_keys) in order; return run0's retest_flag per
+    package, keyed by chip_key (or P<i> when it has none)."""
     storage = _make_storage(tmp_path)
-    lot_id, wafer_id = "LOTFT", ""
-
-    def ft_data(part_txts):
-        parts = [
-            {"part_id": f"P{i}", "lot_id": lot_id, "wafer_id": wafer_id, "part_txt": txt,
-             "head_num": 1, "site_num": 1, "x_coord": -32768, "y_coord": -32768,
-             "hard_bin": 1, "soft_bin": 1, "passed": True, "test_count": 1, "test_time": 100}
-            for i, txt in enumerate(part_txts)
-        ]
-        test_results = [
-            {"lot_id": lot_id, "wafer_id": wafer_id, "part_id": f"P{i}",
-             "test_num": 1, "head_num": 1, "site_num": 1, "result": 1.0, "passed": True}
-            for i in range(len(part_txts))
-        ]
-        return _make_stdf_data(lot_id, wafer_id, parts=parts, test_results=test_results)
-
-    data0 = ft_data(["AAA", "BBB"])
-    storage.save_stdf_data(data0, product="PROD", test_category="FT", source_file="run0.stdf")
-
-    data1 = ft_data(["AAA"])  # re-measure package AAA only
-    storage.save_stdf_data(data1, product="PROD", test_category="FT", source_file="run1.stdf")
-
-    wdir = _wafer_dir(tmp_path, wafer_id, test_category="FT", lot_id=lot_id)
+    for n, keys in enumerate(runs):
+        storage.save_stdf_data(_ft_data(keys), product="PROD", test_category="FT",
+                               source_file=f"run{n}.stdf")
+    wdir = _wafer_dir(tmp_path, "", test_category="FT", lot_id="LOTFT")
     run0 = _read_test_data(wdir / "retest=0" / "data.parquet").to_pydict()
-    flags_by_txt = {t: f for t, f in zip(run0["part_txt"], run0["retest_flag"])}
-    assert flags_by_txt["AAA"] == 1
-    assert flags_by_txt["BBB"] == 0
+    return {k or p: f for k, p, f in zip(run0["chip_key"], run0["part_id"], run0["retest_flag"])}
 
 
-def test_empty_barcode_ft_demotes_only_same_serial(tmp_path):
-    """part_txt 空でも PRR.PART_ID (part_serial) でパッケージを区別する。"""
-    storage = _make_storage(tmp_path)
-    wafer_dir = (tmp_path / "test_data" / "product=P" / "test_category=FT"
-                 / "sub_process=FT1" / "lot_id=FL" / "wafer_id=")
-    old = wafer_dir / "retest=0" / "data.parquet"
-    old.parent.mkdir(parents=True, exist_ok=True)
+def test_ft_overlay_keyed_by_chip_key(tmp_path):
+    # run1 re-measures only EF|A, at a different position (P0 here, P1 in run0)
+    flags = _ft_run0_flags(tmp_path, [["EF|B", "EF|A", "EF|C"], ["EF|A"]])
+    assert flags == {"EF|B": 0, "EF|A": 1, "EF|C": 0}
 
-    def rows(serial, flag):
-        return {"lot_id": "FL", "wafer_id": "", "part_id": f"FL__{serial}",
-                "part_txt": "", "part_serial": serial, "x_coord": -32768,
-                "y_coord": -32768, "test_num": 1, "test_name": "T",
-                "rec_type": "PTR", "lo_limit": 0.0, "hi_limit": 1.0, "units": "V",
-                "result": 1.0, "passed": "P", "retest_num": 0, "pin_num": None,
-                "pin_name": None, "exec_seq": 0, "retest_flag": flag}
 
-    pq.write_table(pa.table({k: [v] for k, v in rows("SER0", 0).items()},
-                            schema=TEST_DATA_SCHEMA), old)
-    t = pq.ParquetFile(old).read()
-    pq.write_table(pa.concat_tables([t, pa.Table.from_pylist(
-        [rows("SER1", 0)], schema=TEST_DATA_SCHEMA)]), old)
-
-    storage._demote_superseded(
-        wafer_dir, new_keys={("", -32768, -32768, "SER1", 1, None)}, up_to_retest=1,
-    )
-
-    updated = pq.ParquetFile(old).read()
-    flags = dict(zip(updated["part_serial"].to_pylist(),
-                     updated["retest_flag"].to_pylist()))
-    assert flags == {"SER0": 0, "SER1": 1}
+def test_ft_without_chip_key_is_never_demoted(tmp_path):
+    # equal part_txt, part_serial and part_id in both runs -> still no overlay
+    flags = _ft_run0_flags(tmp_path, [["", ""], [""]])
+    assert flags == {"P0": 0, "P1": 0}
 
 
 # ---------------------------------------------------------------------------

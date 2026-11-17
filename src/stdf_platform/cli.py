@@ -1,8 +1,6 @@
 """CLI interface for STDF Platform."""
 
 import sys
-import gzip
-import tempfile
 import shutil
 from pathlib import Path
 
@@ -66,16 +64,20 @@ def main(ctx, config: Path | None, env: str | None):
 @click.option("--product", "-p", help="Product name (required unless --from-path)")
 @click.option("--sub-process", "-s", help="Sub-process (CP11, FT2, etc. - default: from STDF MIR.TEST_COD)")
 @click.option("--from-path", is_flag=True, help="Auto-detect product from file path (e.g. .../SCT101A/CP/...)")
+@click.option("--allow-truncated", is_flag=True,
+              help="Ingest a file that ends inside a record, keeping only its complete records")
 @click.option("--verbose", "-v", is_flag=True, help="Verbose output")
 @click.pass_context
-def ingest(ctx, stdf_file: Path, product: str | None, sub_process: str | None, from_path: bool, verbose: bool):
+def ingest(ctx, stdf_file: Path, product: str | None, sub_process: str | None, from_path: bool,
+           allow_truncated: bool, verbose: bool):
     """
     Ingest an STDF file into the data platform.
 
-    STDF_FILE: Path to the STDF file to ingest
+    STDF_FILE: Path to the STDF file to ingest (.stdf/.std, optionally .gz)
 
     Product is specified via -p or auto-detected with --from-path.
     Sub-process is determined from STDF MIR.TEST_COD (e.g. CP1, FT2).
+    Exits 1 if the file could not be ingested.
     """
     config: Config = ctx.obj["config"]
     config.ensure_directories()
@@ -99,54 +101,96 @@ def ingest(ctx, stdf_file: Path, product: str | None, sub_process: str | None, f
     console.print(f"  Product: {product}")
     console.print()
 
-    temp_file = None
     try:
-        # Handle gzip files
-        file_to_parse = stdf_file
-        if stdf_file.suffix.lower() == ".gz":
-            console.print("  [dim]Decompressing .gz file...[/dim]")
-            temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".stdf", mode="wb")
-            with gzip.open(stdf_file, "rb") as f_in:
-                shutil.copyfileobj(f_in, temp_file)
-            temp_file.close()
-            file_to_parse = Path(temp_file.name)
-            console.print("  [green]✓[/green] Decompressed")
-
-        # Using isolated subprocess for parsing and saving
-        # 4th element (ttype) is not used by the worker; it determines sub_process internally from the STDF file
-        to_ingest = [(None, file_to_parse, product, "")]
+        # Isolated subprocess for parsing and saving. The worker gunzips .gz
+        # itself and stores the ORIGINAL basename as source_file.
+        # 4th element (ttype) is not used by the worker; sub_process comes from
+        # MIR.TEST_COD unless --sub-process overrides it.
+        to_ingest = [(None, stdf_file, product, "")]
         sync_manager = SyncManager(config.storage.data_dir / "sync_history.json")
-        _run_ingest_batch(config, sync_manager, to_ingest, cleanup=False, verbose=verbose)
-        console.print(f"\n[green]✓[/green] Successfully ingested {stdf_file.name}")
-
+        _, failures = _run_ingest_batch(
+            config, sync_manager, to_ingest, cleanup=False, verbose=verbose,
+            allow_truncated=allow_truncated, sub_process=sub_process,
+        )
     except Exception as e:
         console.print(f"[red]Error:[/red] {e}")
         if verbose:
             console.print_exception()
         sys.exit(1)
-    finally:
-        # Clean up temp file
-        if temp_file:
-            try:
-                Path(temp_file.name).unlink()
-            except Exception:
-                pass
+
+    if failures:
+        console.print(f"[red]Error:[/red] {stdf_file.name}: {failures[0].error}")
+        sys.exit(1)
+    console.print(f"\n[green]✓[/green] Successfully ingested {stdf_file.name}")
+
+
+_STDF_SUFFIXES = (".stdf", ".std", ".stdf.gz", ".std.gz")
+
+
+def _collect_ingest_files(directory: Path, glob: str | None, recursive: bool) -> list[Path]:
+    """Files for `ingest-all`, sorted.
+
+    Default selection: *.stdf, *.std, *.stdf.gz, *.std.gz (case-insensitive).
+    `glob` overrides it. `recursive` walks subdirectories but never enters one
+    whose name starts with `_` (e.g. downloads/_corrupt).
+    """
+    def match(name: str) -> bool:
+        return name.lower().endswith(_STDF_SUFFIXES)
+
+    found: list[Path] = []
+    if glob is not None:
+        candidates = directory.rglob(glob) if recursive else directory.glob(glob)
+        for p in candidates:
+            rel_dirs = p.relative_to(directory).parts[:-1]
+            if recursive and any(d.startswith("_") for d in rel_dirs):
+                continue
+            if p.is_file():
+                found.append(p)
+    elif recursive:
+        import os
+        for root, dirs, names in os.walk(directory):
+            dirs[:] = [d for d in dirs if not d.startswith("_")]
+            found.extend(Path(root) / n for n in names if match(n))
+    else:
+        found = [p for p in directory.iterdir() if p.is_file() and match(p.name)]
+    return sorted(found)
+
+
+def _recover_pending(config) -> None:
+    """Repair lot groups left inconsistent by an interrupted ingest.
+
+    Runs in the parent process before any worker starts.
+    """
+    from .storage import ParquetStorage
+
+    repaired = ParquetStorage(config.storage).recover_pending()
+    if repaired:
+        console.print(f"  [yellow]Recovered {repaired} lot group(s) from an interrupted ingest[/yellow]")
 
 
 @main.command("ingest-all")
 @click.argument("directory", type=click.Path(exists=True, file_okay=False, path_type=Path))
 @click.option("--product", "-p", required=True, help="Product name")
-@click.option("--glob", "-g", default="*.stdf*", show_default=True, help="File glob pattern")
+@click.option("--glob", "-g", default=None,
+              help="File glob pattern (default: *.stdf, *.std, *.stdf.gz, *.std.gz, case-insensitive)")
+@click.option("--recursive", "-r", is_flag=True,
+              help="Also walk subdirectories (directories starting with '_' are skipped)")
 @click.option("--workers", "-w", default=4, show_default=True, help="Concurrent worker count")
 @click.option("--timeout", default=300, show_default=True, help="Per-file timeout (seconds)")
 @click.option("--force", "-f", is_flag=True, help="Re-ingest files even if already ingested")
+@click.option("--allow-truncated", is_flag=True,
+              help="Ingest files that end inside a record, keeping only their complete records")
 @click.option("--verbose", "-v", is_flag=True, help="Verbose output")
 @click.pass_context
-def ingest_all(ctx, directory: Path, product: str, glob: str, workers: int, timeout: int, force: bool, verbose: bool):
+def ingest_all(ctx, directory: Path, product: str, glob: str | None, recursive: bool, workers: int,
+               timeout: int, force: bool, allow_truncated: bool, verbose: bool):
     """Ingest all STDF files in a directory using a concurrent worker pool.
 
     Already-ingested files are skipped automatically — safe to re-run after
-    an interrupted ingest. Use --force to re-ingest everything.
+    an interrupted ingest. Use --force to re-ingest everything. Each file is
+    recorded as done as soon as it succeeds. Corrupt / non-STDF / truncated
+    files are reported as failures (not recorded) and the batch continues;
+    the exit code is 1 if any file failed.
 
     DIRECTORY: Path to directory containing STDF files.
 
@@ -157,9 +201,10 @@ def ingest_all(ctx, directory: Path, product: str, glob: str, workers: int, time
     config: Config = ctx.obj["config"]
     config.ensure_directories()
 
-    all_files = sorted(directory.glob(glob))
+    all_files = _collect_ingest_files(directory, glob, recursive)
     if not all_files:
-        console.print(f"[yellow]No files matching '{glob}' in {directory}[/yellow]")
+        pattern = glob or ", ".join("*" + x for x in _STDF_SUFFIXES)
+        console.print(f"[yellow]No files matching '{pattern}' in {directory}[/yellow]")
         return
 
     history = IngestHistory(config.storage.data_dir / "ingest_history.json")
@@ -198,15 +243,18 @@ def ingest_all(ctx, directory: Path, product: str, glob: str, workers: int, time
 
     to_ingest = [(None, f, product, "") for f in stdf_files]
     sync_manager = SyncManager(config.storage.data_dir / "sync_history.json")
-    successes, failures = _run_ingest_batch(
+    # History is written per file as each one succeeds (atomic), so a crash
+    # mid-batch keeps the progress made so far.
+    _, failures = _run_ingest_batch(
         config, sync_manager, to_ingest,
         cleanup=False, verbose=verbose,
         timeout=timeout, max_workers=workers,
+        allow_truncated=allow_truncated,
+        on_done=lambda r: history.mark_done(r.local_path),
     )
 
-    # Record successes so they are skipped on next run
-    if successes:
-        history.mark_done_batch([r.local_path for r in successes])
+    if failures:
+        sys.exit(1)
 
 
 # ── db group ──────────────────────────────────────────────────────
@@ -223,7 +271,8 @@ def db():
 def lots(ctx, lot: str | None):
     """List ingested lots.
 
-    The Job column shows the latest run's test program as `name (rev)`. If
+    One row per (product, test category, sub-process, lot): CP1 and CP2 (or
+    FT1 and FT2) of one lot are never merged. The Job column shows the latest run's test program as `name (rev)`. If
     the lot ran under more than one distinct (job_name, job_rev) — i.e. the
     test program changed mid-lot — a `⚠×N` marker is appended (N = number of
     distinct program versions). Use `stdf db programs --lot <ID>` to see the
@@ -241,6 +290,7 @@ def lots(ctx, lot: str | None):
 
             table = Table(title="Lot Summary")
             table.add_column("Lot ID", style="cyan")
+            table.add_column("Sub")
             table.add_column("Part Type")
             table.add_column("Job")
             table.add_column("Wafers", justify="right")
@@ -254,6 +304,7 @@ def lots(ctx, lot: str | None):
                     job_cell += f" [red]⚠×{row.job_variant_count}[/red]"
                 table.add_row(
                     row.lot_id,
+                    row.sub_process or row.test_category or "",
                     row.part_type or "",
                     job_cell,
                     _cell(row.wafer_count, "0"),
@@ -291,6 +342,7 @@ def programs(ctx, lot: str | None):
 
             table = Table(title="Test Program History")
             table.add_column("Lot ID", style="cyan")
+            table.add_column("Sub")
             table.add_column("Wafer")
             table.add_column("Retest", justify="right")
             table.add_column("Job")
@@ -301,6 +353,7 @@ def programs(ctx, lot: str | None):
             for row in df.itertuples():
                 table.add_row(
                     row.lot_id,
+                    row.sub_process or "",
                     row.wafer_id or "-",
                     str(row.retest_num),
                     row.job_name or "",
@@ -497,34 +550,64 @@ def _run_ingest_batch(
     verbose: bool,
     timeout: int = 300,
     max_workers: int = 4,
+    allow_truncated: bool = False,
+    on_done=None,
+    sub_process: str | None = None,
 ):
     """Ingest a batch of STDF files using a concurrent subprocess worker pool.
+
+    `on_done(result)` runs once per successful file as soon as it finishes
+    (e.g. to persist ingest history per file).
+
+    Every ingest path (ingest, ingest-all, fetch) comes through here, so it
+    first finishes any flag recomputation an interrupted ingest left behind.
 
     Returns:
         (successes, failures) lists of IngestResult.
     """
-    from .worker import run_ingest_pool
-    from .atomic import atomic_write_json
+    from .storage import ParquetStorage
 
-    # save=False: the callback runs once per file; rewriting the whole
-    # sync_history.json per file is O(N^2). The single flush is in a finally
-    # because it MUST also run on abort — run_ingest_pool re-raises through
-    # future.result() and Ctrl+C raises KeyboardInterrupt. Without it an
-    # aborted run leaves every already-ingested file marked ingested=False, so
-    # the next fetch re-ingests it and auto-increments retest_num into a bogus
-    # retest={n} partition (run_ingest_pool's on_success docstring promises
-    # exactly this durability).
-    try:
-        successes, failures = run_ingest_pool(
-            files=to_ingest,
-            data_dir=config.storage.data_dir,
-            compression=config.processing.compression,
-            max_workers=max_workers,
-            timeout=timeout,
-            on_success=lambda r: sync_manager.mark_ingested(r.remote_path, save=False),
-        )
-    finally:
-        sync_manager.save()
+    def _busy():
+        console.print("  [yellow]Another ingest is running on this data dir; waiting...[/yellow]")
+
+    # One ingest batch per store at a time (flags, retest numbers and
+    # _pending recovery read-then-write lot files). Recovery runs both before
+    # the batch and after it, so a file killed by the timeout does not leave
+    # *_final double-counting until the next night's run.
+    with ParquetStorage(config.storage).ingest_lock(on_wait=_busy):
+        _recover_pending(config)
+        try:
+            from .worker import run_ingest_pool
+            from .atomic import atomic_write_json
+
+            # save=False: the callback runs once per file; rewriting the whole
+            # sync_history.json per file is O(N^2). The single flush is in a finally
+            # because it MUST also run on abort — run_ingest_pool re-raises through
+            # future.result() and Ctrl+C raises KeyboardInterrupt. Without it an
+            # aborted run leaves every already-ingested file marked ingested=False, so
+            # the next fetch re-ingests it and auto-increments retest_num into a bogus
+            # retest={n} partition (run_ingest_pool's on_success docstring promises
+            # exactly this durability).
+            def _on_success(r):
+                sync_manager.mark_ingested(r.remote_path, save=False)
+                if on_done is not None:
+                    on_done(r)
+
+            try:
+                successes, failures = run_ingest_pool(
+                    files=to_ingest,
+                    data_dir=config.storage.data_dir,
+                    compression=config.processing.compression,
+                    max_workers=max_workers,
+                    timeout=timeout,
+                    on_success=_on_success,
+                    allow_truncated=allow_truncated,
+                    sub_process=sub_process,
+                )
+            finally:
+                sync_manager.save()
+        finally:
+            _recover_pending(config)
 
     # Structured failure record for automation (always written, even if empty).
     atomic_write_json(
@@ -881,7 +964,8 @@ def export_lot(ctx, lot_ids: tuple, output: Path, pivot: bool):
     """
     Export test results for specified lots to CSV (JMP-ready).
 
-    LOT_IDS: One or more lot IDs to export
+    LOT_IDS: One or more lot IDs to export. Sub-processes (CP1/CP2, FT1/FT2)
+        stay separate rows, told apart by the sub_process column.
     OUTPUT: Output CSV file path
 
     Example:
@@ -906,6 +990,8 @@ def export_lot(ctx, lot_ids: tuple, output: Path, pivot: bool):
                 sql = f"""
                 SELECT
                     td.lot_id,
+                    td.test_category,
+                    COALESCE(td.sub_process, '') AS sub_process,
                     td.wafer_id,
                     td.part_id,
                     td.die_key,
@@ -918,11 +1004,14 @@ def export_lot(ctx, lot_ids: tuple, output: Path, pivot: bool):
                     td.result
                 FROM test_data_final td
                 JOIN parts_final p
-                    ON  td.lot_id   = p.lot_id
-                    AND td.wafer_id = p.wafer_id
-                    AND td.die_key  = p.die_key
+                    ON  td.product       = p.product
+                    AND td.test_category = p.test_category
+                    AND td.sub_process   IS NOT DISTINCT FROM p.sub_process
+                    AND td.lot_id        = p.lot_id
+                    AND td.wafer_id      = p.wafer_id
+                    AND td.die_key       = p.die_key
                 WHERE td.lot_id IN ({placeholders})
-                ORDER BY td.lot_id, td.wafer_id, td.die_key, td.test_name
+                ORDER BY td.lot_id, td.test_category, td.sub_process, td.wafer_id, td.die_key, td.test_name
                 """
                 long_df = s.q(sql, params)
                 if long_df.empty:
@@ -932,7 +1021,8 @@ def export_lot(ctx, lot_ids: tuple, output: Path, pivot: bool):
                     # されたテストだけを新しい run から採るので、1ダイの行が
                     # run をまたいで別々の part_id を持ち、part_id を index に
                     # 入れると同じダイが NaN 補完された2行に割れる。
-                    index_cols = ["lot_id", "wafer_id", "die_key",
+                    index_cols = ["lot_id", "test_category", "sub_process",
+                                  "wafer_id", "die_key",
                                   "x_coord", "y_coord", "hard_bin", "soft_bin",
                                   "part_passed"]
                     df = long_df.pivot_table(
@@ -945,6 +1035,8 @@ def export_lot(ctx, lot_ids: tuple, output: Path, pivot: bool):
                 sql = f"""
                 SELECT
                     td.lot_id,
+                    td.test_category,
+                    COALESCE(td.sub_process, '') AS sub_process,
                     td.wafer_id,
                     td.part_id,
                     p.x_coord,
@@ -960,11 +1052,14 @@ def export_lot(ctx, lot_ids: tuple, output: Path, pivot: bool):
                     td.units
                 FROM test_data_final td
                 JOIN parts_final p
-                    ON  td.lot_id   = p.lot_id
-                    AND td.wafer_id = p.wafer_id
-                    AND td.die_key  = p.die_key
+                    ON  td.product       = p.product
+                    AND td.test_category = p.test_category
+                    AND td.sub_process   IS NOT DISTINCT FROM p.sub_process
+                    AND td.lot_id        = p.lot_id
+                    AND td.wafer_id      = p.wafer_id
+                    AND td.die_key       = p.die_key
                 WHERE td.lot_id IN ({placeholders})
-                ORDER BY td.lot_id, td.wafer_id, td.die_key, td.test_num
+                ORDER BY td.lot_id, td.test_category, td.sub_process, td.wafer_id, td.die_key, td.test_num
                 """
                 df = s.q(sql, params)
 

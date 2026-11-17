@@ -9,7 +9,7 @@
 
 # %% Setup
 from stdf_platform.analysis import AnalysisSession
-from stdf_platform.mounts import _DEDUP_UNIT, die_key_expr   # use_lot() が使う
+from stdf_platform.mounts import die_key_expr   # use_lot() が使う
 
 # 引数なし = config.yaml の storage.data_dir を解決(相対パスは config.yaml の
 # 置き場所基準。cwd がどこでも同じストアを指す)。別ストアを見るときだけ
@@ -38,7 +38,7 @@ LOT_ID: str | None = None   # use_lot() が設定。各セルでも上書き可�
 
 # %% [markdown]
 # ## 名前付きクエリ
-# ファイル1個 = クエリ1個。source 列: package = 同梱 / personal = 直下の sql/
+# ファイル1個 = クエリ1個(リポジトリ直下の `sql/`)。
 
 # %% どんなクエリがあるか
 s.queries()
@@ -68,16 +68,17 @@ q("SELECT * FROM lots ORDER BY start_time DESC")
 
 # %% ウェーハ歩留まり(gross die 適用済み)
 LOT_ID = "LOT001"
-q("SELECT * FROM wafer_yield_final WHERE lot_id = ? ORDER BY wafer_id", [LOT_ID])
+# サブプロセス(CP1/CP2…)は別行。混ぜて集計しないこと。
+q("SELECT * FROM wafer_yield_final WHERE lot_id = ? ORDER BY sub_process, wafer_id", [LOT_ID])
 
 # %% Fail テスト上位(sql/03_test/fail_ranking と同じ定義をその場で)
 q("""
-    SELECT test_num, test_name,
+    SELECT sub_process, test_num, test_name,
            COUNT(*) AS total,
            SUM(CASE WHEN passed = 'F' THEN 1 ELSE 0 END) AS fails,
            ROUND(100.0 * SUM(CASE WHEN passed = 'F' THEN 1 ELSE 0 END) / COUNT(*), 2) AS fail_pct
     FROM test_data_final WHERE lot_id = ?
-    GROUP BY test_num, test_name
+    GROUP BY sub_process, test_num, test_name
     HAVING fails > 0 ORDER BY fail_pct DESC LIMIT 20
 """, [LOT_ID])
 
@@ -91,21 +92,13 @@ q("SELECT * FROM runs WHERE lot_id = ? ORDER BY start_time", [LOT_ID])
 
 # %% use_lot / use_all
 _FINAL_SPECS = {
+    # mounts.setup_views と同じ定義: retest_flag = 0 は ingest 時に決めた「最新」の印。
     "parts_final": ("parts", f"""
-        SELECT * EXCLUDE (rn) FROM (
-            SELECT *, {die_key_expr()} AS die_key, ROW_NUMBER() OVER (
-                PARTITION BY lot_id, {_DEDUP_UNIT} ORDER BY retest_num DESC) AS rn
-            FROM parts {{where}}
-        ) WHERE rn = 1"""),
+        SELECT *, {die_key_expr()} AS die_key
+        FROM (SELECT * FROM parts WHERE retest_flag = 0) {{where}}"""),
     "test_data_final": ("test_data", f"""
         SELECT *, {die_key_expr()} AS die_key
         FROM (SELECT * FROM test_data WHERE retest_flag = 0) {{where}}"""),
-    "chipid_final": ("chipid", """
-        SELECT * EXCLUDE (rn) FROM (
-            SELECT *, ROW_NUMBER() OVER (
-                PARTITION BY lot_id, efuse_raw ORDER BY retest_num DESC) AS rn
-            FROM chipid {where}
-        ) WHERE rn = 1"""),
 }
 
 

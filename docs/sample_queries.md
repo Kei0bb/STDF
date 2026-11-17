@@ -1,7 +1,8 @@
 # サンプル SQL クエリ集
 
-`schema.md` で定義された 5 テーブル（`lots` / `wafers` / `parts` / `test_data` /
-`chipid`）を DuckDB ビュー経由で検索する際のリファレンスです。
+`schema.md` で定義された Parquet テーブル（`runs` / `parts` / `test_data`）と、そこから
+派生するビュー（`lots` / `parts_final` / `test_data_final` / `wafer_yield_final`）を
+DuckDB 経由で検索する際のリファレンスです。
 
 > [!TIP]
 > **まず名前付きクエリを見てください（`s.queries()`）。** 定番の集計（ロット別歩留まり、
@@ -25,18 +26,28 @@
 > [!IMPORTANT]
 > **名前付きクエリに無い解析は原則 `*_final` ビューを使ってください。**
 > 生テーブル（`parts` / `test_data`）はリテストの**全試行**を含むため、そのまま
-> 集計すると二重計上になります。`parts_final` / `test_data_final` /
-> `chipid_final` は「ダイ/パッケージごとに最新リテストのみ」へ重複排除済みです。
-> `wafers` の `part_count` / `good_count` は WRR の報告値（リテストは部分母集団・
-> FT には存在しない）なので、**歩留りは `parts_final` から算出**します。
+> 集計すると二重計上になります。`parts_final` / `test_data_final` は
+> 「ダイ/パッケージごとに最新の測定のみ」へ重複排除済みです。
+> `runs.part_count` / `good_count`（WRR 値）は報告値（リテストは部分母集団・
+> FT には NULL）なので、**歩留りは `wafer_yield_final`（`parts_final` 由来）で見ます**。
 >
-> **`test_data_final` の行セマンティクスに注意**: 重複排除は ingest 時点で
-> 付与される `retest_flag`（`storage.py`）によるもので、`test_data_final` は
-> `WHERE retest_flag = 0` の単純フィルタです（`parts_final` / `chipid_final` は
-> 従来どおり `ROW_NUMBER()` ウィンドウ）。そのため、旧実装と異なり **(die, test,
+> **sub_process を混ぜない**: 同じロットの CP1 / CP2（FT1 / FT2）は別の測定です。
+> `lots` は `(product, test_category, sub_process, lot_id)` ごとに 1 行なので、
+> `lot_id` だけで `parts_final` 等と結合すると他の sub_process の行が重複して混ざります。
+> ロット単位の結合・集計では `product` / `test_category` / `sub_process` もキーに含めてください。
+>
+> **`parts_final` / `test_data_final` の行セマンティクスに注意**: 重複排除は ingest 時点で
+> 付与される `retest_flag`（`storage.py`）によるもので、どちらも
+> `WHERE retest_flag = 0` の単純フィルタです（ウィンドウ関数は使いません）。
+> `test_data_final` では **(die, test,
 > pin) につき複数行が残ることがあります**（例: OTP ダンプの 1 test_num に対する
 > 512 個のループ計測）。反復回を区別するには `exec_seq`（run 内 0 始まり出現順）
 > を使い、1 テストにつき 1 値が欲しい場合は `exec_seq` で絞るか集約してください。
+>
+> **`passed` / `result` / limit の NULL**: STDF のフラグで「未実行」「合否無効」の行は
+> `passed` が NULL、「値無効」は `result` が NULL、「limit なし/無効」は `lo_limit` / `hi_limit`
+> が NULL です（生のフラグは `test_data.test_flg` / `parts.part_flg`）。Fail 率は
+> `passed IS NOT NULL` を母数に、Cpk は `result IS NOT NULL` の行で計算してください。
 
 ## 実行方法
 
@@ -57,14 +68,11 @@ LOT_ID = "E6A773.00"
 `to_csv(sql, output="output.csv")`（DuckDB `COPY`、メモリに載せない）。
 
 > [!TIP]
-> **`test_data_final` は遅くありません**：ingest 時に付与される `retest_flag`
+> **`*_final` は遅くありません**：ingest 時に付与される `retest_flag`
 > による単純フィルタなので、`test_name LIKE` などロット絞り込みクエリも通常の
-> Parquet スキャンと同じ速さです（`test_data_final` を毎クエリ `ROW_NUMBER()` で
-> 再計算していた旧実装では、ロット単位の `test_name` 検索が実データで 12 分以上
-> かかっていました）。
+> Parquet スキャンと同じ速さです。
 >
-> **`parts_final` / `chipid_final` は引き続き `ROW_NUMBER()` ウィンドウ**です
-> （小テーブルなのでコストは無視できる範囲）。同じロットへ繰り返しクエリするなら
+> **`parts_final` も同じ `retest_flag = 0` のフィルタ**です。同じロットへ繰り返しクエリするなら
 > `use_lot()` / `use_all()`（`workspace/query.py` のセル）で `*_final` を
 > メモリ上に materialize できます。同じ生ビュークエリを繰り返し使うなら
 > `sql/` への昇格を検討してください（`sql/README.md`）。
@@ -96,21 +104,21 @@ con = duckdb.connect(":memory:")
 setup_views(con, Path("data"))   # gross_die_map は config.yaml 由来（省略可）
 ```
 
-手動で再現する場合は、Parquet 実体を持つ5テーブル（`lots` は含まない）を glob 登録し、
-`lots` は `runs` から集約した VIEW として作ります:
+手動で再現する場合は、Parquet 実体を持つ 3 テーブル（`lots` は含まない）を glob 登録し、
+`lots` は `runs` から集約した VIEW として作ります（`setup_views()` は旧ファイルに無い列を
+NULL で補うアームも付けます。必要なら本体の関数を使ってください）:
 
 ```python
 import duckdb
 con = duckdb.connect(":memory:")
 
-for t in ["runs", "wafers", "parts", "test_data", "chipid"]:
-    # test_data alone can mix pre-flag files (no exec_seq/retest_flag columns)
-    # with new ones; union_by_name fills the missing columns with NULL instead
-    # of erroring on schema mismatch.
-    extra = ", union_by_name=true" if t == "test_data" else ""
+for t in ["runs", "parts", "test_data"]:
+    # union_by_name fills columns missing from older files with NULL instead of
+    # erroring on schema mismatch.
     con.execute(f"""
         CREATE OR REPLACE VIEW {t} AS
-        SELECT * FROM read_parquet('data/{t}/**/*.parquet', hive_partitioning=true{extra})
+        SELECT * FROM read_parquet('data/{t}/**/*.parquet',
+                                   hive_partitioning=true, union_by_name=true)
     """)
 
 # lots is NOT its own Parquet table — it's a VIEW aggregated from runs (one
@@ -131,32 +139,24 @@ con.execute("""
     GROUP BY lot_id, product, test_category, sub_process
 """)
 
-# dedup identity: CP=ダイ座標 / FT=パッケージ 2D バーコード
-DEDUP = ("CASE WHEN test_category = 'FT' THEN part_txt "
-         "ELSE CONCAT(wafer_id, '|', x_coord, '|', y_coord) END")
+# ダイ identity: CP=ダイ座標 / FT=eFuse の chip_key（バーコードは使わない）。
+# eFuse の無い FT パッケージは run 固有キーにして、リテスト間で重ねない。
+# 式の単一ソースは mounts.die_key_expr()。
+from stdf_platform.mounts import die_key_expr
 
+# retest_flag は ingest 時に storage.py が書く（0 = そのダイの最新の測定）。
+# ウィンドウ関数ではなく単純な述語なので Parquet スキャンまで押し込まれる。
+# retest_flag IS NULL（フラグ導入前のファイル）は除外される: wipe + 再 ingest が必要。
 con.execute(f"""
     CREATE OR REPLACE VIEW parts_final AS
-    SELECT * EXCLUDE (rn) FROM (
-        SELECT *, ROW_NUMBER() OVER (
-            PARTITION BY lot_id, {DEDUP} ORDER BY retest_num DESC) AS rn
-        FROM parts) WHERE rn = 1
+    SELECT *, {die_key_expr()} AS die_key FROM parts WHERE retest_flag = 0
 """)
-# test_data_final is NOT a window: dedup happens at ingest time (storage.py
-# writes retest_flag per row), so this is a plain predicate filter — cheap,
-# and pushed into the Parquet scan. Rows with retest_flag IS NULL (pre-flag
-# files) are excluded; that store needs a re-ingest.
-con.execute("""
+con.execute(f"""
     CREATE OR REPLACE VIEW test_data_final AS
-    SELECT * FROM test_data WHERE retest_flag = 0
+    SELECT *, {die_key_expr()} AS die_key FROM test_data WHERE retest_flag = 0
 """)
-con.execute("""
-    CREATE OR REPLACE VIEW chipid_final AS
-    SELECT * EXCLUDE (rn) FROM (
-        SELECT *, ROW_NUMBER() OVER (
-            PARTITION BY lot_id, efuse_raw ORDER BY retest_num DESC) AS rn
-        FROM chipid) WHERE rn = 1
-""")
+# wafer_yield_final（gross die 込みの歩留り）は mounts.setup_views() だけが作る。
+# CHIP ID は parts の c0_* / c1_* / chip_status 列で、別ビューは無い。
 ```
 
 ---
@@ -206,7 +206,7 @@ SELECT
     l.lot_id, l.product, l.sub_process, l.job_name, l.job_rev,
     l.tester_type, l.operator,
     -- ダイ情報（最新リテスト）
-    p.part_id, p.wafer_id, p.part_txt,
+    p.part_id, p.wafer_id, p.die_key,
     p.x_coord, p.y_coord, p.hard_bin, p.soft_bin,
     p.passed AS die_passed, p.retest_num,
     -- テスト測定値（最新リテスト）
@@ -214,11 +214,15 @@ SELECT
     td.result, td.lo_limit, td.hi_limit, td.units,
     td.passed AS test_passed
 FROM lots l
-JOIN parts_final p      ON l.lot_id = p.lot_id
+JOIN parts_final p      ON  l.product = p.product AND l.test_category = p.test_category
+                        AND l.sub_process = p.sub_process AND l.lot_id = p.lot_id
 -- part_id はファイル内連番で部分リテスト時に別ダイへ振り直される。die_key で結合する
-JOIN test_data_final td ON p.lot_id = td.lot_id AND p.wafer_id = td.wafer_id AND p.die_key = td.die_key
+-- （sub_process もキーに含める: CP1 と CP2 のダイを混ぜない）
+JOIN test_data_final td ON  p.product = td.product AND p.test_category = td.test_category
+                        AND p.sub_process = td.sub_process AND p.lot_id = td.lot_id
+                        AND p.wafer_id = td.wafer_id AND p.die_key = td.die_key
 WHERE l.lot_id = 'YOUR_LOT_ID'
-ORDER BY p.wafer_id, p.part_id, td.test_num;
+ORDER BY l.sub_process, p.wafer_id, p.part_id, td.test_num;
 ```
 
 > [!TIP]
@@ -280,6 +284,8 @@ ORDER BY start_time;
 ### 2-3. ロット歩留りサマリ（CP / FT 両対応・retest 反映）
 
 `parts_final` から算出するので、CP も FT も同じクエリで正しい最終歩留りが出ます。
+CP1 / CP2 は別行です（`lots` との結合に `sub_process` を含める）。gross die を適用した
+歩留りが欲しいときは `wafer_yield_final`（または名前付きクエリ `lot_yield`）を使います。
 
 ```sql
 SELECT
@@ -289,7 +295,9 @@ SELECT
     ROUND(100.0 * SUM(CASE WHEN p.passed THEN 1 ELSE 0 END)
           / NULLIF(COUNT(*), 0), 2)                       AS yield_pct
 FROM lots l
-JOIN parts_final p ON l.lot_id = p.lot_id
+JOIN parts_final p
+  ON  p.product = l.product AND p.test_category = l.test_category
+  AND p.sub_process = l.sub_process AND p.lot_id = l.lot_id
 GROUP BY l.lot_id, l.product, l.test_category, l.sub_process, l.job_name
 ORDER BY l.product, l.test_category, yield_pct;
 ```
@@ -302,27 +310,27 @@ ORDER BY l.product, l.test_category, yield_pct;
 
 ```sql
 SELECT
-    wafer_id,
+    sub_process, wafer_id,
     COUNT(*)                                             AS dies,
     SUM(CASE WHEN passed THEN 1 ELSE 0 END)              AS good,
     ROUND(100.0 * SUM(CASE WHEN passed THEN 1 ELSE 0 END)
           / NULLIF(COUNT(*), 0), 2)                      AS yield_pct
 FROM parts_final
 WHERE lot_id = 'YOUR_LOT_ID'
-GROUP BY wafer_id
+GROUP BY sub_process, wafer_id
 ORDER BY yield_pct;
 ```
 
 ### 3-2. 歩留り低下ウェーハの抽出（90% 未満）
 
 ```sql
-SELECT wafer_id, COUNT(*) AS dies,
+SELECT sub_process, wafer_id, COUNT(*) AS dies,
        SUM(CASE WHEN passed THEN 1 ELSE 0 END) AS good,
        ROUND(100.0 * SUM(CASE WHEN passed THEN 1 ELSE 0 END)
              / NULLIF(COUNT(*), 0), 2) AS yield_pct
 FROM parts_final
 WHERE lot_id = 'YOUR_LOT_ID'
-GROUP BY wafer_id
+GROUP BY sub_process, wafer_id
 HAVING ROUND(100.0 * SUM(CASE WHEN passed THEN 1 ELSE 0 END)
              / NULLIF(COUNT(*), 0), 2) < 90
 ORDER BY yield_pct;
@@ -330,11 +338,13 @@ ORDER BY yield_pct;
 
 ### 3-3. WRR 報告値 vs 実測（parts）歩留りの突合
 
-`wafers`（WRR）と `parts_final` の歩留りが食い違う＝リテストや欠損の兆候。
+`runs` の WRR 列（テスタ報告の `part_count` / `good_count`。CP のみ）と `parts_final` の
+歩留りが食い違う＝リテストや欠損の兆候。WRR 値は run（ファイル）ごとの報告で、リテストは
+部分母集団なので、最新 run（`retest_num` 最大）を取って比べます。
 
 ```sql
 SELECT
-    w.wafer_id,
+    w.sub_process, w.wafer_id,
     w.good_count                                  AS wrr_good,
     w.part_count                                  AS wrr_total,
     p.good                                        AS parts_good,
@@ -343,15 +353,16 @@ SELECT
     ROUND(100.0 * p.good / NULLIF(p.dies, 0), 2)            AS parts_yield
 FROM (
     SELECT *, ROW_NUMBER() OVER (
-        PARTITION BY lot_id, wafer_id ORDER BY retest_num DESC) AS rn
-    FROM wafers WHERE lot_id = 'YOUR_LOT_ID'
+        PARTITION BY product, test_category, sub_process, lot_id, wafer_id
+        ORDER BY retest_num DESC) AS rn
+    FROM runs WHERE lot_id = 'YOUR_LOT_ID' AND wafer_id <> ''
 ) w
 JOIN (
-    SELECT wafer_id, COUNT(*) AS dies,
+    SELECT sub_process, wafer_id, COUNT(*) AS dies,
            SUM(CASE WHEN passed THEN 1 ELSE 0 END) AS good
     FROM parts_final WHERE lot_id = 'YOUR_LOT_ID'
-    GROUP BY wafer_id
-) p ON w.wafer_id = p.wafer_id
+    GROUP BY sub_process, wafer_id
+) p ON w.sub_process = p.sub_process AND w.wafer_id = p.wafer_id
 WHERE w.rn = 1
 ORDER BY ABS(wrr_yield - parts_yield) DESC;
 ```
@@ -363,7 +374,7 @@ ORDER BY ABS(wrr_yield - parts_yield) DESC;
 ```sql
 SELECT x_coord, y_coord, hard_bin, soft_bin, passed
 FROM parts_final
-WHERE lot_id = 'YOUR_LOT_ID' AND wafer_id = 'YOUR_WAFER_ID'
+WHERE lot_id = 'YOUR_LOT_ID' AND sub_process = 'YOUR_SUB_PROCESS' AND wafer_id = 'YOUR_WAFER_ID'
 ORDER BY y_coord, x_coord;
 ```
 
@@ -376,7 +387,7 @@ WITH d AS (
     SELECT *,
            SQRT(POWER(x_coord, 2) + POWER(y_coord, 2)) AS r
     FROM parts_final
-    WHERE lot_id = 'YOUR_LOT_ID' AND wafer_id = 'YOUR_WAFER_ID'
+    WHERE lot_id = 'YOUR_LOT_ID' AND sub_process = 'YOUR_SUB_PROCESS' AND wafer_id = 'YOUR_WAFER_ID'
 )
 SELECT
     CASE WHEN r <= 50 THEN '1_center'
@@ -400,7 +411,7 @@ ORDER BY zone;
 ```sql
 SELECT part_id, x_coord, y_coord, hard_bin, soft_bin, test_count, test_time
 FROM parts_final
-WHERE lot_id = 'YOUR_LOT_ID' AND wafer_id = 'YOUR_WAFER_ID' AND passed = FALSE
+WHERE lot_id = 'YOUR_LOT_ID' AND sub_process = 'YOUR_SUB_PROCESS' AND wafer_id = 'YOUR_WAFER_ID' AND passed = FALSE
 ORDER BY hard_bin, soft_bin;
 ```
 
@@ -411,7 +422,7 @@ SELECT hard_bin, soft_bin,
        COUNT(*)                                          AS die_count,
        ROUND(COUNT(*) * 100.0 / SUM(COUNT(*)) OVER (), 2) AS pct
 FROM parts_final
-WHERE lot_id = 'YOUR_LOT_ID' AND wafer_id = 'YOUR_WAFER_ID'
+WHERE lot_id = 'YOUR_LOT_ID' AND sub_process = 'YOUR_SUB_PROCESS' AND wafer_id = 'YOUR_WAFER_ID'
 GROUP BY hard_bin, soft_bin
 ORDER BY hard_bin, soft_bin;
 ```
@@ -428,7 +439,7 @@ SELECT
     ROUND(100.0 * SUM(COUNT(*)) OVER (ORDER BY COUNT(*) DESC)
           / SUM(COUNT(*)) OVER (), 2)                         AS cumulative_pct
 FROM parts_final
-WHERE lot_id = 'YOUR_LOT_ID' AND passed = FALSE
+WHERE lot_id = 'YOUR_LOT_ID' AND sub_process = 'YOUR_SUB_PROCESS' AND passed = FALSE
 GROUP BY soft_bin
 ORDER BY die_count DESC;
 ```
@@ -441,7 +452,7 @@ Fail die の上下左右いずれかに別の Fail がある＝クラスタ不�
 WITH f AS (
     SELECT x_coord, y_coord
     FROM parts_final
-    WHERE lot_id = 'YOUR_LOT_ID' AND wafer_id = 'YOUR_WAFER_ID'
+    WHERE lot_id = 'YOUR_LOT_ID' AND sub_process = 'YOUR_SUB_PROCESS' AND wafer_id = 'YOUR_WAFER_ID'
       AND passed = FALSE
 )
 SELECT a.x_coord, a.y_coord,
@@ -478,7 +489,7 @@ SELECT
     ROUND(QUANTILE_CONT(result, 0.25), 4) AS q1,
     ROUND(QUANTILE_CONT(result, 0.75), 4) AS q3
 FROM test_data_final
-WHERE lot_id = 'YOUR_LOT_ID' AND test_name = 'YOUR_TEST_NAME'
+WHERE lot_id = 'YOUR_LOT_ID' AND sub_process = 'YOUR_SUB_PROCESS' AND test_name = 'YOUR_TEST_NAME'
 GROUP BY test_num, test_name, units, lo_limit, hi_limit;
 ```
 
@@ -488,7 +499,7 @@ GROUP BY test_num, test_name, units, lo_limit, hi_limit;
 SELECT part_id, x_coord, y_coord, test_num, test_name,
        result, lo_limit, hi_limit, units
 FROM test_data_final
-WHERE lot_id = 'YOUR_LOT_ID' AND wafer_id = 'YOUR_WAFER_ID' AND passed = 'F'
+WHERE lot_id = 'YOUR_LOT_ID' AND sub_process = 'YOUR_SUB_PROCESS' AND wafer_id = 'YOUR_WAFER_ID' AND passed = 'F'
 ORDER BY test_num, part_id;
 ```
 
@@ -496,14 +507,14 @@ ORDER BY test_num, part_id;
 
 ```sql
 SELECT
-    test_num, test_name,
+    sub_process, test_num, test_name,
     COUNT(*)                                       AS total,
     SUM(CASE WHEN passed = 'F' THEN 1 ELSE 0 END)  AS fail_cnt,
     ROUND(SUM(CASE WHEN passed = 'F' THEN 1 ELSE 0 END)
           * 100.0 / COUNT(*), 2)                   AS fail_pct
 FROM test_data_final
-WHERE lot_id = 'YOUR_LOT_ID'
-GROUP BY test_num, test_name
+WHERE lot_id = 'YOUR_LOT_ID' AND passed IS NOT NULL
+GROUP BY sub_process, test_num, test_name
 HAVING SUM(CASE WHEN passed = 'F' THEN 1 ELSE 0 END) > 0
 ORDER BY fail_pct DESC;
 ```
@@ -511,9 +522,11 @@ ORDER BY fail_pct DESC;
 ### 5-4. 特定ダイの全テスト結果
 
 ```sql
+-- part_id はファイル内連番なので使わない。CP は座標、FT は die_key（parts_final で調べる）
 SELECT test_num, test_name, rec_type, result, lo_limit, hi_limit, units, passed
 FROM test_data_final
-WHERE lot_id = 'YOUR_LOT_ID' AND part_id = 'YOUR_PART_ID'
+WHERE lot_id = 'YOUR_LOT_ID' AND sub_process = 'YOUR_SUB_PROCESS'
+  AND wafer_id = 'YOUR_WAFER_ID' AND x_coord = 0 AND y_coord = 0   -- FT: AND die_key = '...'
 ORDER BY test_num;
 ```
 
@@ -528,7 +541,7 @@ SELECT
     ROUND(100.0 * LEAST(AVG(result) - lo_limit, hi_limit - AVG(result))
           / NULLIF(hi_limit - lo_limit, 0), 2) AS margin_pct
 FROM test_data_final
-WHERE lot_id = 'YOUR_LOT_ID'
+WHERE lot_id = 'YOUR_LOT_ID' AND sub_process = 'YOUR_SUB_PROCESS'
   AND lo_limit IS NOT NULL AND hi_limit IS NOT NULL
   AND rec_type IN ('PTR', 'MPR')
 GROUP BY test_num, test_name, units, lo_limit, hi_limit
@@ -542,14 +555,14 @@ ORDER BY margin_pct;
 WITH stat AS (
     SELECT test_num, AVG(result) AS mu, STDDEV(result) AS sigma
     FROM test_data_final
-    WHERE lot_id = 'YOUR_LOT_ID' AND test_name = 'YOUR_TEST_NAME'
+    WHERE lot_id = 'YOUR_LOT_ID' AND sub_process = 'YOUR_SUB_PROCESS' AND test_name = 'YOUR_TEST_NAME'
     GROUP BY test_num
 )
 SELECT t.part_id, t.x_coord, t.y_coord, t.result,
        ROUND((t.result - s.mu) / NULLIF(s.sigma, 0), 2) AS z_score
 FROM test_data_final t
 JOIN stat s ON t.test_num = s.test_num
-WHERE t.lot_id = 'YOUR_LOT_ID' AND t.test_name = 'YOUR_TEST_NAME'
+WHERE t.lot_id = 'YOUR_LOT_ID' AND t.sub_process = 'YOUR_SUB_PROCESS' AND t.test_name = 'YOUR_TEST_NAME'
   AND ABS(t.result - s.mu) > 3 * s.sigma
 ORDER BY ABS(t.result - s.mu) DESC;
 ```
@@ -566,10 +579,11 @@ SELECT
     ROUND(AVG(td.result), 4) AS mean,
     ROUND(STDDEV(td.result), 4) AS sigma
 FROM test_data_final td
--- part_id ではなく die_key（CP=座標 / FT=バーコード→PART_ID→合成ID）で結合する
-JOIN parts_final p ON td.lot_id = p.lot_id AND td.wafer_id = p.wafer_id
-                  AND td.die_key = p.die_key
-WHERE td.lot_id = 'YOUR_LOT_ID' AND td.test_name = 'YOUR_TEST_NAME'
+-- part_id ではなく die_key（CP=座標 / FT=eFuse chip_key）で結合する。sub_process もキー
+JOIN parts_final p ON td.product = p.product AND td.test_category = p.test_category
+                  AND td.sub_process = p.sub_process AND td.lot_id = p.lot_id
+                  AND td.wafer_id = p.wafer_id AND td.die_key = p.die_key
+WHERE td.lot_id = 'YOUR_LOT_ID' AND td.sub_process = 'YOUR_SUB_PROCESS' AND td.test_name = 'YOUR_TEST_NAME'
 GROUP BY p.site_num, td.test_name
 ORDER BY p.site_num;
 ```
@@ -578,12 +592,12 @@ ORDER BY p.site_num;
 
 ```sql
 WITH pivoted AS (
-    SELECT part_id,
+    SELECT wafer_id, die_key,
            MAX(CASE WHEN test_name = 'TEST_A' THEN result END) AS a,
            MAX(CASE WHEN test_name = 'TEST_B' THEN result END) AS b
     FROM test_data_final
-    WHERE lot_id = 'YOUR_LOT_ID' AND test_name IN ('TEST_A', 'TEST_B')
-    GROUP BY part_id
+    WHERE lot_id = 'YOUR_LOT_ID' AND sub_process = 'YOUR_SUB_PROCESS' AND test_name IN ('TEST_A', 'TEST_B')
+    GROUP BY wafer_id, die_key
 )
 SELECT
     COUNT(*)                       AS n,
@@ -602,7 +616,7 @@ SELECT pin_num, pin_name, units,
        ROUND(AVG(result), 4)    AS mean,
        ROUND(STDDEV(result), 4) AS sigma
 FROM test_data_final
-WHERE lot_id = 'YOUR_LOT_ID' AND rec_type = 'MPR'
+WHERE lot_id = 'YOUR_LOT_ID' AND sub_process = 'YOUR_SUB_PROCESS' AND rec_type = 'MPR'
   AND test_name = 'YOUR_TEST_NAME'
 GROUP BY pin_num, pin_name, units
 ORDER BY pin_num;
@@ -615,27 +629,30 @@ ORDER BY pin_num;
 ### 6-1. リテスト回数の分布（最終 retest_num 別ダイ数）
 
 ```sql
-SELECT retest_num, COUNT(*) AS dies
+SELECT sub_process, retest_num, COUNT(*) AS dies
 FROM parts_final
 WHERE lot_id = 'YOUR_LOT_ID'
-GROUP BY retest_num
-ORDER BY retest_num;
+GROUP BY sub_process, retest_num
+ORDER BY sub_process, retest_num;
 ```
 
 ### 6-2. リテストによる歩留り改善量（初回 vs 最終）
 
-`retest_num = 0`（初回）と最終（parts_final）の合否を比較。
+`retest_num = 0`（初回の run）と最終（`parts_final`）の合否を比較。
 
 ```sql
 WITH first AS (
-    SELECT lot_id, wafer_id, x_coord, y_coord, part_txt, passed AS passed0
+    SELECT wafer_id, x_coord, y_coord, passed AS passed0
     FROM parts
-    WHERE lot_id = 'YOUR_LOT_ID' AND retest_num = 0
+    WHERE lot_id = 'YOUR_LOT_ID' AND sub_process = 'YOUR_SUB_PROCESS' AND retest_num = 0
+    -- 同じファイル内で同じダイが複数回あれば後ろの part（part_seq 大）を採る
+    QUALIFY ROW_NUMBER() OVER (PARTITION BY wafer_id, x_coord, y_coord
+                               ORDER BY part_seq DESC) = 1
 ),
 final AS (
-    SELECT lot_id, wafer_id, x_coord, y_coord, part_txt, passed AS passed_final
+    SELECT wafer_id, x_coord, y_coord, passed AS passed_final
     FROM parts_final
-    WHERE lot_id = 'YOUR_LOT_ID'
+    WHERE lot_id = 'YOUR_LOT_ID' AND sub_process = 'YOUR_SUB_PROCESS'
 )
 SELECT
     COUNT(*)                                                   AS dies,
@@ -643,19 +660,21 @@ SELECT
     SUM(CASE WHEN passed_final THEN 1 ELSE 0 END)              AS good_final,
     SUM(CASE WHEN NOT passed0 AND passed_final THEN 1 ELSE 0 END) AS recovered_by_retest
 FROM first f
-JOIN final fn USING (lot_id, wafer_id, x_coord, y_coord, part_txt);
+JOIN final fn USING (wafer_id, x_coord, y_coord);
 ```
 
 > [!NOTE]
-> FT は `wafer_id` / 座標が空のため、結合キーは実質 `part_txt` で効きます。
-> CP は `wafer_id` + 座標で die を一意化します。
+> これは CP 用（`wafer_id` + 座標で die を一意化）。FT は `wafer_id` / 座標が空で、
+> パッケージの識別は eFuse の `chip_key` です（`part_txt` / `part_serial` は識別に使えません）。
+> FT の結合は `*_final` の `die_key` 列を使ってください。生の `parts` には `die_key` が
+> 無いので、`mounts.die_key_expr()` と同じ式が必要です。
 
 ### 6-3. リテストでも Fail のままのダイ（恒久不良）
 
 ```sql
-SELECT wafer_id, part_txt, x_coord, y_coord, hard_bin, soft_bin, retest_num
+SELECT wafer_id, die_key, x_coord, y_coord, hard_bin, soft_bin, retest_num
 FROM parts_final
-WHERE lot_id = 'YOUR_LOT_ID' AND passed = FALSE AND retest_num > 0
+WHERE lot_id = 'YOUR_LOT_ID' AND sub_process = 'YOUR_SUB_PROCESS' AND passed = FALSE AND retest_num > 0
 ORDER BY wafer_id, y_coord, x_coord;
 ```
 
@@ -675,7 +694,9 @@ SELECT
     ROUND(100.0 * SUM(CASE WHEN p.passed THEN 1 ELSE 0 END)
           / NULLIF(COUNT(*), 0), 2) AS yield_pct
 FROM lots l
-JOIN parts_final p ON l.lot_id = p.lot_id
+JOIN parts_final p
+  ON  p.product = l.product AND p.test_category = l.test_category
+  AND p.sub_process = l.sub_process AND p.lot_id = l.lot_id
 WHERE l.product = 'YOUR_PRODUCT'
 GROUP BY test_date, l.product, l.sub_process
 ORDER BY test_date;
@@ -692,7 +713,9 @@ SELECT
     ROUND(100.0 * SUM(CASE WHEN p.passed THEN 1 ELSE 0 END)
           / NULLIF(COUNT(*), 0), 2) AS yield_pct
 FROM lots l
-JOIN parts_final p ON l.lot_id = p.lot_id
+JOIN parts_final p
+  ON  p.product = l.product AND p.test_category = l.test_category
+  AND p.sub_process = l.sub_process AND p.lot_id = l.lot_id
 GROUP BY l.tester_type, l.operator
 ORDER BY yield_pct;
 ```
@@ -710,41 +733,37 @@ ORDER BY yield_pct;
 ```sql
 WITH fail AS (
     SELECT p.wafer_id, p.hard_bin, p.soft_bin, td.test_num, td.test_name,
-           -- ダイ識別は mounts.py の _DEDUP_UNIT と同じ（CP=ウェーハ+座標 / FT=part_txt）。
-           -- part_id はリテストファイルで振り直される可能性があるため使わない
-           CONCAT_WS('|', p.wafer_id, p.x_coord, p.y_coord,
-                     CASE WHEN p.x_coord = -32768 AND p.y_coord = -32768
-                          THEN p.part_txt ELSE '' END) AS die_key
+           -- ダイ識別は die_key（mounts.py。CP=座標 / FT=eFuse chip_key）+ wafer_id。
+           -- part_id はリテストファイルで振り直されるため使わない
+           CONCAT_WS('|', p.wafer_id, p.die_key) AS die_uid
     FROM parts_final p
     JOIN test_data_final td
-      ON  td.lot_id   = p.lot_id
-      AND td.wafer_id = p.wafer_id
-      AND td.x_coord  = p.x_coord
-      AND td.y_coord  = p.y_coord
-      AND (CASE WHEN p.x_coord  = -32768 AND p.y_coord  = -32768
-                THEN p.part_txt  ELSE '' END)
-        = (CASE WHEN td.x_coord = -32768 AND td.y_coord = -32768
-                THEN td.part_txt ELSE '' END)
-    WHERE p.lot_id = 'YOUR_LOT_ID'
+      ON  td.product       = p.product
+      AND td.test_category = p.test_category
+      AND td.sub_process   = p.sub_process
+      AND td.lot_id        = p.lot_id
+      AND td.wafer_id      = p.wafer_id
+      AND td.die_key       = p.die_key
+    WHERE p.lot_id = 'YOUR_LOT_ID' AND p.sub_process = 'YOUR_SUB_PROCESS'
       AND p.passed = FALSE
       AND td.passed = 'F'
 ),
 die AS (   -- ダイごとの fail テスト数
-    SELECT die_key, COUNT(DISTINCT test_num) AS n_fail_tests
-    FROM fail GROUP BY die_key
+    SELECT die_uid, COUNT(DISTINCT test_num) AS n_fail_tests
+    FROM fail GROUP BY die_uid
 ),
 bin_total AS (   -- ウェーハ × bin ごとの不良ダイ数（シェアの分母）
-    SELECT wafer_id, soft_bin, COUNT(DISTINCT die_key) AS bin_fail_dies
+    SELECT wafer_id, soft_bin, COUNT(DISTINCT die_uid) AS bin_fail_dies
     FROM fail GROUP BY wafer_id, soft_bin
 )
 SELECT
     f.wafer_id, f.hard_bin, f.soft_bin, f.test_num, f.test_name,
-    COUNT(DISTINCT f.die_key)                                   AS fail_dies,
-    COUNT(DISTINCT f.die_key) FILTER (WHERE d.n_fail_tests = 1) AS sole_fail_dies,
-    ROUND(100.0 * COUNT(DISTINCT f.die_key)
+    COUNT(DISTINCT f.die_uid)                                   AS fail_dies,
+    COUNT(DISTINCT f.die_uid) FILTER (WHERE d.n_fail_tests = 1) AS sole_fail_dies,
+    ROUND(100.0 * COUNT(DISTINCT f.die_uid)
           / ANY_VALUE(b.bin_fail_dies), 1)                      AS pct_of_bin
 FROM fail f
-JOIN die d USING (die_key)
+JOIN die d USING (die_uid)
 JOIN bin_total b ON b.wafer_id = f.wafer_id AND b.soft_bin = f.soft_bin
 GROUP BY f.wafer_id, f.hard_bin, f.soft_bin, f.test_num, f.test_name
 ORDER BY f.wafer_id, f.soft_bin, fail_dies DESC;
@@ -767,21 +786,19 @@ ORDER BY f.wafer_id, f.soft_bin, fail_dies DESC;
 
 ```sql
 SELECT
-    td.lot_id, td.wafer_id, td.x_coord, td.y_coord, td.part_txt,
+    td.lot_id, td.sub_process, td.wafer_id, td.x_coord, td.y_coord, td.die_key,
     p.hard_bin, p.soft_bin, p.passed AS die_passed,
     td.test_num, td.test_name, td.rec_type, td.exec_seq,
     td.result, td.lo_limit, td.hi_limit, td.units
 FROM test_data_final td
 LEFT JOIN parts_final p
-  ON  p.lot_id   = td.lot_id
-  AND p.wafer_id = td.wafer_id
-  AND p.x_coord  = td.x_coord
-  AND p.y_coord  = td.y_coord
-  AND (CASE WHEN td.x_coord = -32768 AND td.y_coord = -32768
-            THEN td.part_txt ELSE '' END)
-    = (CASE WHEN p.x_coord  = -32768 AND p.y_coord  = -32768
-            THEN p.part_txt  ELSE '' END)
-WHERE td.lot_id = 'YOUR_LOT_ID'
+  ON  p.product       = td.product
+  AND p.test_category = td.test_category
+  AND p.sub_process   = td.sub_process
+  AND p.lot_id        = td.lot_id
+  AND p.wafer_id      = td.wafer_id
+  AND p.die_key       = td.die_key
+WHERE td.lot_id = 'YOUR_LOT_ID' AND td.sub_process = 'YOUR_SUB_PROCESS'
   AND td.passed = 'F'
 ORDER BY p.soft_bin, td.wafer_id, td.x_coord, td.y_coord, td.test_num, td.exec_seq;
 ```
@@ -798,10 +815,11 @@ ORDER BY p.soft_bin, td.wafer_id, td.x_coord, td.y_coord, td.test_num, td.exec_s
   絞らないでください（8-2 は Cpk 計算用なので絞っていますが、fail 解析では別です）。
 - **`exec_seq`** — ループ計測で同一ダイ・同一 `test_num` の複数行を区別できます。
 
-> **リテスト前の fail も見たい場合**: `test_data_final` は最新 run のみです。過去 run で
-> 落ちたが再測定で通ったテストは含まれません。全 run を見るには `test_data_final` を
-> 生の `test_data` に置き換え、出力に `td.retest_flag`（0 = 最新 run / 1 以上 = 過去 run）
-> を追加してください。
+> **リテスト前の fail も見たい場合**: `test_data_final` は各ダイの最新の出現（run × part）の
+> 行だけです。過去 run で落ちたテストや、リテストで測らなかったテストは含まれません。全 run を見るには `test_data_final` を
+> 生の `test_data` に置き換え、出力に `td.retest_flag`（0 = 最新 / 1 以上 = 過去）
+> を追加してください（生の `test_data` には `die_key` 列が無いので、`p.die_key` との結合は
+> `mounts.die_key_expr()` の式で自前に作るか、CP なら座標で結合します）。
 
 ### 7-5. 複数ロットの歩留り比較
 
@@ -813,8 +831,11 @@ SELECT
     ROUND(100.0 * SUM(CASE WHEN p.passed THEN 1 ELSE 0 END)
           / NULLIF(COUNT(*), 0), 2) AS yield_pct
 FROM lots l
-JOIN parts_final p ON l.lot_id = p.lot_id
+JOIN parts_final p
+  ON  p.product = l.product AND p.test_category = l.test_category
+  AND p.sub_process = l.sub_process AND p.lot_id = l.lot_id
 WHERE l.lot_id IN ('LOT_A', 'LOT_B', 'LOT_C')
+  AND l.sub_process = 'YOUR_SUB_PROCESS'
 GROUP BY l.lot_id, l.job_rev
 ORDER BY yield_pct DESC;
 ```
@@ -839,7 +860,7 @@ SELECT
         (AVG(result) - lo_limit) / (3 * STDDEV(result))
     ), 3) AS cpk
 FROM test_data_final
-WHERE lot_id = 'YOUR_LOT_ID'
+WHERE lot_id = 'YOUR_LOT_ID' AND sub_process = 'YOUR_SUB_PROCESS'
   AND lo_limit IS NOT NULL AND hi_limit IS NOT NULL
   AND rec_type IN ('PTR', 'MPR')
 GROUP BY test_num, test_name, units, lo_limit, hi_limit
@@ -1641,9 +1662,9 @@ WITH params AS (
 
 -- ① プログラム指定をリストへ開く。'A, B' → ['A','B']。NULL は NULL のまま
 job_filter AS (
-    SELECT list_transform(string_split(job_names, ','), x -> TRIM(x)) AS job_names,
-           list_transform(string_split(job_revs,  ','), x -> TRIM(x)) AS job_revs,
-           list_transform(string_split(job_pairs, ','), x -> TRIM(x)) AS job_pairs
+    SELECT list_transform(string_split(job_names, ','), lambda x: TRIM(x)) AS job_names,
+           list_transform(string_split(job_revs,  ','), lambda x: TRIM(x)) AS job_revs,
+           list_transform(string_split(job_pairs, ','), lambda x: TRIM(x)) AS job_pairs
     FROM params
 ),
 
@@ -1781,9 +1802,9 @@ WITH params AS (
 
 -- ① プログラム指定をリストへ開く（8-2-2 と同一）
 job_filter AS (
-    SELECT list_transform(string_split(job_names, ','), x -> TRIM(x)) AS job_names,
-           list_transform(string_split(job_revs,  ','), x -> TRIM(x)) AS job_revs,
-           list_transform(string_split(job_pairs, ','), x -> TRIM(x)) AS job_pairs
+    SELECT list_transform(string_split(job_names, ','), lambda x: TRIM(x)) AS job_names,
+           list_transform(string_split(job_revs,  ','), lambda x: TRIM(x)) AS job_revs,
+           list_transform(string_split(job_pairs, ','), lambda x: TRIM(x)) AS job_pairs
     FROM params
 ),
 
@@ -2387,8 +2408,9 @@ COPY (/* ↑ 8-5 のクエリをそのまま貼る */) TO 'check.csv' (HEADER, D
 **`limits_changed` が何を比べているか**
 
 リミット・テスト名・単位は、`parser.py` が **1 ファイルにつき最初に出てきた
-PTR / MPR から 1 回だけ**登録し、`storage.py` がその 1 個をそのファイルの全行へ
-コピーして書きます。つまり **1 ファイル内では `lo_limit` / `hi_limit` は必ず定数**で、
+PTR / MPR から 1 回だけ**登録し（OPT_FLAG で「limit なし/無効」ならその limit は NULL に
+して、後のレコードに有効な値があればそれで補完）、`storage.py` がその 1 個をそのファイルの
+全行へコピーして書きます。つまり **1 ファイル内では `lo_limit` / `hi_limit` は必ず定数**で、
 8-2 の
 
 ```sql
@@ -2575,9 +2597,9 @@ WITH params AS (
 
 -- ⓪-1 プログラム指定をリストへ開く（8-2-2 と同一）。'A, B' → ['A','B']
 job_filter AS (
-    SELECT list_transform(string_split(job_names, ','), x -> TRIM(x)) AS job_names,
-           list_transform(string_split(job_revs,  ','), x -> TRIM(x)) AS job_revs,
-           list_transform(string_split(job_pairs, ','), x -> TRIM(x)) AS job_pairs
+    SELECT list_transform(string_split(job_names, ','), lambda x: TRIM(x)) AS job_names,
+           list_transform(string_split(job_revs,  ','), lambda x: TRIM(x)) AS job_revs,
+           list_transform(string_split(job_pairs, ','), lambda x: TRIM(x)) AS job_pairs
     FROM params
 ),
 
@@ -2703,38 +2725,73 @@ ORDER BY last_seen DESC;
 ## 9. ChipID トレーサビリティ（EN-S0-CHIPID_R / TSMC）
 
 FT の chiplet 製品は 1 パッケージに 2 die を含み、各 die の出自（fab / lot /
-wafer / x / y）は GDR の `EN-S0-CHIPID_R`（**5 文字目は数字ゼロ**）をデコードした
-`chipid` テーブルに入ります（**FT のみ生成**）。
+wafer / x / y）は GDR の `EN-S0-CHIPID_R`（**5 文字目は数字ゼロ**）をデコードして
+**`parts` の列**（`c0_*` = C0 die、`c1_*` = C1 die）に入ります。別テーブル・別ビュー
+（`chipid` / `chipid_final` / `chipid_package`）はありません。リテストの解決は
+`parts_final` がそのまま行います。
 
-- パッケージの一意キー = `part_txt`（2D バーコード）
-- DUT 内の die 区別 = `chip_occurrence_index`（0 / 1）
-- die の恒久 ID = `efuse_raw`（`chipid_final` はこれで最新リテストのみに重複排除）
+- **パッケージの identity = `chip_key`**（`"EF|" + 16 桁 16 進`。C0 の eFuse、無ければ C1。
+  eFuse が全 0 / 全 1 の場合や、C0/C1 が複数値の場合は作らない）。`part_txt`（2D
+  バーコード）・`part_serial`（PRR.PART_ID）は **identity に使わない**（表示用ラベル）。
+  `chip_key` の無い FT パッケージはリテスト間で重ならず、各 run が `parts_final` /
+  `test_data_final` に残る。
+- C0 / C1 の区別は CHIP ID の直後（最大 64 GDR 先まで）のテストタイム GDR
+  （`CHIPID_NRD0_C0:...` / `C1`）の名前で決まる。GDR の出現順や tester の site とは無関係。
+- 列: `c{0,1}_chipid_hex` / `_origin_fab` / `_origin_lot` / `_origin_wafer` / `_origin_x` /
+  `_origin_y`。`chip_status` = NULL（CHIP ID 無し）/ `complete` / `ambiguous`（C0 または C1 が
+  複数。最初の候補の値が入る）/ `missing C0` / `missing C1` / `missing C0, C1`。
+  `chip_warnings` は `'; '` 区切り（デコード不能・C0 と C1 が同値・suite 対応が取れない等）。
+  デコードできなかった die の `c*_chipid_hex` / `c*_origin_*` は NULL。
+- TSMC 以外の fab は `*_origin_lot` が NULL（lot デコードは TSMC1/TSMC2 のみ）。
+
+C0 / C1 を縦持ちにしたいクエリが多いので、まず一時ビューを作っておくと以降が簡単です
+（`parts_final` の上なのでリテスト解決済み。CHIP ID の無い行は含まない）。
+
+```sql
+CREATE OR REPLACE TEMP VIEW chip_dies AS
+SELECT product, test_category, sub_process, lot_id, wafer_id, die_key,
+       part_id, part_txt, retest_num, passed, chip_status, 'C0' AS die_id,
+       c0_origin_fab AS origin_fab, c0_origin_lot AS origin_lot,
+       c0_origin_wafer AS origin_wafer, c0_origin_x AS origin_x, c0_origin_y AS origin_y
+FROM parts_final WHERE c0_chipid_hex IS NOT NULL
+UNION ALL
+SELECT product, test_category, sub_process, lot_id, wafer_id, die_key,
+       part_id, part_txt, retest_num, passed, chip_status, 'C1',
+       c1_origin_fab, c1_origin_lot, c1_origin_wafer, c1_origin_x, c1_origin_y
+FROM parts_final WHERE c1_chipid_hex IS NOT NULL;
+```
 
 ### 9-1. パッケージ → 2 die の CP 出自を一覧
 
 ```sql
-SELECT part_txt, chip_occurrence_index,
-       origin_fab, origin_lot, origin_wafer, origin_x, origin_y
-FROM chipid_final
-WHERE lot_id = 'YOUR_FT_LOT'
-ORDER BY part_txt, chip_occurrence_index;
+SELECT part_txt, part_id, chip_status,
+       c0_origin_fab, c0_origin_lot, c0_origin_wafer, c0_origin_x, c0_origin_y,
+       c1_origin_fab, c1_origin_lot, c1_origin_wafer, c1_origin_x, c1_origin_y
+FROM parts_final
+WHERE lot_id = 'YOUR_FT_LOT' AND sub_process = 'YOUR_SUB_PROCESS'
+  AND chip_status IS NOT NULL
+ORDER BY part_txt, part_id;
 ```
 
 ### 9-2. 単一バーコードから全 die をたどる（現品トレース）
 
+最新の測定は `parts_final`。リテスト履歴ごと見たいときは `parts`（`retest_flag` が
+0 = 最新）を引きます。バーコードは検索のラベルとしてだけ使います。
+
 ```sql
-SELECT chip_occurrence_index, origin_fab, origin_lot,
-       origin_wafer, origin_x, origin_y, efuse_raw
-FROM chipid_final
+SELECT retest_num, retest_flag, chip_status, chip_warnings,
+       c0_origin_fab, c0_origin_lot, c0_origin_wafer, c0_origin_x, c0_origin_y,
+       c1_origin_fab, c1_origin_lot, c1_origin_wafer, c1_origin_x, c1_origin_y
+FROM parts
 WHERE part_txt = 'YOUR_2D_BARCODE'
-ORDER BY chip_occurrence_index;
+ORDER BY retest_num;
 ```
 
 ### 9-3. CP 出自（ロット / ウェハ）から FT パッケージを逆引き
 
 ```sql
-SELECT origin_wafer, origin_x, origin_y, part_txt, chip_occurrence_index
-FROM chipid_final
+SELECT origin_wafer, origin_x, origin_y, part_txt, die_id
+FROM chip_dies
 WHERE origin_lot = 'E6B156' AND origin_wafer = 11
 ORDER BY origin_x, origin_y;
 ```
@@ -2743,15 +2800,15 @@ ORDER BY origin_x, origin_y;
 
 ```sql
 SELECT
-    c.origin_fab, c.origin_lot, c.origin_wafer,
+    origin_fab, origin_lot, origin_wafer,
     COUNT(*)                                   AS dies,
-    SUM(CASE WHEN p.passed THEN 0 ELSE 1 END)  AS fail_dies,
-    ROUND(100.0 * SUM(CASE WHEN p.passed THEN 0 ELSE 1 END)
+    SUM(CASE WHEN passed THEN 0 ELSE 1 END)    AS fail_dies,
+    ROUND(100.0 * SUM(CASE WHEN passed THEN 0 ELSE 1 END)
           / COUNT(*), 2)                       AS fail_pct
-FROM chipid_final c
-JOIN parts_final p ON p.lot_id = c.lot_id AND p.part_txt = c.part_txt
-WHERE c.lot_id = 'YOUR_FT_LOT' AND c.valid
-GROUP BY c.origin_fab, c.origin_lot, c.origin_wafer
+FROM chip_dies
+WHERE lot_id = 'YOUR_FT_LOT' AND sub_process = 'YOUR_SUB_PROCESS'
+  AND passed IS NOT NULL
+GROUP BY origin_fab, origin_lot, origin_wafer
 ORDER BY fail_pct DESC;
 ```
 
@@ -2759,62 +2816,52 @@ ORDER BY fail_pct DESC;
 
 ```sql
 SELECT
-    c.origin_lot, c.origin_wafer, c.origin_x, c.origin_y,
+    origin_lot, origin_wafer, origin_x, origin_y,
     COUNT(*)                                  AS dies,
-    SUM(CASE WHEN p.passed THEN 0 ELSE 1 END) AS fails
-FROM chipid_final c
-JOIN parts_final p ON p.lot_id = c.lot_id AND p.part_txt = c.part_txt
-WHERE c.lot_id = 'YOUR_FT_LOT' AND c.valid
-GROUP BY c.origin_lot, c.origin_wafer, c.origin_x, c.origin_y
+    SUM(CASE WHEN passed THEN 0 ELSE 1 END)   AS fails
+FROM chip_dies
+WHERE lot_id = 'YOUR_FT_LOT' AND sub_process = 'YOUR_SUB_PROCESS'
+  AND passed IS NOT NULL
+GROUP BY origin_lot, origin_wafer, origin_x, origin_y
 ORDER BY fails DESC;
 ```
 
 ### 9-6. 不良パッケージの 2 die が「どの CP ウェハの組み合わせ」か
 
 ```sql
-WITH d AS (
-    SELECT c.part_txt, c.chip_occurrence_index,
-           c.origin_lot || ':W' || c.origin_wafer AS origin, p.passed
-    FROM chipid_final c
-    JOIN parts_final p ON p.lot_id = c.lot_id AND p.part_txt = c.part_txt
-    WHERE c.lot_id = 'YOUR_FT_LOT' AND c.valid
-)
 SELECT
-    MAX(CASE WHEN chip_occurrence_index = 0 THEN origin END) AS die0_origin,
-    MAX(CASE WHEN chip_occurrence_index = 1 THEN origin END) AS die1_origin,
-    COUNT(*) FILTER (WHERE NOT passed) AS fail_count
-FROM d
-GROUP BY part_txt
-HAVING fail_count > 0;
+    c0_origin_lot || ':W' || c0_origin_wafer AS c0_origin,
+    c1_origin_lot || ':W' || c1_origin_wafer AS c1_origin,
+    COUNT(*)                                  AS fail_count
+FROM parts_final
+WHERE lot_id = 'YOUR_FT_LOT' AND sub_process = 'YOUR_SUB_PROCESS'
+  AND chip_status = 'complete' AND passed = FALSE
+GROUP BY c0_origin, c1_origin
+ORDER BY fail_count DESC;
 ```
 
 ### 9-7. fab 組み合わせ別のパッケージ歩留り（TSMC1+2 vs 同一 fab）
 
 ```sql
-WITH pkg AS (
-    SELECT c.part_txt,
-           MIN(c.origin_fab) || '+' || MAX(c.origin_fab) AS fab_combo,
-           BOOL_AND(p.passed)                            AS pkg_pass
-    FROM chipid_final c
-    JOIN parts_final p ON p.lot_id = c.lot_id AND p.part_txt = c.part_txt
-    WHERE c.lot_id = 'YOUR_FT_LOT' AND c.valid
-    GROUP BY c.part_txt
-)
-SELECT fab_combo,
-       COUNT(*)                                  AS packages,
-       SUM(CASE WHEN pkg_pass THEN 1 ELSE 0 END) AS good,
-       ROUND(100.0 * SUM(CASE WHEN pkg_pass THEN 1 ELSE 0 END)
-             / COUNT(*), 2)                       AS yield_pct
-FROM pkg
+SELECT
+    LEAST(c0_origin_fab, c1_origin_fab) || '+' || GREATEST(c0_origin_fab, c1_origin_fab) AS fab_combo,
+    COUNT(*)                                  AS packages,
+    SUM(CASE WHEN passed THEN 1 ELSE 0 END)   AS good,
+    ROUND(100.0 * SUM(CASE WHEN passed THEN 1 ELSE 0 END)
+          / COUNT(*), 2)                      AS yield_pct
+FROM parts_final
+WHERE lot_id = 'YOUR_FT_LOT' AND sub_process = 'YOUR_SUB_PROCESS'
+  AND chip_status = 'complete' AND passed IS NOT NULL
 GROUP BY fab_combo
 ORDER BY yield_pct;
 ```
 
 ### 9-8. CP 工程の die を FT 結果と突合（工程横断トレース）
 
-FT の `chipid`（出自 lot/wafer/x/y）を、その CP ロットの `parts` に結合します。
+FT の出自（lot/wafer/x/y）を、その CP ロットの `parts_final` に結合します。
 **CP の `wafer_id` 表記**（例 `W11` / `11`）が `origin_wafer`（整数）と一致するよう
-`LPAD` 等で整形してください（実データの命名規則に合わせる）。
+`LPAD` 等で整形してください（実データの命名規則に合わせる）。CP は CP1 / CP2 など
+複数の sub_process があり得るので、突き合わせる工程（`YOUR_CP_SUB_PROCESS`）を決めます。
 
 ```sql
 SELECT
@@ -2823,46 +2870,54 @@ SELECT
     c.origin_lot       AS cp_lot,
     c.origin_wafer, c.origin_x, c.origin_y,
     cp.passed          AS cp_passed,   -- CP 工程での合否
-    ft.passed          AS ft_passed    -- FT 工程での合否
-FROM chipid_final c
-JOIN parts_final ft
-  ON ft.lot_id = c.lot_id AND ft.part_txt = c.part_txt
-LEFT JOIN parts_final cp
-  ON cp.lot_id  = c.origin_lot
- AND cp.wafer_id = 'W' || LPAD(CAST(c.origin_wafer AS VARCHAR), 2, '0')
- AND cp.x_coord = c.origin_x
- AND cp.y_coord = c.origin_y
-WHERE c.lot_id = 'YOUR_FT_LOT' AND c.valid
-  AND cp.passed = TRUE AND ft.passed = FALSE   -- CP 良 → FT 不良の die
+    c.passed           AS ft_passed    -- FT 工程での合否
+FROM chip_dies c
+JOIN parts_final cp
+  ON cp.test_category = 'CP'
+ AND cp.sub_process   = 'YOUR_CP_SUB_PROCESS'
+ AND cp.lot_id        = c.origin_lot
+ AND cp.wafer_id      = 'W' || LPAD(CAST(c.origin_wafer AS VARCHAR), 2, '0')
+ AND cp.x_coord       = c.origin_x
+ AND cp.y_coord       = c.origin_y
+WHERE c.lot_id = 'YOUR_FT_LOT' AND c.sub_process = 'YOUR_SUB_PROCESS'
+  AND cp.passed = TRUE AND c.passed = FALSE   -- CP 良 → FT 不良の die
 ORDER BY c.origin_lot, c.origin_wafer;
 ```
 
-### 9-9. デコード健全性チェック（取りこぼし / 非対応 fab）
+### 9-9. デコード健全性チェック（取りこぼし / 非対応 fab / die 対応）
 
 ```sql
-SELECT
-    COUNT(*)                                   AS total_chipids,
-    SUM(CASE WHEN valid THEN 0 ELSE 1 END)     AS invalid_efuse,
-    SUM(CASE WHEN origin_fab = 'UNSUPPORTED' THEN 1 ELSE 0 END) AS unsupported_fab
-FROM chipid
-WHERE lot_id = 'YOUR_FT_LOT';
+-- パッケージ単位: complete 以外（missing C0/C1・ambiguous）を洗い出す。
+-- NULL は CHIP ID 自体が無いパッケージ。
+SELECT chip_status, COUNT(*) AS packages
+FROM parts_final
+WHERE lot_id = 'YOUR_FT_LOT' AND sub_process = 'YOUR_SUB_PROCESS'
+GROUP BY chip_status
+ORDER BY packages DESC;
+
+-- 警告つきの行（デコード不能 / 非対応 fab / suite 対応なし 等）
+SELECT part_txt, chip_status, chip_warnings
+FROM parts_final
+WHERE lot_id = 'YOUR_FT_LOT' AND sub_process = 'YOUR_SUB_PROCESS'
+  AND chip_warnings <> '';
 ```
 
-> **注**: `chipid` は FT のみ。CP では die 出自＝プローブ座標（`parts` の
-> `wafer_id` / `x_coord` / `y_coord`）で取得できるため生成されません。
+> **注**: CP では die 出自＝プローブ座標（`parts` の `wafer_id` / `x_coord` / `y_coord`）で
+> 取得できるので CHIP ID 列は通常使いません。候補ごとの詳細（どの GDR がどの suite に
+> 対応したか）は `scripts/diag_chipid.py`。
 
 ### 9-10. FT 測定値 × CP 出自座標（分布・ウェーハマップ用の生データ）
 
 FT には座標がない（`wafer_id = ''` / `x_coord = y_coord = -32768`）ので、xy は
 **ChipID からデコードした CP 側の出自座標**（`origin_wafer` / `origin_x` /
 `origin_y`）を使います。特定のテスト項目の測定値を die 位置つきで取り出し、
-値の分布やウェーハ面の傾向を見るための生データです。
+値の分布やウェーハ面の傾向を見るための生データです。上の `chip_dies` ビューを使います。
 
 > [!WARNING]
 > **chiplet 製品は 1 パッケージ = 2 die** なので、FT の測定値 1 つに対して出自座標が
-> 2 行出ます（`chip_occurrence_index` = 0 / 1）。測定値はパッケージ単位なので、
+> 2 行出ます（`die_id` = C0 / C1）。測定値はパッケージ単位なので、
 > どちらの die のものかは原理的に決まりません。
-> **値のヒストグラムを描くときは `chip_occurrence_index = 0` に絞ってください**
+> **値のヒストグラムを描くときは `die_id = 'C0'` に絞ってください**
 > （絞らないと全数が 2 倍に二重計上されます）。ウェーハマップに載せる場合は
 > 両方出したままで構いません（同じ値が 2 箇所にプロットされます）。
 
@@ -2878,7 +2933,7 @@ WITH params AS (
 SELECT
     td.lot_id,
     td.part_txt,                       -- パッケージ（2D バーコード）
-    c.chip_occurrence_index,           -- パッケージ内の die 番号（0 / 1）
+    c.die_id,                          -- C0 / C1
     c.origin_fab,
     c.origin_lot,
     c.origin_wafer,
@@ -2893,9 +2948,13 @@ SELECT
     td.hi_limit,
     td.passed AS test_passed
 FROM test_data_final td
-JOIN chipid_final c
-  ON  c.lot_id   = td.lot_id
-  AND c.part_txt = td.part_txt
+JOIN chip_dies c
+  ON  c.product       = td.product
+  AND c.test_category = td.test_category
+  AND c.sub_process   = td.sub_process
+  AND c.lot_id        = td.lot_id
+  AND c.wafer_id      = td.wafer_id
+  AND c.die_key       = td.die_key
 CROSS JOIN params pa
 WHERE td.product       = pa.product
   AND td.test_category = 'FT'
@@ -2903,16 +2962,14 @@ WHERE td.product       = pa.product
   AND (pa.lot_id IS NULL OR td.lot_id = pa.lot_id)
   AND (pa.test_name_like IS NULL OR td.test_name ILIKE pa.test_name_like)
   AND td.rec_type IN ('PTR', 'MPR')
-  AND td.part_txt <> ''                -- 空バーコードは die を特定できない
   AND td.result IS NOT NULL AND isfinite(td.result)
-  AND c.valid                          -- デコードできた die のみ
 ORDER BY td.test_num, c.origin_lot, c.origin_wafer, c.origin_x, c.origin_y;
 ```
 
 **ウェーハ面の分布に落とす**
 
 出自ウェーハ × 座標ごとに集約すると、そのままウェーハマップの素データになります。
-リテストは `test_data_final` / `chipid_final` の時点で最新のみに絞られていますが、
+リテストは `test_data_final` / `parts_final` の時点で最新の測定のみに絞られていますが、
 **ループ計測**（1 test_num に複数回書かれる測定。`exec_seq` で区別）があると同じ
 die 位置に複数行残るため、平均を取っています。
 
@@ -2930,28 +2987,34 @@ ORDER BY origin_lot, origin_wafer, origin_y, origin_x;
 
 **注意点**
 
-- `c.valid` で**デコードできた die だけ**に絞っています。取りこぼしの量は 9-9 の
+- `chip_dies` は CHIP ID がデコードできた die だけです。取りこぼしの量は 9-9 の
   健全性チェックで確認してください。
 - 出自座標は CP のプローブ座標系です。CP 側の実測値と重ねたい場合は 9-8 を使うと
   同じ die の CP 結果に突き合わせられます。
-- `part_txt` が空のロット（2D バーコードを打っていない FT データ）はこのクエリでは
-  何も返りません。die の identity が取れないため原理的に紐づけ不可です。
+- CHIP ID の無いパッケージはこのクエリでは何も返りません。
+  `part_txt` の有無は関係ありません（バーコードは結合キーではない）。
 
 ---
 
 ## 注意事項
 
 - プレースホルダ（`YOUR_LOT_ID` 等）は実際の値に置き換えてください。
-- **歩留り・解析は `parts_final` / `test_data_final` / `chipid_final` を使用**。
+- **歩留り・解析は `parts_final` / `test_data_final` / `wafer_yield_final` を使用**。
   生テーブルはリテスト全試行を含み二重計上になります。
-- `wafers` は **CP 専用**で `part_count` / `good_count` は WRR 報告値（リテストは
-  部分母集団）。歩留りには使わず、時刻・`rtst_count` 等のメタ参照に留めます。
-- `parts.passed` は **BOOL** 型、`test_data.passed` は **STRING** 型（`'P'` / `'F'`）。
-- FT は `wafer_id` / 座標が無いため、`*_final` の重複排除は `part_txt`（2D バーコード）
-  を identity に使います。`chipid_final` は `efuse_raw`（die 恒久 ID）で排除。
-- `chipid` は **FT のみ**生成。CP には行がありません（出自はプローブ座標で代替）。
-- `test_data_final` の重複排除は ingest 時に付与された `retest_flag` によるもので
-  （`parts_final` / `chipid_final` は従来どおり `ROW_NUMBER()` ウィンドウ）、
-  (die, test, pin) につき複数行が残り得ます（ループ計測）。区別には `exec_seq`
-  を使ってください。`retest_flag IS NULL` の行（旧スキーマ）は
-  `test_data_final` から除外されます — 要再取り込み。
+- **sub_process を混ぜない**: 同じロットの CP1 / CP2（FT1 / FT2）は別の測定です。ロット単位の
+  集計・結合では `sub_process`（必要なら `product` / `test_category`）も GROUP BY / JOIN キーに
+  含めるか、`AND sub_process = '...'` で 1 つに絞ります。`wafer_yield_final` も
+  `(product, test_category, sub_process, lot_id, wafer_id)` ごとの行です。
+- `runs.part_count` / `good_count`（WRR 値）は **CP のみ**で、リテストは部分母集団。
+  歩留りには使わず、時刻・`rtst_count` 等のメタ参照に留めます。
+- `parts.passed` は **BOOL** 型（PART_FLG 0x10 = 合否無効のとき NULL）、`test_data.passed` は
+  **STRING** 型（`'P'` / `'F'`。未実行・合否無効は NULL）。`test_data.result` は TEST_FLG 0x02
+  のとき NULL、`lo_limit` / `hi_limit` は OPT_FLAG が「リミットなし」のとき NULL。
+- FT は `wafer_id` / 座標が無いため、`*_final` の重複排除は eFuse の `chip_key`
+  （C0、なければ C1）を identity に使います。eFuse の無いパッケージは run 固有の
+  キーになりリテスト間で重なりません。CHIP ID は `parts` の `c0_*` / `c1_*` 列です。
+- `parts_final` / `test_data_final` の重複排除は ingest 時に付与された `retest_flag` によるもの
+  （どちらも `WHERE retest_flag = 0`。run の MIR 開始時刻 → `retest_num` → ファイル内 PIR 順で
+  新しい測定が勝つ）。`test_data_final` では (die, test, pin) につき複数行が残り得ます（ループ計測）。
+  区別には `exec_seq` を使ってください。`retest_flag IS NULL` の行（旧スキーマ）は
+  `*_final` から除外されます — 要再取り込み。
