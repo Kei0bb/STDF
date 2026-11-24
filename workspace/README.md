@@ -12,6 +12,9 @@ git 追跡されません。**
   でコピーしてから使う。
 - `_sample_core_redundancy.py` — サンプル(git 管理、同じく直接編集しない): SCT101B CP1 の PSDN/HNS
   判定値をロット別トレンドにする。SQL はノートブック内、直近 3 か月。製品・工程・期間・除外ロット(`EXCLUDE_LOTS`)・PSDN のしきい値(`PSDN_LINES = [2, 4, 6]` で 3 本の線)・HNS のしきい値はセル冒頭の定数。query → ダイ表 → ロット表 → plotly グラフの順。冗長の割合はハードビン pass かつ冗長条件。割合の母数は gross die(ウェハーごとに max(probed, gross_die)。未設定の製品は probed)。
+- `_sample_ft_bin_reconcile.py` — サンプル(git 管理、同じく直接編集しない): FT ロットの **bin とサンプル数の突き合わせ**。
+  別 DB と母数 / fail bin 数が合わないとき用。ロット(× sub_process)を選ぶと、母数の内訳(全挿入 / 初回のみ / 最新=本 DB)→
+  bin × 数え方 → 再検で bin が変わったパッケージ → bin 別のサンプル一覧、の順に出る。eFuse 無し(再検で重ならない)の件数も出る。
 - `<自分の名前>/` — 個人のノートブック。**自分のフォルダ以外は編集しない。**
 - 値は SQL に埋め込まない(f-string 禁止)。`s.run(name, 変数=値)` か `s.q("... ?", [値])`。
 - パッケージは UI から入れない(`var/venv-notebook` にだけ入り、次の更新で消える)。

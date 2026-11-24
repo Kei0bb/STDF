@@ -39,5 +39,6 @@ workspace/*
 !workspace/query.py.example
 !workspace/_template.py
 !workspace/_sample_core_redundancy.py
+!workspace/_sample_ft_bin_reconcile.py
 
 *.duckdb
